@@ -43,6 +43,17 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 dias
 
 _session_serializer = URLSafeTimedSerializer(SESSION_SECRET_KEY, salt="session-v1")
 
+def _pode_editar_questao(prof: Optional[dict], questao_criador_id: Optional[int]) -> bool:
+    """Autor da questão OU admin podem editar. Questões legadas (sem dono) só admin edita."""
+    if not prof:
+        return False
+    if prof["is_admin"]:
+        return True
+    if questao_criador_id is None:
+        return False
+    return prof["id"] == questao_criador_id
+
+
 def _require_admin_or_403(request: Request) -> HTMLResponse:
     """Retorna None se admin, ou HTMLResponse 403 se não. Helper p/ rotas internas."""
     prof = get_current_professor(request)
@@ -100,6 +111,8 @@ def init_db():
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
         conn.execute("ALTER TABLE questoes ADD COLUMN ano TEXT")
+    if "criada_por_professor_id" not in cols_q:
+        conn.execute("ALTER TABLE questoes ADD COLUMN criada_por_professor_id INTEGER")
     # Migrations multi-prof: criada_por_professor_id em provas e aplicacoes
     cols_p = {row[1] for row in conn.execute("PRAGMA table_info(provas)").fetchall()}
     if "criada_por_professor_id" not in cols_p:
@@ -192,6 +205,7 @@ def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> 
         if is_admin_val == 1:
             conn.execute("UPDATE provas SET criada_por_professor_id = ? WHERE criada_por_professor_id IS NULL", (prof_id,))
             conn.execute("UPDATE aplicacoes SET criada_por_professor_id = ? WHERE criada_por_professor_id IS NULL", (prof_id,))
+            conn.execute("UPDATE questoes SET criada_por_professor_id = ? WHERE criada_por_professor_id IS NULL", (prof_id,))
     conn.commit()
     conn.close()
     return {"id": prof_id, "email": email, "nome": nome, "is_admin": is_admin}
@@ -464,7 +478,11 @@ def format_data_br(iso_str):
         return iso_str
 
 
-def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False):
+def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False, pode_editar=True, autor_nome=None):
+    """
+    pode_editar: se False, esconde botões Editar/Excluir mesmo com mostrar_acoes=True.
+    autor_nome: se passado, exibe badge 'Por: <nome>' (usado quando admin lista questões alheias).
+    """
     textos = conn.execute("SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
     imagens = conn.execute("SELECT caminho, legenda, fonte FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
     alts = conn.execute("SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
@@ -494,9 +512,10 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
 
     cabecalho = f'Questão {numero} · {q["disciplina_nome"]}' if numero else q["disciplina_nome"]
     ano_badge = f' · <span style="color:var(--text-muted); font-weight:400;">{ano_q}</span>' if ano_q else ""
+    autor_badge_inline = f' · <span class="badge" style="background:#ede9fe; color:#5b21b6; font-size:10px;">Por: {autor_nome}</span>' if autor_nome else ""
 
     acoes_html = ""
-    if mostrar_acoes:
+    if mostrar_acoes and pode_editar:
         acoes_html = (
             f'<div class="page-actions" style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">'
             f'<a href="/questoes/{q["id"]}/editar" class="btn">Editar</a>'
@@ -504,6 +523,12 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'onsubmit="return confirm(\'Excluir esta questão? Se ela for usada em alguma prova, a exclusão será bloqueada.\');">'
             f'<button type="submit" class="btn" style="background:#dc2626; color:white; border-color:#dc2626;">Excluir</button>'
             f'</form>'
+            f'</div>'
+        )
+    elif mostrar_acoes and not pode_editar:
+        acoes_html = (
+            f'<div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border); font-size:11px; color:var(--text-muted);">'
+            f'🔒 Questão de outro professor — você pode usá-la em suas provas, mas só o autor ou o administrador podem editá-la.'
             f'</div>'
         )
 
@@ -516,7 +541,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'<div class="question" style="margin-bottom:8px; padding:12px 16px;">'
             f'<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">'
             f'<div style="flex:1; min-width:0;">'
-            f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{habs_inline}</div>'
+            f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{autor_badge_inline}{habs_inline}</div>'
             f'<div style="margin-top:6px; color:var(--text); font-size:14px; line-height:1.5;">{preview}</div>'
             f'</div>'
             f'<button type="button" onclick="toggleQuestao({q["id"]})" id="q-toggle-{q["id"]}" '
@@ -557,30 +582,58 @@ def home(request: Request):
         questoes_por_ano[ano] = n
     n_sem_ano = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE ano IS NULL OR ano = ''").fetchone()["c"]
 
-    # === SEU PAINEL (do professor logado) ===
-    minhas_provas = conn.execute(
-        "SELECT COUNT(*) AS c FROM provas WHERE criada_por_professor_id = ?", (prof_id,)
-    ).fetchone()["c"]
-    minhas_aplicacoes_abertas = conn.execute(
-        "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 1", (prof_id,)
-    ).fetchone()["c"]
-    minhas_aplicacoes_encerradas = conn.execute(
-        "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 0", (prof_id,)
-    ).fetchone()["c"]
-
-    # Últimas 3 aplicações do professor (com contagem de entregas)
-    minhas_ultimas = conn.execute("""
-        SELECT a.id, a.modo, a.aberta,
-               COALESCE(a.titulo, p.titulo) AS titulo,
-               t.nome AS turma_nome, t.ano_letivo,
-               (SELECT COUNT(*) FROM entregas e WHERE e.aplicacao_id = a.id) AS n_entregas,
-               (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id) AS n_alunos
-        FROM aplicacoes a
-        JOIN provas p ON p.id = a.prova_id
-        JOIN turmas t ON t.id = a.turma_id
-        WHERE a.criada_por_professor_id = ?
-        ORDER BY a.id DESC LIMIT 3
-    """, (prof_id,)).fetchall()
+    # === SEU PAINEL (do prof; pra ADMIN, é o painel DA ESCOLA inteira) ===
+    is_admin = bool(prof and prof["is_admin"])
+    if is_admin:
+        # Admin: contadores globais (vê tudo)
+        minhas_provas = conn.execute("SELECT COUNT(*) AS c FROM provas").fetchone()["c"]
+        minhas_aplicacoes_abertas = conn.execute(
+            "SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 1"
+        ).fetchone()["c"]
+        minhas_aplicacoes_encerradas = conn.execute(
+            "SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 0"
+        ).fetchone()["c"]
+        # Últimas 3 aplicações da ESCOLA (qualquer prof)
+        minhas_ultimas = conn.execute("""
+            SELECT a.id, a.modo, a.aberta,
+                   COALESCE(a.titulo, p.titulo) AS titulo,
+                   t.nome AS turma_nome, t.ano_letivo,
+                   prof.nome AS criador_nome,
+                   (SELECT COUNT(*) FROM entregas e WHERE e.aplicacao_id = a.id) AS n_entregas,
+                   (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id) AS n_alunos
+            FROM aplicacoes a
+            JOIN provas p ON p.id = a.prova_id
+            JOIN turmas t ON t.id = a.turma_id
+            LEFT JOIN professores prof ON prof.id = a.criada_por_professor_id
+            ORDER BY a.id DESC LIMIT 3
+        """).fetchall()
+        # Contagem de professores ativos (com login pelo menos uma vez)
+        total_profs = conn.execute("SELECT COUNT(*) AS c FROM professores").fetchone()["c"]
+    else:
+        # Prof comum: só os dele
+        minhas_provas = conn.execute(
+            "SELECT COUNT(*) AS c FROM provas WHERE criada_por_professor_id = ?", (prof_id,)
+        ).fetchone()["c"]
+        minhas_aplicacoes_abertas = conn.execute(
+            "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 1", (prof_id,)
+        ).fetchone()["c"]
+        minhas_aplicacoes_encerradas = conn.execute(
+            "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 0", (prof_id,)
+        ).fetchone()["c"]
+        minhas_ultimas = conn.execute("""
+            SELECT a.id, a.modo, a.aberta,
+                   COALESCE(a.titulo, p.titulo) AS titulo,
+                   t.nome AS turma_nome, t.ano_letivo,
+                   NULL AS criador_nome,
+                   (SELECT COUNT(*) FROM entregas e WHERE e.aplicacao_id = a.id) AS n_entregas,
+                   (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id) AS n_alunos
+            FROM aplicacoes a
+            JOIN provas p ON p.id = a.prova_id
+            JOIN turmas t ON t.id = a.turma_id
+            WHERE a.criada_por_professor_id = ?
+            ORDER BY a.id DESC LIMIT 3
+        """, (prof_id,)).fetchall()
+        total_profs = 0  # não exibido pra prof comum
     conn.close()
 
     # ----- HTML -----
@@ -614,46 +667,52 @@ def home(request: Request):
         </p>
     """
 
-    # Bloco "Seu Painel"
+    # Bloco "Seu Painel" — labels adaptados pra admin/prof
+    label_provas = "Provas / tarefas (escola)" if is_admin else "Provas / tarefas criadas"
+    label_abertas = "Aplicações abertas (escola)" if is_admin else "Aplicações abertas"
+    label_encerradas = "Aplicações encerradas (escola)" if is_admin else "Aplicações encerradas"
     painel_metrics = f"""
         <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin:8px 0 14px 0;">
             <div style="padding:14px; border:1px solid var(--border); border-radius:6px;">
-                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Provas / tarefas criadas</div>
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">{label_provas}</div>
                 <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_provas}</div>
             </div>
             <div style="padding:14px; border:1px solid #16a34a; border-radius:6px; background:#f0fdf4; color:#166534;">
-                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Aplicações abertas</div>
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">{label_abertas}</div>
                 <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_aplicacoes_abertas}</div>
             </div>
             <div style="padding:14px; border:1px solid var(--border); border-radius:6px;">
-                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Aplicações encerradas</div>
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">{label_encerradas}</div>
                 <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_aplicacoes_encerradas}</div>
             </div>
         </div>
     """
 
-    # Últimas aplicações do prof (atalho rápido)
+    # Últimas aplicações
     if minhas_ultimas:
         linhas = ""
         for u in minhas_ultimas:
             status_dot = '<span style="color:#16a34a;">●</span>' if u["aberta"] else '<span style="color:var(--text-muted);">○</span>'
             modo_label = "online" if u["modo"] == "online" else "impressa"
             pct = (u["n_entregas"] / u["n_alunos"] * 100) if u["n_alunos"] > 0 else 0
+            autor_inline = f' · <span style="color:#7c3aed;">por {u["criador_nome"] or "—"}</span>' if is_admin else ""
             linhas += (
                 f'<a href="/aplicacoes/{u["id"]}" style="display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; text-decoration:none; color:inherit;">'
-                f'<div style="min-width:0; flex:1;">{status_dot} <strong>{u["titulo"]}</strong> <span style="font-size:12px; color:var(--text-muted);">· {u["turma_nome"]} · {modo_label}</span></div>'
+                f'<div style="min-width:0; flex:1;">{status_dot} <strong>{u["titulo"]}</strong> <span style="font-size:12px; color:var(--text-muted);">· {u["turma_nome"]} · {modo_label}{autor_inline}</span></div>'
                 f'<div style="font-size:12px; color:var(--text-muted); flex-shrink:0;">{u["n_entregas"]}/{u["n_alunos"]} entregas ({pct:.0f}%)</div>'
                 f'</a>'
             )
+        label_ultimas = "Últimas aplicações da escola:" if is_admin else "Últimas aplicações criadas por você:"
         ultimas_html = f"""
-            <p style="font-size:12px; color:var(--text-muted); margin:14px 0 6px 0;">Últimas aplicações criadas por você:</p>
+            <p style="font-size:12px; color:var(--text-muted); margin:14px 0 6px 0;">{label_ultimas}</p>
             {linhas}
         """
     else:
         ultimas_html = ""
 
+    titulo_painel = "🏫 Painel da Escola" if is_admin else "👤 Seu Painel"
     painel_html = f"""
-        <h2 style="margin-top:24px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">👤 Seu Painel</h2>
+        <h2 style="margin-top:24px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">{titulo_painel}</h2>
         {painel_metrics}
         {ultimas_html}
     """
@@ -770,14 +829,19 @@ def atualizar_habilidade(id: int, descricao: str = Form("")):
 
 
 @app.get("/questoes", response_class=HTMLResponse)
-def listar_questoes(disciplina: Optional[int] = None, ano: Optional[str] = None, bncc: Optional[str] = None, q: Optional[str] = None):
+def listar_questoes(request: Request, disciplina: Optional[int] = None, ano: Optional[str] = None, bncc: Optional[str] = None, q: Optional[str] = None):
+    prof = get_current_professor(request)
+    is_admin = bool(prof and prof["is_admin"])
     conn = get_db()
 
-    # Montar query com filtros aplicados
+    # Montar query com filtros aplicados — agora trazendo também o autor
     sql = """
-        SELECT DISTINCT q.id, q.enunciado, q.ano, d.id AS disciplina_id, d.nome AS disciplina_nome
+        SELECT DISTINCT q.id, q.enunciado, q.ano, q.criada_por_professor_id,
+               d.id AS disciplina_id, d.nome AS disciplina_nome,
+               aut.nome AS autor_nome
         FROM questoes q
         JOIN disciplinas d ON d.id = q.disciplina_id
+        LEFT JOIN professores aut ON aut.id = q.criada_por_professor_id
         LEFT JOIN questao_habilidades qh ON qh.questao_id = q.id
         LEFT JOIN habilidades_bncc h ON h.id = qh.habilidade_id
         WHERE 1=1
@@ -872,7 +936,20 @@ def listar_questoes(disciplina: Optional[int] = None, ano: Optional[str] = None,
         f'</div></form>'
     )
 
-    cards = "".join(render_questao_card(conn, qx, mostrar_acoes=True, compact=True) for qx in questoes) if questoes else '<div class="empty">Nenhuma questão encontrada com os filtros selecionados.</div>'
+    if questoes:
+        cards_list = []
+        for qx in questoes:
+            pode_ed = _pode_editar_questao(prof, qx["criada_por_professor_id"])
+            # Badge "Por: X" só pra admin (e quando o autor é diferente do admin logado)
+            mostrar_autor = is_admin and qx["autor_nome"] and qx["criada_por_professor_id"] != prof["id"]
+            autor_nome_card = qx["autor_nome"] if mostrar_autor else None
+            cards_list.append(render_questao_card(
+                conn, qx, mostrar_acoes=True, compact=True,
+                pode_editar=pode_ed, autor_nome=autor_nome_card
+            ))
+        cards = "".join(cards_list)
+    else:
+        cards = '<div class="empty">Nenhuma questão encontrada com os filtros selecionados.</div>'
     conn.close()
 
     tem_filtro = bool(disciplina or ano or bncc or q)
@@ -1114,6 +1191,7 @@ def form_nova_questao_passo2(
 
 @app.post("/questoes/criar")
 async def criar_questao(
+    request: Request,
     disciplina_id: int = Form(...), enunciado: str = Form(...),
     alt_a: str = Form(...), alt_b: str = Form(...), alt_c: str = Form(...), alt_d: str = Form(...),
     correta: str = Form(...), habilidades_codigos: str = Form(""),
@@ -1123,8 +1201,13 @@ async def criar_questao(
     imagem1: Optional[UploadFile] = File(None), imagem1_legenda: str = Form(""), imagem1_fonte: str = Form(""),
     imagem2: Optional[UploadFile] = File(None), imagem2_legenda: str = Form(""), imagem2_fonte: str = Form(""),
 ):
+    prof = get_current_professor(request)
+    prof_id = prof["id"] if prof else None
     conn = get_db()
-    cursor = conn.execute("INSERT INTO questoes (disciplina_id, enunciado, ano) VALUES (?, ?, ?)", (disciplina_id, enunciado.strip(), ano.strip() or None))
+    cursor = conn.execute(
+        "INSERT INTO questoes (disciplina_id, enunciado, ano, criada_por_professor_id) VALUES (?, ?, ?, ?)",
+        (disciplina_id, enunciado.strip(), ano.strip() or None, prof_id)
+    )
     questao_id = cursor.lastrowid
 
     for ordem, (conteudo, fonte) in enumerate([(texto1_conteudo, texto1_fonte), (texto2_conteudo, texto2_fonte)]):
@@ -1166,11 +1249,15 @@ async def criar_questao(
 @app.get("/provas", response_class=HTMLResponse)
 def listar_provas(request: Request, disciplina: Optional[int] = None, ano: Optional[str] = None, q: Optional[str] = None):
     prof = get_current_professor(request)
+    is_admin = prof and prof["is_admin"]
     conn = get_db()
 
-    # Filtros: sempre limita ao prof logado (provas são "minhas")
-    where_extras = ["(p.criada_por_professor_id = ? OR p.criada_por_professor_id IS NULL)"]
-    params = [prof["id"]]
+    # Filtros: admin vê tudo da escola; prof comum só as próprias
+    where_extras = []
+    params = []
+    if not is_admin:
+        where_extras.append("(p.criada_por_professor_id = ? OR p.criada_por_professor_id IS NULL)")
+        params.append(prof["id"])
     if q and q.strip():
         where_extras.append("p.titulo LIKE ?")
         params.append(f"%{q.strip()}%")
@@ -1191,9 +1278,11 @@ def listar_provas(request: Request, disciplina: Optional[int] = None, ano: Optio
     where_clause = " WHERE " + " AND ".join(where_extras) if where_extras else ""
 
     sql = f"""
-        SELECT p.id, p.titulo, p.descricao,
+        SELECT p.id, p.titulo, p.descricao, p.criada_por_professor_id,
+               prof.nome AS criador_nome,
                (SELECT COUNT(*) FROM prova_questoes WHERE prova_id = p.id) AS qtd_questoes
         FROM provas p
+        LEFT JOIN professores prof ON prof.id = p.criada_por_professor_id
         {where_clause}
         ORDER BY p.id DESC
     """
@@ -1258,6 +1347,12 @@ def listar_provas(request: Request, disciplina: Optional[int] = None, ano: Optio
             n_apl = apl_count.get(p["id"], 0)
             apl_badge = f'<span class="badge" style="background:#fef3c7; color:#92400e;">{n_apl} aplicação{"" if n_apl == 1 else "ões"}</span>' if n_apl else ""
 
+            # Badge "Por: <nome>" só pra admin (pra ele saber de quem é cada prova)
+            autor_badge = ""
+            if is_admin:
+                nome_autor = p["criador_nome"] if p["criador_nome"] else "—"
+                autor_badge = f'<span class="badge" style="background:#ede9fe; color:#5b21b6;">Por: {nome_autor}</span>'
+
             cards += f"""
             <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin-bottom:10px;">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:14px;">
@@ -1268,7 +1363,7 @@ def listar_provas(request: Request, disciplina: Optional[int] = None, ano: Optio
                         {desc}
                         <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center;">
                             <span class="badge">{p["qtd_questoes"]} questões</span>
-                            {disc_tags}{ano_tags}{apl_badge}
+                            {disc_tags}{ano_tags}{apl_badge}{autor_badge}
                         </div>
                     </div>
                     <div style="display:flex; gap:6px; flex-shrink:0;">
@@ -1993,11 +2088,15 @@ def listar_aplicacoes(
     q: Optional[str] = None,
 ):
     prof = get_current_professor(request)
+    is_admin = prof and prof["is_admin"]
     conn = get_db()
 
-    # Sempre filtra pelo prof logado (aplicações são "minhas")
-    where_extras = ["(a.criada_por_professor_id = ? OR a.criada_por_professor_id IS NULL)"]
-    params = [prof["id"]]
+    # Filtros: admin vê tudo; prof comum só as próprias
+    where_extras = []
+    params = []
+    if not is_admin:
+        where_extras.append("(a.criada_por_professor_id = ? OR a.criada_por_professor_id IS NULL)")
+        params.append(prof["id"])
     if q and q.strip():
         where_extras.append("(a.titulo LIKE ? OR p.titulo LIKE ?)")
         params.append(f"%{q.strip()}%")
@@ -2016,12 +2115,14 @@ def listar_aplicacoes(
 
     sql = f"""
         SELECT a.id, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo,
-               a.criada_em, a.aberta, a.modo, a.titulo,
+               a.criada_em, a.aberta, a.modo, a.titulo, a.criada_por_professor_id,
+               prof.nome AS criador_nome,
                (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS qtd_entregas,
                (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS qtd_alunos
         FROM aplicacoes a
         JOIN provas p ON p.id = a.prova_id
         JOIN turmas t ON t.id = a.turma_id
+        LEFT JOIN professores prof ON prof.id = a.criada_por_professor_id
         {where_clause}
         ORDER BY a.id DESC
     """
@@ -2086,6 +2187,12 @@ def listar_aplicacoes(
 
             data_str = f'<span style="font-size:12px; color:var(--text-muted);">{format_data_br(a["criada_em"])}</span>' if a["criada_em"] else ""
 
+            # Badge "Por: <nome>" só pra admin
+            autor_badge = ""
+            if is_admin:
+                nome_autor = a["criador_nome"] if a["criador_nome"] else "—"
+                autor_badge = f'<span class="badge" style="background:#ede9fe; color:#5b21b6;">Por: {nome_autor}</span>'
+
             cards += f"""
             <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin-bottom:10px;">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:14px;">
@@ -2095,7 +2202,7 @@ def listar_aplicacoes(
                         </div>
                         {subtitulo}
                         <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center;">
-                            {turma_badge}{modo_badge}{status_badge}{progresso_badge}{data_str}
+                            {turma_badge}{modo_badge}{status_badge}{progresso_badge}{autor_badge}{data_str}
                         </div>
                     </div>
                     <div style="display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end;">
@@ -2856,12 +2963,25 @@ def exportar_resultados_excel(aplicacao_id: int):
 # ==========================================
 
 @app.get("/questoes/{id}/editar", response_class=HTMLResponse)
-def form_editar_questao(id: int):
+def form_editar_questao(id: int, request: Request):
+    prof = get_current_professor(request)
     conn = get_db()
     q = conn.execute("SELECT * FROM questoes WHERE id = ?", (id,)).fetchone()
     if not q:
         conn.close()
         return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_questao(prof, q["criada_por_professor_id"]):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem permissão",
+            '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
+            '<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:16px; border-radius:6px;">'
+            '<p>Essa questão foi criada por outro professor. Apenas <strong>o autor da questão</strong> ou o <strong>administrador</strong> podem editá-la.</p>'
+            '<p>Você pode <strong>visualizar</strong> a questão e <strong>usá-la em suas próprias provas</strong> normalmente.</p>'
+            '</div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar ao banco</a></div>',
+            active="questoes"
+        ), status_code=403)
 
     disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
     alts = conn.execute("SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra", (id,)).fetchall()
@@ -3067,9 +3187,10 @@ def form_editar_questao(id: int):
     return render_page("Editar questão", content, active="questoes", head_extra=MATHJAX)
 
 
-@app.post("/questoes/{id}/editar")
+@app.post("/questoes/{id}/editar", response_class=HTMLResponse)
 async def atualizar_questao(
     id: int,
+    request: Request,
     disciplina_id: int = Form(...),
     enunciado: str = Form(...),
     alt_a: str = Form(...), alt_b: str = Form(...), alt_c: str = Form(...), alt_d: str = Form(...),
@@ -3081,7 +3202,22 @@ async def atualizar_questao(
     imagem1: Optional[UploadFile] = File(None), imagem1_legenda: str = Form(""), imagem1_fonte: str = Form(""),
     imagem2: Optional[UploadFile] = File(None), imagem2_legenda: str = Form(""), imagem2_fonte: str = Form(""),
 ):
+    prof = get_current_professor(request)
     conn = get_db()
+    q_existente = conn.execute("SELECT criada_por_professor_id FROM questoes WHERE id = ?", (id,)).fetchone()
+    if not q_existente:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_questao(prof, q_existente["criada_por_professor_id"]):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem permissão",
+            '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
+            '<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:16px; border-radius:6px;">'
+            '<p>Apenas o autor da questão ou o administrador podem editá-la.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ), status_code=403)
     conn.execute("UPDATE questoes SET disciplina_id = ?, enunciado = ?, ano = ? WHERE id = ?", (disciplina_id, enunciado.strip(), ano.strip() or None, id))
 
     conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
@@ -3125,8 +3261,23 @@ async def atualizar_questao(
 
 
 @app.post("/questoes/{id}/deletar", response_class=HTMLResponse)
-def deletar_questao(id: int):
+def deletar_questao(id: int, request: Request):
+    prof = get_current_professor(request)
     conn = get_db()
+    q_existente = conn.execute("SELECT criada_por_professor_id FROM questoes WHERE id = ?", (id,)).fetchone()
+    if not q_existente:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_questao(prof, q_existente["criada_por_professor_id"]):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem permissão",
+            '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
+            '<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:16px; border-radius:6px;">'
+            '<p>Apenas o autor da questão ou o administrador podem excluí-la.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ), status_code=403)
     em_uso = conn.execute("SELECT COUNT(*) AS c FROM prova_questoes WHERE questao_id = ?", (id,)).fetchone()["c"]
     if em_uso > 0:
         conn.close()
