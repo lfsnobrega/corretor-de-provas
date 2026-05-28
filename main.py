@@ -230,7 +230,7 @@ def pagina_login(request: Request, next: str = "/", erro: str = ""):
 
     content = f"""
     <div style="max-width:420px; margin:60px auto; padding:30px; background:var(--bg); border:1px solid var(--border); border-radius:8px;">
-        <h1 style="margin:0 0 6px 0;">Corretor de Provas</h1>
+        <h1 style="margin:0 0 6px 0;">Sistema Pedagógico do Walmir</h1>
         <p class="muted-line" style="margin:0 0 24px 0;">E.M. Walmir de Freitas Monteiro</p>
         {erro_html}
         {botao_login}
@@ -367,7 +367,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <title>{title} · Corretor de Provas</title>
+    <title>{title} · Sistema Pedagógico do Walmir</title>
     {INTER_FONT}
     <link rel="stylesheet" href="/static/css/app.css">
     {head_extra}
@@ -397,7 +397,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <title>{title} · Corretor de Provas</title>
+    <title>{title} · Sistema Pedagógico do Walmir</title>
     {INTER_FONT}
     <link rel="stylesheet" href="/static/css/app.css">
     {head_extra}
@@ -405,7 +405,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
 <body>
     <div class="app">
         <aside class="sidebar" style="display:flex; flex-direction:column;">
-            <div class="sidebar-brand">Corretor de Provas</div>
+            <div class="sidebar-brand">Sistema Pedagógico do Walmir</div>
             <nav>
                 <a href="/"{nav_class('home')}>Início</a>
                 <div class="sidebar-section">Banco</div>
@@ -536,19 +536,147 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
 
 
 @app.get("/", response_class=HTMLResponse)
-def home():
+def home(request: Request):
+    prof = get_current_professor(request)
+    nome_prof = prof["nome"].split()[0] if prof else "professor(a)"
+    prof_id = prof["id"] if prof else 0
+
     conn = get_db()
-    counts = [
-        ("Disciplinas", conn.execute("SELECT COUNT(*) AS c FROM disciplinas").fetchone()["c"]),
-        ("Habilidades", conn.execute("SELECT COUNT(*) AS c FROM habilidades_bncc").fetchone()["c"]),
-        ("Questões", conn.execute("SELECT COUNT(*) AS c FROM questoes").fetchone()["c"]),
-        ("Provas | Tarefas", conn.execute("SELECT COUNT(*) AS c FROM provas").fetchone()["c"]),
-        ("Turmas", conn.execute("SELECT COUNT(*) AS c FROM turmas").fetchone()["c"]),
-        ("Alunos", conn.execute("SELECT COUNT(*) AS c FROM alunos").fetchone()["c"]),
-    ]
+
+    # === ACERVO DA ESCOLA (global) ===
+    total_questoes = conn.execute("SELECT COUNT(*) AS c FROM questoes").fetchone()["c"]
+    total_disciplinas = conn.execute("SELECT COUNT(*) AS c FROM disciplinas").fetchone()["c"]
+    total_habilidades = conn.execute("SELECT COUNT(*) AS c FROM habilidades_bncc").fetchone()["c"]
+    total_turmas = conn.execute("SELECT COUNT(*) AS c FROM turmas").fetchone()["c"]
+    total_alunos = conn.execute("SELECT COUNT(*) AS c FROM alunos").fetchone()["c"]
+
+    # Questões por ano de escolaridade (6º a 9º)
+    questoes_por_ano = {}
+    for ano in ANOS:
+        n = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE ano = ?", (ano,)).fetchone()["c"]
+        questoes_por_ano[ano] = n
+    n_sem_ano = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE ano IS NULL OR ano = ''").fetchone()["c"]
+
+    # === SEU PAINEL (do professor logado) ===
+    minhas_provas = conn.execute(
+        "SELECT COUNT(*) AS c FROM provas WHERE criada_por_professor_id = ?", (prof_id,)
+    ).fetchone()["c"]
+    minhas_aplicacoes_abertas = conn.execute(
+        "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 1", (prof_id,)
+    ).fetchone()["c"]
+    minhas_aplicacoes_encerradas = conn.execute(
+        "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 0", (prof_id,)
+    ).fetchone()["c"]
+
+    # Últimas 3 aplicações do professor (com contagem de entregas)
+    minhas_ultimas = conn.execute("""
+        SELECT a.id, a.modo, a.aberta,
+               COALESCE(a.titulo, p.titulo) AS titulo,
+               t.nome AS turma_nome, t.ano_letivo,
+               (SELECT COUNT(*) FROM entregas e WHERE e.aplicacao_id = a.id) AS n_entregas,
+               (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id) AS n_alunos
+        FROM aplicacoes a
+        JOIN provas p ON p.id = a.prova_id
+        JOIN turmas t ON t.id = a.turma_id
+        WHERE a.criada_por_professor_id = ?
+        ORDER BY a.id DESC LIMIT 3
+    """, (prof_id,)).fetchall()
     conn.close()
-    metrics_html = "".join(f'<div class="metric"><div class="metric-label">{l}</div><div class="metric-value">{v}</div></div>' for l, v in counts)
-    content = f'<div class="page-header"><h1>Início</h1><p class="subtitle">Visão geral do sistema.</p></div><div class="metric-grid">{metrics_html}</div>'
+
+    # ----- HTML -----
+    # Bloco "Acervo da Escola"
+    qpa_cards = "".join(
+        f'<div style="text-align:center; padding:10px; background:var(--bg-subtle); border-radius:6px;">'
+        f'<div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">{ano}</div>'
+        f'<div style="font-size:22px; font-weight:600; margin-top:4px;">{questoes_por_ano[ano]}</div>'
+        f'</div>'
+        for ano in ANOS
+    )
+    if n_sem_ano > 0:
+        qpa_cards += (
+            f'<div style="text-align:center; padding:10px; background:var(--bg-subtle); border-radius:6px;">'
+            f'<div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Sem ano</div>'
+            f'<div style="font-size:22px; font-weight:600; margin-top:4px;">{n_sem_ano}</div>'
+            f'</div>'
+        )
+
+    acervo_html = f"""
+        <h2 style="margin-top:24px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">📚 Acervo da Escola</h2>
+        <div style="display:flex; align-items:baseline; gap:12px; margin:8px 0 12px 0;">
+            <span style="font-size:36px; font-weight:700;">{total_questoes}</span>
+            <span style="font-size:14px; color:var(--text-muted);">questões disponíveis no banco coletivo</span>
+        </div>
+        <div style="display:grid; grid-template-columns: repeat({len(ANOS) + (1 if n_sem_ano > 0 else 0)}, 1fr); gap:8px; margin-bottom:14px;">
+            {qpa_cards}
+        </div>
+        <p style="font-size:12px; color:var(--text-muted); margin:0 0 18px 0;">
+            <strong>{total_disciplinas}</strong> disciplinas · <strong>{total_habilidades}</strong> habilidades BNCC · <strong>{total_turmas}</strong> turmas · <strong>{total_alunos}</strong> alunos cadastrados
+        </p>
+    """
+
+    # Bloco "Seu Painel"
+    painel_metrics = f"""
+        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin:8px 0 14px 0;">
+            <div style="padding:14px; border:1px solid var(--border); border-radius:6px;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Provas / tarefas criadas</div>
+                <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_provas}</div>
+            </div>
+            <div style="padding:14px; border:1px solid #16a34a; border-radius:6px; background:#f0fdf4; color:#166534;">
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Aplicações abertas</div>
+                <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_aplicacoes_abertas}</div>
+            </div>
+            <div style="padding:14px; border:1px solid var(--border); border-radius:6px;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Aplicações encerradas</div>
+                <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_aplicacoes_encerradas}</div>
+            </div>
+        </div>
+    """
+
+    # Últimas aplicações do prof (atalho rápido)
+    if minhas_ultimas:
+        linhas = ""
+        for u in minhas_ultimas:
+            status_dot = '<span style="color:#16a34a;">●</span>' if u["aberta"] else '<span style="color:var(--text-muted);">○</span>'
+            modo_label = "online" if u["modo"] == "online" else "impressa"
+            pct = (u["n_entregas"] / u["n_alunos"] * 100) if u["n_alunos"] > 0 else 0
+            linhas += (
+                f'<a href="/aplicacoes/{u["id"]}" style="display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; text-decoration:none; color:inherit;">'
+                f'<div style="min-width:0; flex:1;">{status_dot} <strong>{u["titulo"]}</strong> <span style="font-size:12px; color:var(--text-muted);">· {u["turma_nome"]} · {modo_label}</span></div>'
+                f'<div style="font-size:12px; color:var(--text-muted); flex-shrink:0;">{u["n_entregas"]}/{u["n_alunos"]} entregas ({pct:.0f}%)</div>'
+                f'</a>'
+            )
+        ultimas_html = f"""
+            <p style="font-size:12px; color:var(--text-muted); margin:14px 0 6px 0;">Últimas aplicações criadas por você:</p>
+            {linhas}
+        """
+    else:
+        ultimas_html = ""
+
+    painel_html = f"""
+        <h2 style="margin-top:24px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">👤 Seu Painel</h2>
+        {painel_metrics}
+        {ultimas_html}
+    """
+
+    # Atalhos de ação rápida
+    acoes_html = f"""
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:24px; padding-top:18px; border-top:1px solid var(--border);">
+            <a href="/questoes/nova" class="btn btn-primary">+ Nova questão</a>
+            <a href="/provas/nova" class="btn">+ Nova prova/tarefa</a>
+            <a href="/aplicacoes/nova" class="btn">+ Nova aplicação</a>
+            <a href="/questoes" class="btn">Ver banco de questões</a>
+        </div>
+    """
+
+    content = f"""
+        <div class="page-header">
+            <h1 style="margin-bottom:4px;">Olá, {nome_prof} 👋</h1>
+            <p class="subtitle" style="margin-top:0;">Veja seu panorama atualizado.</p>
+        </div>
+        {acervo_html}
+        {painel_html}
+        {acoes_html}
+    """
     return render_page("Início", content, active="home")
 
 
@@ -4742,17 +4870,17 @@ def form_importar_habilidades():
             <div class="page-actions"><a href="/habilidades" class="btn">← Voltar</a></div>
         </div>
 
-        <div class="tip">
+        <div class="tip" style="background:#dbeafe; color:#1e3a8a; border-color:#3b82f6;">
             <strong>Formatos aceitos:</strong>
-            <ul style="margin:8px 0 0 18px; line-height:1.6;">
+            <ul style="margin:8px 0 0 18px; line-height:1.6; color:#1e3a8a;">
                 <li><strong>Planilha oficial do MEC</strong> (downloadbncc.mec.gov.br) — basta ter uma coluna chamada <code>Habilidade</code> no formato <code>(CODIGO) descrição</code>. As outras colunas (Disciplina, Ano, etc.) são ignoradas.</li>
                 <li><strong>Excel/CSV personalizado</strong> — deve ter colunas <code>codigo</code> e <code>descricao</code> (nessa grafia).</li>
             </ul>
         </div>
 
-        <div class="tip" style="background:#fef3c7; border-color:#ca8a04;">
+        <div class="tip" style="background:#fef3c7; color:#78350f; border-color:#ca8a04;">
             <strong>Comportamento da importação:</strong>
-            <ul style="margin:8px 0 0 18px; line-height:1.6;">
+            <ul style="margin:8px 0 0 18px; line-height:1.6; color:#78350f;">
                 <li>Códigos novos → <strong>cadastrados</strong></li>
                 <li>Códigos já existentes <strong>sem descrição</strong> → descrição é <strong>preenchida</strong></li>
                 <li>Códigos já existentes <strong>com descrição</strong> → mantida (não sobrescreve)</li>
