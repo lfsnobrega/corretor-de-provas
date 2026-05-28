@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+openpyxl
+qrcode[pil]
+reportlab
+opencv-python-headless
+numpy
+itsdangerous
+httpx
+pillow-heif
