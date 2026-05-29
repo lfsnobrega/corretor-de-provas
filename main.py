@@ -93,48 +93,88 @@ def _sanitizar_html_enunciado(html: str) -> str:
     return html.strip()
 
 
-def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", required: bool = True, label: str = "Enunciado") -> str:
-    """Editor WYSIWYG simples pro enunciado. Toolbar: B / I / U / centralizar / lista / citação.
-    O HTML editado é sincronizado num <textarea hidden> que vai no submit do form."""
+def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", required: bool = True,
+                            label: str = "Enunciado", compact: bool = False, min_height: int = 120,
+                            placeholder: str = "") -> str:
+    """Editor WYSIWYG com toolbar EMBAIXO do conteúdo (estilo Slack/Discord).
+    - compact=True mostra só B / I / U / limpar (pra campos curtos como alternativas).
+    - placeholder aparece DENTRO da caixa quando vazia, some ao digitar.
+    O HTML editado é sincronizado num <textarea hidden> que vai no submit."""
     import html as _html
     valor_escapado_textarea = _html.escape(valor_inicial or "")
     req_attr = " required" if required else ""
+
+    # Toolbar: botões variam conforme compact
+    btn_style = "padding:3px 7px; background:transparent; border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:12px; color:inherit;"
+    bot_basicos = (
+        f'<button type="button" data-cmd="bold" title="Negrito (Ctrl+B)" style="{btn_style} font-weight:700; min-width:26px;">B</button>'
+        f'<button type="button" data-cmd="italic" title="Itálico (Ctrl+I)" style="{btn_style} font-style:italic; min-width:26px;">I</button>'
+        f'<button type="button" data-cmd="underline" title="Sublinhado (Ctrl+U)" style="{btn_style} text-decoration:underline; min-width:26px;">U</button>'
+    )
+    sep = '<span style="border-left:1px solid var(--border); margin:0 2px;"></span>'
+    bot_extra = (
+        f'<button type="button" data-cmd="justifyLeft" title="Alinhar à esquerda" style="{btn_style}">⇤</button>'
+        f'<button type="button" data-cmd="justifyCenter" title="Centralizar" style="{btn_style}">⇔</button>'
+        f'<button type="button" data-cmd="justifyRight" title="Alinhar à direita" style="{btn_style}">⇥</button>'
+        f'{sep}'
+        f'<button type="button" data-cmd="insertUnorderedList" title="Lista" style="{btn_style}">• Lista</button>'
+        f'<button type="button" data-cmd="formatBlock" data-arg="blockquote" title="Citação" style="{btn_style}">❝ Citação</button>'
+        f'{sep}'
+    )
+    bot_limpar = f'<button type="button" data-cmd="removeFormat" title="Limpar formatação" style="{btn_style} color:var(--text-muted);">⌫ limpar</button>'
+
+    toolbar_buttons = bot_basicos + sep + bot_limpar if compact else bot_basicos + sep + bot_extra + bot_limpar
+
+    placeholder_attr = f' data-placeholder="{_html.escape(placeholder, quote=True)}"' if placeholder else ""
+
     return f"""
+        <style>
+            .editor-content[data-placeholder]:empty::before {{
+                content: attr(data-placeholder);
+                color: var(--text-muted);
+                opacity: 0.7;
+                pointer-events: none;
+                font-style: italic;
+            }}
+            .ed-wrap:focus-within {{ box-shadow: 0 0 0 2px rgba(59,130,246,0.3); border-color: #3b82f6; }}
+            .editor-content blockquote {{ margin: 8px 0; padding: 6px 14px; border-left: 3px solid var(--border); color: var(--text-muted); font-style: italic; }}
+            .editor-content ul {{ margin: 6px 0 6px 22px; }}
+        </style>
         <label style="display:block; margin:8px 0;">{label}
-            <div class="editor-toolbar" style="display:flex; gap:4px; flex-wrap:wrap; padding:6px 8px; background:var(--bg-subtle); border:1px solid var(--border); border-bottom:none; border-radius:4px 4px 0 0;">
-                <button type="button" data-cmd="bold" title="Negrito (Ctrl+B)" style="font-weight:700; min-width:32px; padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">B</button>
-                <button type="button" data-cmd="italic" title="Itálico (Ctrl+I)" style="font-style:italic; min-width:32px; padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">I</button>
-                <button type="button" data-cmd="underline" title="Sublinhado (Ctrl+U)" style="text-decoration:underline; min-width:32px; padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">U</button>
-                <span style="border-left:1px solid var(--border); margin:0 4px;"></span>
-                <button type="button" data-cmd="justifyLeft" title="Alinhar à esquerda" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">⇤</button>
-                <button type="button" data-cmd="justifyCenter" title="Centralizar" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">⇔</button>
-                <button type="button" data-cmd="justifyRight" title="Alinhar à direita" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">⇥</button>
-                <span style="border-left:1px solid var(--border); margin:0 4px;"></span>
-                <button type="button" data-cmd="insertUnorderedList" title="Lista" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">• Lista</button>
-                <button type="button" data-cmd="formatBlock" data-arg="blockquote" title="Citação" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">❝ Citação</button>
-                <span style="border-left:1px solid var(--border); margin:0 4px;"></span>
-                <button type="button" data-cmd="removeFormat" title="Limpar formatação" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px; color:var(--text-muted);">⌫ limpar</button>
+            <div class="ed-wrap" style="border:1px solid var(--border); border-radius:5px; background:var(--bg); overflow:hidden;">
+                <div class="editor-content" contenteditable="true" data-target="{name}"{placeholder_attr} style="min-height:{min_height}px; padding:10px 12px; outline:none; font-family:inherit; font-size:14px; line-height:1.5;">{valor_inicial}</div>
+                <div class="editor-toolbar" style="display:flex; gap:3px; flex-wrap:wrap; align-items:center; padding:5px 7px; background:var(--bg-subtle); border-top:1px solid var(--border);">
+                    {toolbar_buttons}
+                </div>
             </div>
-            <div class="editor-content" contenteditable="true" data-target="{name}" style="min-height:120px; padding:12px 14px; border:1px solid var(--border); border-radius:0 0 4px 4px; background:var(--bg); outline:none; font-family:inherit; font-size:14px; line-height:1.5;">{valor_inicial}</div>
             <textarea name="{name}" id="{name}_hidden" style="display:none;"{req_attr}>{valor_escapado_textarea}</textarea>
-            <p class="muted-line" style="font-size:11px; margin-top:4px;">Selecione o texto e clique nos botões pra formatar. Atalhos: Ctrl+B (negrito), Ctrl+I (itálico), Ctrl+U (sublinhado). Para fórmulas matemáticas, use $x^2$ ou $$ ... $$.</p>
         </label>
         <script>
         (function() {{
             const editor = document.querySelector('.editor-content[data-target="{name}"]');
             const hidden = document.getElementById('{name}_hidden');
             if (!editor || !hidden) return;
-            // Sincronizar editor → hidden textarea (em cada input + antes de submit)
             function sync() {{ hidden.value = editor.innerHTML; }}
             editor.addEventListener('input', sync);
             editor.addEventListener('blur', sync);
-            // Sincroniza no submit do form pai
             const form = editor.closest('form');
             if (form) form.addEventListener('submit', sync);
 
-            // Toolbar
-            const toolbar = editor.previousElementSibling;
-            if (toolbar && toolbar.classList.contains('editor-toolbar')) {{
+            // Placeholder: mostra quando vazio (via CSS :empty já cobre em alguns browsers; aqui garantimos)
+            const ph = editor.getAttribute('data-placeholder') || '';
+            function refreshPlaceholder() {{
+                const isEmpty = editor.innerHTML.trim() === '' || editor.innerHTML.trim() === '<br>';
+                if (isEmpty && ph && !editor.hasAttribute('data-ph-shown')) {{
+                    editor.setAttribute('data-ph-shown', '1');
+                    editor.style.position = 'relative';
+                }}
+                if (!isEmpty) editor.removeAttribute('data-ph-shown');
+            }}
+            editor.addEventListener('input', refreshPlaceholder);
+            refreshPlaceholder();
+
+            const toolbar = editor.parentNode.querySelector('.editor-toolbar');
+            if (toolbar) {{
                 toolbar.querySelectorAll('button[data-cmd]').forEach(btn => {{
                     btn.addEventListener('click', e => {{
                         e.preventDefault();
@@ -143,6 +183,7 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         editor.focus();
                         try {{ document.execCommand(cmd, false, arg); }} catch(err) {{}}
                         sync();
+                        refreshPlaceholder();
                     }});
                 }});
             }}
@@ -1241,8 +1282,20 @@ def form_nova_questao_passo2(
 
     alternativas_html = ""
     for letra in ["A", "B", "C", "D"]:
-        required = ' required' if letra == "A" else ''
-        alternativas_html += f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:center; margin-bottom:8px;"><label style="margin:0; display:flex; align-items:center; gap:8px;"><input type="radio" name="correta" value="{letra}"{required} style="width:auto; margin:0;"> <strong>{letra})</strong></label><input type="text" name="alt_{letra.lower()}" required style="margin:0;"></div>'
+        required_radio = ' required' if letra == "A" else ''
+        editor_alt = _editor_enunciado_html(
+            name=f"alt_{letra.lower()}", valor_inicial="", required=True,
+            label="", compact=True, min_height=42,
+            placeholder=f"Texto da alternativa {letra}"
+        )
+        alternativas_html += (
+            f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+            f'<label style="margin:8px 0 0 0; display:flex; align-items:center; gap:8px; white-space:nowrap;">'
+            f'<input type="radio" name="correta" value="{letra}"{required_radio} style="width:auto; margin:0;"> <strong>{letra})</strong>'
+            f'</label>'
+            f'<div style="margin:0;">{editor_alt}</div>'
+            f'</div>'
+        )
 
     # Hidden fields carregam dados do passo 1; valores escapados
     import html as _html
@@ -1272,9 +1325,9 @@ def form_nova_questao_passo2(
 
             <fieldset>
                 <legend>Textos de apoio (opcionais)</legend>
-                <label>Texto 1 — conteúdo<textarea name="texto1_conteudo" rows="3"></textarea></label>
+                {_editor_enunciado_html(name="texto1_conteudo", valor_inicial="", required=False, label="Texto 1 — conteúdo", min_height=80, placeholder="Cole ou digite aqui o texto de apoio (opcional)")}
                 <label>Texto 1 — fonte<input type="text" name="texto1_fonte" placeholder="Autor, obra, ano"></label>
-                <label>Texto 2 — conteúdo<textarea name="texto2_conteudo" rows="3"></textarea></label>
+                {_editor_enunciado_html(name="texto2_conteudo", valor_inicial="", required=False, label="Texto 2 — conteúdo", min_height=80, placeholder="Segundo texto de apoio (opcional)")}
                 <label>Texto 2 — fonte<input type="text" name="texto2_fonte" placeholder="Autor, obra, ano"></label>
             </fieldset>
 
@@ -1288,7 +1341,7 @@ def form_nova_questao_passo2(
                 <label>Fonte da imagem 2<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado")}
+            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar (negrito, itálico, etc).")}
 
             <fieldset>
                 <legend>Alternativas — marque o radio da correta</legend>
@@ -1326,8 +1379,9 @@ async def criar_questao(
     questao_id = cursor.lastrowid
 
     for ordem, (conteudo, fonte) in enumerate([(texto1_conteudo, texto1_fonte), (texto2_conteudo, texto2_fonte)]):
-        if conteudo.strip():
-            conn.execute("INSERT INTO textos_apoio (questao_id, conteudo, fonte, ordem) VALUES (?, ?, ?, ?)", (questao_id, conteudo.strip(), fonte.strip() or None, ordem))
+        conteudo_sanit = _sanitizar_html_enunciado(conteudo)
+        if conteudo_sanit:
+            conn.execute("INSERT INTO textos_apoio (questao_id, conteudo, fonte, ordem) VALUES (?, ?, ?, ?)", (questao_id, conteudo_sanit, fonte.strip() or None, ordem))
 
     for ordem, (img, legenda, fonte) in enumerate([(imagem1, imagem1_legenda, imagem1_fonte), (imagem2, imagem2_legenda, imagem2_fonte)]):
         if img and img.filename:
@@ -1340,7 +1394,7 @@ async def criar_questao(
             conn.execute("INSERT INTO imagens (questao_id, caminho, legenda, fonte, ordem) VALUES (?, ?, ?, ?, ?)", (questao_id, f"static/imagens/{unique_name}", legenda.strip() or None, fonte.strip() or None, ordem))
 
     for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
-        conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)", (questao_id, letra, texto.strip(), 1 if letra == correta else 0))
+        conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)", (questao_id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
 
     for parte in habilidades_codigos.replace("\n", ",").split(","):
         codigo = parte.strip().upper()
@@ -3133,15 +3187,21 @@ def form_editar_questao(id: int, request: Request):
     alternativas_html = ""
     for letra in ["A", "B", "C", "D"]:
         a = alts_by_letra.get(letra)
-        valor = a["texto"].replace('"', '&quot;') if a else ""
+        valor_alt = a["texto"] if a else ""
         checked = ' checked' if a and a["correta"] else ''
-        required = ' required' if letra == "A" else ''
+        required_radio = ' required' if letra == "A" else ''
+        editor_alt = _editor_enunciado_html(
+            name=f"alt_{letra.lower()}", valor_inicial=valor_alt, required=True,
+            label="", compact=True, min_height=42,
+            placeholder=f"Texto da alternativa {letra}"
+        )
         alternativas_html += (
-            f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:center; margin-bottom:8px;">'
-            f'<label style="margin:0; display:flex; align-items:center; gap:8px;">'
-            f'<input type="radio" name="correta" value="{letra}"{required}{checked} style="width:auto; margin:0;"> '
-            f'<strong>{letra})</strong></label>'
-            f'<input type="text" name="alt_{letra.lower()}" value="{valor}" required style="margin:0;"></div>'
+            f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+            f'<label style="margin:8px 0 0 0; display:flex; align-items:center; gap:8px; white-space:nowrap;">'
+            f'<input type="radio" name="correta" value="{letra}"{required_radio}{checked} style="width:auto; margin:0;"> <strong>{letra})</strong>'
+            f'</label>'
+            f'<div style="margin:0;">{editor_alt}</div>'
+            f'</div>'
         )
 
     textos_existentes_html = ""
@@ -3195,9 +3255,9 @@ def form_editar_questao(id: int, request: Request):
 
             <fieldset>
                 <legend>Adicionar novos textos de apoio (opcional)</legend>
-                <label>Texto novo — conteúdo<textarea name="texto1_conteudo" rows="3"></textarea></label>
+                {_editor_enunciado_html(name="texto1_conteudo", valor_inicial="", required=False, label="Texto novo — conteúdo", min_height=80, placeholder="Cole ou digite o texto de apoio")}
                 <label>Texto novo — fonte<input type="text" name="texto1_fonte" placeholder="Autor, obra, ano"></label>
-                <label>Outro texto novo — conteúdo<textarea name="texto2_conteudo" rows="3"></textarea></label>
+                {_editor_enunciado_html(name="texto2_conteudo", valor_inicial="", required=False, label="Outro texto novo — conteúdo", min_height=80, placeholder="Segundo texto de apoio (opcional)")}
                 <label>Outro texto novo — fonte<input type="text" name="texto2_fonte"></label>
             </fieldset>
 
@@ -3211,7 +3271,7 @@ def form_editar_questao(id: int, request: Request):
                 <label>Fonte<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado")}
+            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar.")}
 
             <fieldset>
                 <legend>Alternativas — marque o radio da correta</legend>
@@ -3342,7 +3402,7 @@ async def atualizar_questao(
     conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
     for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
         conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)",
-                     (id, letra, texto.strip(), 1 if letra == correta else 0))
+                     (id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
 
     conn.execute("DELETE FROM questao_habilidades WHERE questao_id = ?", (id,))
     for parte in habilidades_codigos.replace("\n", ",").split(","):
@@ -3358,9 +3418,10 @@ async def atualizar_questao(
 
     proximo_ordem_texto = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM textos_apoio WHERE questao_id = ?", (id,)).fetchone()["n"]
     for offset, (conteudo, fonte) in enumerate([(texto1_conteudo, texto1_fonte), (texto2_conteudo, texto2_fonte)]):
-        if conteudo.strip():
+        conteudo_sanit = _sanitizar_html_enunciado(conteudo)
+        if conteudo_sanit:
             conn.execute("INSERT INTO textos_apoio (questao_id, conteudo, fonte, ordem) VALUES (?, ?, ?, ?)",
-                         (id, conteudo.strip(), fonte.strip() or None, proximo_ordem_texto + offset))
+                         (id, conteudo_sanit, fonte.strip() or None, proximo_ordem_texto + offset))
 
     proximo_ordem_img = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM imagens WHERE questao_id = ?", (id,)).fetchone()["n"]
     for offset, (img, legenda, fonte) in enumerate([(imagem1, imagem1_legenda, imagem1_fonte), (imagem2, imagem2_legenda, imagem2_fonte)]):
