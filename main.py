@@ -95,10 +95,12 @@ def _sanitizar_html_enunciado(html: str) -> str:
 
 def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", required: bool = True,
                             label: str = "Enunciado", compact: bool = False, min_height: int = 120,
-                            placeholder: str = "") -> str:
+                            placeholder: str = "", detectar_alternativas: bool = False) -> str:
     """Editor WYSIWYG com toolbar EMBAIXO do conteúdo (estilo Slack/Discord).
     - compact=True mostra só B / I / U / limpar (pra campos curtos como alternativas).
     - placeholder aparece DENTRO da caixa quando vazia, some ao digitar.
+    - detectar_alternativas=True: ao colar texto com "A) ... B) ... C) ... D) ...",
+      oferece extrair as alternativas pros campos alt_a/alt_b/alt_c/alt_d automaticamente.
     O HTML editado é sincronizado num <textarea hidden> que vai no submit."""
     import html as _html
     valor_escapado_textarea = _html.escape(valor_inicial or "")
@@ -187,6 +189,74 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                     }});
                 }});
             }}
+
+            {"" if not detectar_alternativas else """
+            // ===== Detector de alternativas ao colar =====
+            function detectarAlternativas(texto) {
+                texto = texto.replace(/\\r\\n/g, '\\n').replace(/\\u00A0/g, ' ').trim();
+                // Padrão: início do texto OU quebra de linha, espaços, (opcional, letra A-D, )/./:, espaço
+                const padrao = /(?:^|\\n)[ \\t]*\\(?([A-Da-d])[\\)\\.\\:][ \\t]+/g;
+                const matches = [...texto.matchAll(padrao)];
+                let idxA = -1, idxB = -1, idxC = -1, idxD = -1;
+                for (const m of matches) {
+                    const letra = m[1].toUpperCase();
+                    const pos = m.index;
+                    if (letra === 'A' && idxA === -1) idxA = pos;
+                    else if (letra === 'B' && idxB === -1 && idxA !== -1 && pos > idxA) idxB = pos;
+                    else if (letra === 'C' && idxC === -1 && idxB !== -1 && pos > idxB) idxC = pos;
+                    else if (letra === 'D' && idxD === -1 && idxC !== -1 && pos > idxC) idxD = pos;
+                }
+                if (idxA === -1 || idxB === -1 || idxC === -1 || idxD === -1) return null;
+                const enunciado = texto.slice(0, idxA).trim();
+                function extrair(start, end) {
+                    return texto.slice(start, end).replace(/^\\n?[ \\t]*\\(?[A-Da-d][\\)\\.\\:][ \\t]+/, '').trim();
+                }
+                return {
+                    enunciado,
+                    alternativas: [
+                        extrair(idxA, idxB),
+                        extrair(idxB, idxC),
+                        extrair(idxC, idxD),
+                        extrair(idxD, texto.length),
+                    ]
+                };
+            }
+
+            editor.addEventListener('paste', (e) => {
+                const cb = e.clipboardData || window.clipboardData;
+                if (!cb) return;
+                const texto = cb.getData('text/plain') || '';
+                if (!texto) return;
+                const r = detectarAlternativas(texto);
+                if (!r) return;  // cola normal
+                e.preventDefault();
+                const trunc = s => (s.length > 50 ? s.slice(0, 50) + '...' : s);
+                const msg = 'Detectei 4 alternativas no que você colou. Aplicar automaticamente?\\n\\n'
+                          + 'Enunciado: ' + trunc(r.enunciado) + '\\n'
+                          + 'A) ' + trunc(r.alternativas[0]) + '\\n'
+                          + 'B) ' + trunc(r.alternativas[1]) + '\\n'
+                          + 'C) ' + trunc(r.alternativas[2]) + '\\n'
+                          + 'D) ' + trunc(r.alternativas[3]) + '\\n\\n'
+                          + 'Atenção: substitui o conteúdo atual dos 5 campos.';
+                if (!confirm(msg)) {
+                    document.execCommand('insertText', false, texto);
+                    return;
+                }
+                // Aplica: enunciado limpo + 4 alternativas
+                editor.innerHTML = r.enunciado.replace(/\\n/g, '<br>');
+                hidden.value = editor.innerHTML;
+                refreshPlaceholder();
+                ['a','b','c','d'].forEach((letra, i) => {
+                    const altEd = document.querySelector('.editor-content[data-target="alt_' + letra + '"]');
+                    const altHid = document.getElementById('alt_' + letra + '_hidden');
+                    if (altEd && altHid) {
+                        altEd.innerHTML = r.alternativas[i].replace(/\\n/g, '<br>');
+                        altHid.value = altEd.innerHTML;
+                        altEd.removeAttribute('data-ph-shown');
+                    }
+                });
+            });
+            """}
         }})();
         </script>
     """
@@ -1341,7 +1411,7 @@ def form_nova_questao_passo2(
                 <label>Fonte da imagem 2<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar (negrito, itálico, etc).")}
+            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar. Dica: se você colar uma questão completa com A) B) C) D), eu preencho as alternativas automaticamente.", detectar_alternativas=True)}
 
             <fieldset>
                 <legend>Alternativas — marque o radio da correta</legend>
@@ -3271,7 +3341,7 @@ def form_editar_questao(id: int, request: Request):
                 <label>Fonte<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar.")}
+            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Cole texto com A) B) C) D) para preenchimento automático.", detectar_alternativas=True)}
 
             <fieldset>
                 <legend>Alternativas — marque o radio da correta</legend>
