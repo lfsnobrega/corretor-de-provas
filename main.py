@@ -1055,7 +1055,8 @@ def atualizar_habilidade(id: int, descricao: str = Form("")):
 
 
 @app.get("/questoes", response_class=HTMLResponse)
-def listar_questoes(request: Request, disciplina: Optional[int] = None, ano: Optional[str] = None, bncc: Optional[str] = None, q: Optional[str] = None):
+def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Optional[str] = None, bncc: Optional[str] = None, q: Optional[str] = None):
+    disciplina_id: Optional[int] = int(disciplina) if (disciplina and disciplina.strip().isdigit()) else None
     prof = get_current_professor(request)
     is_admin = bool(prof and prof["is_admin"])
     conn = get_db()
@@ -1073,9 +1074,9 @@ def listar_questoes(request: Request, disciplina: Optional[int] = None, ano: Opt
         WHERE 1=1
     """
     params = []
-    if disciplina:
+    if disciplina_id:
         sql += " AND d.id = ?"
-        params.append(disciplina)
+        params.append(disciplina_id)
     if ano:
         sql += " AND q.ano = ?"
         params.append(ano)
@@ -1118,7 +1119,7 @@ def listar_questoes(request: Request, disciplina: Optional[int] = None, ano: Opt
                 # Constrói query string preservando o filtro
                 qs = _urlp.urlencode({"disciplina": disc_id, "ano": ano_v} if ano_v else {"disciplina": disc_id})
                 # Destaca badge se o filtro atual bate
-                ativo = (disciplina == disc_id and ((ano_v and ano == ano_v) or (not ano_v and not ano)))
+                ativo = (disciplina_id == disc_id and ((ano_v and ano == ano_v) or (not ano_v and not ano)))
                 cor_bg = "#2563eb" if ativo else "var(--bg)"
                 cor_fg = "white" if ativo else "var(--text)"
                 borda = "#2563eb" if ativo else "var(--border)"
@@ -1141,7 +1142,7 @@ def listar_questoes(request: Request, disciplina: Optional[int] = None, ano: Opt
         )
 
     disciplinas_opts = '<option value="">Todas</option>' + "".join(
-        f'<option value="{d["id"]}"{(" selected" if disciplina == d["id"] else "")}>{d["nome"]}</option>'
+        f'<option value="{d["id"]}"{(" selected" if disciplina_id == d["id"] else "")}>{d["nome"]}</option>'
         for d in disciplinas
     )
     anos_opts = '<option value="">Todos</option>' + "".join(
@@ -1486,7 +1487,8 @@ async def criar_questao(
 # ==========================================
 
 @app.get("/provas", response_class=HTMLResponse)
-def listar_provas(request: Request, disciplina: Optional[int] = None, ano: Optional[str] = None, q: Optional[str] = None):
+def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optional[str] = None, q: Optional[str] = None):
+    disciplina_id: Optional[int] = int(disciplina) if (disciplina and disciplina.strip().isdigit()) else None
     prof = get_current_professor(request)
     is_admin = prof and prof["is_admin"]
     conn = get_db()
@@ -1500,13 +1502,13 @@ def listar_provas(request: Request, disciplina: Optional[int] = None, ano: Optio
     if q and q.strip():
         where_extras.append("p.titulo LIKE ?")
         params.append(f"%{q.strip()}%")
-    if disciplina:
+    if disciplina_id:
         where_extras.append("""EXISTS (
             SELECT 1 FROM prova_questoes pq2
             JOIN questoes q2 ON q2.id = pq2.questao_id
             WHERE pq2.prova_id = p.id AND q2.disciplina_id = ?
         )""")
-        params.append(disciplina)
+        params.append(disciplina_id)
     if ano and ano.strip():
         where_extras.append("""EXISTS (
             SELECT 1 FROM prova_questoes pq3
@@ -1556,7 +1558,7 @@ def listar_provas(request: Request, disciplina: Optional[int] = None, ano: Optio
 
     # Filtros
     disciplinas_opts = '<option value="">Todas</option>' + "".join(
-        f'<option value="{d["id"]}"{(" selected" if disciplina == d["id"] else "")}>{d["nome"]}</option>'
+        f'<option value="{d["id"]}"{(" selected" if disciplina_id == d["id"] else "")}>{d["nome"]}</option>'
         for d in disciplinas_lista
     )
     anos_opts = '<option value="">Todos</option>' + "".join(
@@ -2325,11 +2327,15 @@ def adicionar_aluno(request: Request,
 @app.get("/aplicacoes", response_class=HTMLResponse)
 def listar_aplicacoes(
     request: Request,
-    turma: Optional[int] = None,
+    turma: Optional[str] = None,
     modo: Optional[str] = None,
     status: Optional[str] = None,
     q: Optional[str] = None,
 ):
+    # Aceita string vazia ("Todas") sem dar erro de parsing
+    turma_id: Optional[int] = None
+    if turma and turma.strip().isdigit():
+        turma_id = int(turma)
     prof = get_current_professor(request)
     is_admin = prof and prof["is_admin"]
     conn = get_db()
@@ -2344,9 +2350,9 @@ def listar_aplicacoes(
         where_extras.append("(a.titulo LIKE ? OR p.titulo LIKE ?)")
         params.append(f"%{q.strip()}%")
         params.append(f"%{q.strip()}%")
-    if turma:
+    if turma_id:
         where_extras.append("a.turma_id = ?")
-        params.append(turma)
+        params.append(turma_id)
     if modo and modo in ("online", "impressa"):
         where_extras.append("a.modo = ?")
         params.append(modo)
@@ -2377,7 +2383,7 @@ def listar_aplicacoes(
 
     # Filtros
     turmas_opts = '<option value="">Todas</option>' + "".join(
-        f'<option value="{t["id"]}"{(" selected" if turma == t["id"] else "")}>{t["nome"]} ({t["ano_letivo"]})</option>'
+        f'<option value="{t["id"]}"{(" selected" if turma_id == t["id"] else "")}>{t["nome"]} ({t["ano_letivo"]})</option>'
         for t in turmas_lista
     )
     modos_opts = (
@@ -2458,9 +2464,9 @@ def listar_aplicacoes(
             </div>
             """
     else:
-        cards = '<div class="empty">Nenhuma aplicação encontrada com esses filtros.</div>' if (turma or modo or status or q) else '<div class="empty">Nenhuma aplicação gerada ainda.</div>'
+        cards = '<div class="empty">Nenhuma aplicação encontrada com esses filtros.</div>' if (turma_id or modo or status or q) else '<div class="empty">Nenhuma aplicação gerada ainda.</div>'
 
-    tem_filtro = bool(turma or modo or status or q)
+    tem_filtro = bool(turma_id or modo or status or q)
     subtitle = f'{len(aplicacoes)} de {total_geral} aplicação(ões)' if tem_filtro else f'{total_geral} aplicação(ões) cadastrada(s)'
 
     content = f"""
