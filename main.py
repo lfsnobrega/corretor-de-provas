@@ -43,7 +43,100 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 dias
 
 _session_serializer = URLSafeTimedSerializer(SESSION_SECRET_KEY, salt="session-v1")
 
-def _pode_editar_questao(prof: Optional[dict], questao_criador_id: Optional[int]) -> bool:
+def _sanitizar_html_enunciado(html: str) -> str:
+    """Permite apenas tags básicas de formatação no enunciado. Remove scripts, iframes, handlers JS.
+    Tags permitidas: strong/b, em/i, u, br, p, div (só com style text-align), span (só com style text-align), ul, ol, li, blockquote.
+    Atributos permitidos: apenas style com text-align."""
+    import re as _re
+    if not html:
+        return ""
+    # Remove tags perigosas completas (com conteúdo)
+    html = _re.sub(r'<(script|style|iframe|object|embed|form|input|button|textarea|select|link|meta)\b[^>]*>.*?</\1>',
+                   '', html, flags=_re.IGNORECASE | _re.DOTALL)
+    html = _re.sub(r'<(script|style|iframe|object|embed|form|input|button|textarea|select|link|meta)\b[^>]*/?>',
+                   '', html, flags=_re.IGNORECASE)
+    # Remove atributos on* (onclick, onerror, etc.) e javascript: em href/src
+    html = _re.sub(r'\son[a-z]+\s*=\s*"[^"]*"', '', html, flags=_re.IGNORECASE)
+    html = _re.sub(r"\son[a-z]+\s*=\s*'[^']*'", '', html, flags=_re.IGNORECASE)
+    html = _re.sub(r'\son[a-z]+\s*=\s*[^\s>]+', '', html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(href|src)\s*=\s*["\']?\s*javascript:[^"\'>\s]*["\']?', '', html, flags=_re.IGNORECASE)
+    # Whitelist de tags - remove qualquer tag que não esteja na lista
+    permitidas = {"strong", "b", "em", "i", "u", "br", "p", "div", "span", "ul", "ol", "li", "blockquote"}
+    def _filtrar_tag(m):
+        tag_full = m.group(0)
+        tag_name = m.group(1).lower()
+        if tag_name not in permitidas:
+            return ""
+        # Para div/span/p, mantém só style com text-align
+        if tag_name in ("div", "span", "p"):
+            ta_match = _re.search(r'style\s*=\s*["\']([^"\']*text-align\s*:\s*(left|center|right|justify)[^"\']*)["\']', tag_full, _re.IGNORECASE)
+            if ta_match:
+                align_val = ta_match.group(2).lower()
+                return f'<{tag_name} style="text-align:{align_val};">' if not tag_full.startswith("</") else f"</{tag_name}>"
+        # Outras tags: sem atributos
+        if tag_full.startswith("</"):
+            return f"</{tag_name}>"
+        return f"<{tag_name}>"
+    html = _re.sub(r'</?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>', _filtrar_tag, html)
+    return html.strip()
+
+
+def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", required: bool = True, label: str = "Enunciado") -> str:
+    """Editor WYSIWYG simples pro enunciado. Toolbar: B / I / U / centralizar / lista / citação.
+    O HTML editado é sincronizado num <textarea hidden> que vai no submit do form."""
+    import html as _html
+    valor_escapado_textarea = _html.escape(valor_inicial or "")
+    req_attr = " required" if required else ""
+    return f"""
+        <label style="display:block; margin:8px 0;">{label}
+            <div class="editor-toolbar" style="display:flex; gap:4px; flex-wrap:wrap; padding:6px 8px; background:var(--bg-subtle); border:1px solid var(--border); border-bottom:none; border-radius:4px 4px 0 0;">
+                <button type="button" data-cmd="bold" title="Negrito (Ctrl+B)" style="font-weight:700; min-width:32px; padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">B</button>
+                <button type="button" data-cmd="italic" title="Itálico (Ctrl+I)" style="font-style:italic; min-width:32px; padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">I</button>
+                <button type="button" data-cmd="underline" title="Sublinhado (Ctrl+U)" style="text-decoration:underline; min-width:32px; padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">U</button>
+                <span style="border-left:1px solid var(--border); margin:0 4px;"></span>
+                <button type="button" data-cmd="justifyLeft" title="Alinhar à esquerda" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">⇤</button>
+                <button type="button" data-cmd="justifyCenter" title="Centralizar" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">⇔</button>
+                <button type="button" data-cmd="justifyRight" title="Alinhar à direita" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">⇥</button>
+                <span style="border-left:1px solid var(--border); margin:0 4px;"></span>
+                <button type="button" data-cmd="insertUnorderedList" title="Lista" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">• Lista</button>
+                <button type="button" data-cmd="formatBlock" data-arg="blockquote" title="Citação" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;">❝ Citação</button>
+                <span style="border-left:1px solid var(--border); margin:0 4px;"></span>
+                <button type="button" data-cmd="removeFormat" title="Limpar formatação" style="padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px; color:var(--text-muted);">⌫ limpar</button>
+            </div>
+            <div class="editor-content" contenteditable="true" data-target="{name}" style="min-height:120px; padding:12px 14px; border:1px solid var(--border); border-radius:0 0 4px 4px; background:var(--bg); outline:none; font-family:inherit; font-size:14px; line-height:1.5;">{valor_inicial}</div>
+            <textarea name="{name}" id="{name}_hidden" style="display:none;"{req_attr}>{valor_escapado_textarea}</textarea>
+            <p class="muted-line" style="font-size:11px; margin-top:4px;">Selecione o texto e clique nos botões pra formatar. Atalhos: Ctrl+B (negrito), Ctrl+I (itálico), Ctrl+U (sublinhado). Para fórmulas matemáticas, use $x^2$ ou $$ ... $$.</p>
+        </label>
+        <script>
+        (function() {{
+            const editor = document.querySelector('.editor-content[data-target="{name}"]');
+            const hidden = document.getElementById('{name}_hidden');
+            if (!editor || !hidden) return;
+            // Sincronizar editor → hidden textarea (em cada input + antes de submit)
+            function sync() {{ hidden.value = editor.innerHTML; }}
+            editor.addEventListener('input', sync);
+            editor.addEventListener('blur', sync);
+            // Sincroniza no submit do form pai
+            const form = editor.closest('form');
+            if (form) form.addEventListener('submit', sync);
+
+            // Toolbar
+            const toolbar = editor.previousElementSibling;
+            if (toolbar && toolbar.classList.contains('editor-toolbar')) {{
+                toolbar.querySelectorAll('button[data-cmd]').forEach(btn => {{
+                    btn.addEventListener('click', e => {{
+                        e.preventDefault();
+                        const cmd = btn.getAttribute('data-cmd');
+                        const arg = btn.getAttribute('data-arg') || null;
+                        editor.focus();
+                        try {{ document.execCommand(cmd, false, arg); }} catch(err) {{}}
+                        sync();
+                    }});
+                }});
+            }}
+        }})();
+        </script>
+    """
     """Autor da questão OU admin podem editar. Questões legadas (sem dono) só admin edita."""
     if not prof:
         return False
@@ -405,6 +498,12 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
             </div>
         """
 
+    # Sidebar dinâmico: itens de admin escondidos para professores comuns
+    is_admin_view = bool(professor and professor.get("is_admin"))
+    link_disciplinas = f'<a href="/disciplinas"{nav_class("disciplinas")}>Disciplinas</a>' if is_admin_view else ''
+    link_habilidades = f'<a href="/habilidades"{nav_class("habilidades")}>Habilidades BNCC</a>' if is_admin_view else ''
+    link_turmas = f'<a href="/turmas"{nav_class("turmas")}>Turmas</a>' if is_admin_view else ''
+
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -423,13 +522,13 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
             <nav>
                 <a href="/"{nav_class('home')}>Início</a>
                 <div class="sidebar-section">Banco</div>
-                <a href="/disciplinas"{nav_class('disciplinas')}>Disciplinas</a>
-                <a href="/habilidades"{nav_class('habilidades')}>Habilidades BNCC</a>
-                <a href="/questoes"{nav_class('questoes')}>Questões</a>
+                {link_disciplinas}
+                {link_habilidades}
+                <a href="/questoes"{nav_class('questoes')}>Cadastrar questão</a>
                 <div class="sidebar-section">Avaliações</div>
-                <a href="/provas"{nav_class('provas')}>Provas | Tarefas</a>
-                <a href="/turmas"{nav_class('turmas')}>Turmas</a>
-                <a href="/aplicacoes"{nav_class('aplicacoes')}>Aplicações</a>
+                <a href="/provas"{nav_class('provas')}>Cadastrar atividade</a>
+                {link_turmas}
+                <a href="/aplicacoes"{nav_class('aplicacoes')}>Aplicar atividade</a>
             </nav>
             {user_block}
         </aside>
@@ -740,7 +839,9 @@ def home(request: Request):
 
 
 @app.get("/disciplinas", response_class=HTMLResponse)
-def listar_disciplinas():
+def listar_disciplinas(request: Request):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
     conn = get_db()
     disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
     conn.close()
@@ -773,7 +874,9 @@ def criar_disciplina(nome: str = Form(...)):
 
 
 @app.get("/habilidades", response_class=HTMLResponse)
-def listar_habilidades():
+def listar_habilidades(request: Request):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
     conn = get_db()
     habs = conn.execute("SELECT h.id, h.codigo, h.descricao, COUNT(qh.id) AS uso FROM habilidades_bncc h LEFT JOIN questao_habilidades qh ON qh.habilidade_id = h.id GROUP BY h.id ORDER BY h.codigo").fetchall()
     total = len(habs)
@@ -1173,7 +1276,7 @@ def form_nova_questao_passo2(
                 <label>Fonte da imagem 2<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            <label>Enunciado<textarea name="enunciado" required rows="4"></textarea></label>
+            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado")}
 
             <fieldset>
                 <legend>Alternativas — marque o radio da correta</legend>
@@ -1206,7 +1309,7 @@ async def criar_questao(
     conn = get_db()
     cursor = conn.execute(
         "INSERT INTO questoes (disciplina_id, enunciado, ano, criada_por_professor_id) VALUES (?, ?, ?, ?)",
-        (disciplina_id, enunciado.strip(), ano.strip() or None, prof_id)
+        (disciplina_id, _sanitizar_html_enunciado(enunciado), ano.strip() or None, prof_id)
     )
     questao_id = cursor.lastrowid
 
@@ -1727,6 +1830,8 @@ def deletar_prova(id: int):
 
 @app.get("/turmas", response_class=HTMLResponse)
 def listar_turmas(request: Request):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
     prof = get_current_professor(request)
     conn = get_db()
     turmas = conn.execute("SELECT t.id, t.nome, t.ano_letivo, COUNT(a.id) AS total_alunos FROM turmas t LEFT JOIN alunos a ON a.turma_id = t.id GROUP BY t.id ORDER BY t.ano_letivo DESC, t.nome").fetchall()
@@ -1967,6 +2072,8 @@ async def importar_excel(request: Request, arquivo: UploadFile = File(...)):
 
 @app.get("/turmas/{turma_id}", response_class=HTMLResponse)
 def ver_turma(request: Request, turma_id: int):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
     prof = get_current_professor(request)
     is_admin = prof and prof["is_admin"]
     conn = get_db()
@@ -3092,7 +3199,7 @@ def form_editar_questao(id: int, request: Request):
                 <label>Fonte<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            <label>Enunciado<textarea name="enunciado" required rows="4">{enunciado_safe}</textarea></label>
+            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado")}
 
             <fieldset>
                 <legend>Alternativas — marque o radio da correta</legend>
@@ -3218,7 +3325,7 @@ async def atualizar_questao(
             '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
             active="questoes"
         ), status_code=403)
-    conn.execute("UPDATE questoes SET disciplina_id = ?, enunciado = ?, ano = ? WHERE id = ?", (disciplina_id, enunciado.strip(), ano.strip() or None, id))
+    conn.execute("UPDATE questoes SET disciplina_id = ?, enunciado = ?, ano = ? WHERE id = ?", (disciplina_id, _sanitizar_html_enunciado(enunciado), ano.strip() or None, id))
 
     conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
     for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
