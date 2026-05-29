@@ -43,6 +43,18 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 dias
 
 _session_serializer = URLSafeTimedSerializer(SESSION_SECRET_KEY, salt="session-v1")
 
+
+def _pode_editar_questao(prof: Optional[dict], questao_criador_id: Optional[int]) -> bool:
+    """Autor da questão OU admin podem editar. Questões legadas (sem dono) só admin edita."""
+    if not prof:
+        return False
+    if prof.get("is_admin"):
+        return True
+    if questao_criador_id is None:
+        return False
+    return prof["id"] == questao_criador_id
+
+
 def _sanitizar_html_enunciado(html: str) -> str:
     """Permite apenas tags básicas de formatação no enunciado. Remove scripts, iframes, handlers JS.
     Tags permitidas: strong/b, em/i, u, br, p, div (só com style text-align), span (só com style text-align), ul, ol, li, blockquote.
