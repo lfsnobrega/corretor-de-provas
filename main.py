@@ -33,9 +33,13 @@ ANOS = ["6º ano", "7º ano", "8º ano", "9º ano"]
 TIPOS_QUESTAO = {
     "multipla_escolha": {"label": "Múltipla escolha (A/B/C/D)", "icone": "🔘"},
     "discursiva":       {"label": "Discursiva (resposta livre)", "icone": "📝"},
-    # "vf":             {"label": "Verdadeiro ou Falso", "icone": "✓✗"},     # fase 2
-    # "associacao":     {"label": "Associação de colunas", "icone": "↔"},    # fase 3
+    "vf":               {"label": "Verdadeiro ou Falso (afirmações)", "icone": "✓✗"},
+    "associacao":       {"label": "Associação de colunas", "icone": "↔"},
 }
+
+# Limites pra cartão impresso (mantém legibilidade)
+VF_MAX_AFIRMACOES = 5      # até 5 afirmações por questão V/F
+ASSOC_MAX_PARES = 5         # até 5×5 (5 itens × 5 letras) na associação
 
 # === Autenticação ===
 # Variáveis de ambiente esperadas em produção. Em dev, defaults permitem testar.
@@ -341,6 +345,33 @@ def init_db():
         conn.execute("ALTER TABLE questoes ADD COLUMN tipo TEXT DEFAULT 'multipla_escolha'")
         # Questões antigas viram múltipla escolha (que era o único tipo até agora)
         conn.execute("UPDATE questoes SET tipo = 'multipla_escolha' WHERE tipo IS NULL")
+
+    # Tabelas pra V ou F
+    conn.execute("""CREATE TABLE IF NOT EXISTS vf_afirmacoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        questao_id INTEGER NOT NULL,
+        ordem INTEGER NOT NULL,
+        texto TEXT NOT NULL,
+        gabarito TEXT NOT NULL CHECK(gabarito IN ('V','F')),
+        FOREIGN KEY (questao_id) REFERENCES questoes(id) ON DELETE CASCADE
+    )""")
+
+    # Tabelas pra Associação de colunas
+    conn.execute("""CREATE TABLE IF NOT EXISTS assoc_itens_a (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        questao_id INTEGER NOT NULL,
+        ordem INTEGER NOT NULL,
+        texto TEXT NOT NULL,
+        gabarito_letra TEXT NOT NULL,
+        FOREIGN KEY (questao_id) REFERENCES questoes(id) ON DELETE CASCADE
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS assoc_itens_b (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        questao_id INTEGER NOT NULL,
+        letra TEXT NOT NULL,
+        texto TEXT NOT NULL,
+        FOREIGN KEY (questao_id) REFERENCES questoes(id) ON DELETE CASCADE
+    )""")
     # Migrations multi-prof: criada_por_professor_id em provas e aplicacoes
     cols_p = {row[1] for row in conn.execute("PRAGMA table_info(provas)").fetchall()}
     if "criada_por_professor_id" not in cols_p:
@@ -744,8 +775,37 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             marca = ' ✓' if a["correta"] else ''
             alts_html += f'<li{cls}><strong>{a["letra"]})</strong> {a["texto"]}{marca}</li>'
     elif tipo_q == "discursiva":
-        # Discursiva não tem alternativas; mostra um aviso visual
         alts_html = '<li style="list-style:none; padding:8px 12px; background:var(--bg-subtle); border-left:3px solid #3b82f6; color:var(--text-muted); font-style:italic;">📝 Questão discursiva — resposta livre (correção manual)</li>'
+    elif tipo_q == "vf":
+        afirmacoes = conn.execute("SELECT ordem, texto, gabarito FROM vf_afirmacoes WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+        items = ""
+        for af in afirmacoes:
+            cor = "#16a34a" if af["gabarito"] == "V" else "#dc2626"
+            items += (
+                f'<li style="list-style:none; padding:6px 10px; background:var(--bg-subtle); margin-bottom:4px; border-radius:4px; border-left:3px solid {cor};">'
+                f'<strong style="color:{cor};">({af["gabarito"]})</strong> {af["texto"]}'
+                f'</li>'
+            )
+        alts_html = items or '<li style="list-style:none; padding:8px; color:var(--text-muted); font-style:italic;">(sem afirmações cadastradas)</li>'
+    elif tipo_q == "associacao":
+        itens_a = conn.execute("SELECT ordem, texto, gabarito_letra FROM assoc_itens_a WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+        itens_b = conn.execute("SELECT letra, texto FROM assoc_itens_b WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
+        ca_html = "".join(
+            f'<li style="margin-bottom:4px;"><strong>{a["ordem"]+1}.</strong> {a["texto"]} '
+            f'<span style="font-size:11px; color:#16a34a;">→ resposta: ({a["gabarito_letra"]})</span></li>'
+            for a in itens_a
+        )
+        cb_html = "".join(
+            f'<li style="margin-bottom:4px;"><strong>({b["letra"]})</strong> {b["texto"]}</li>'
+            for b in itens_b
+        )
+        alts_html = (
+            f'<li style="list-style:none; padding:8px; background:var(--bg-subtle); border-radius:4px;">'
+            f'<div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">'
+            f'<div><strong style="font-size:12px; text-transform:uppercase; color:var(--text-muted);">Coluna A</strong><ul style="margin:6px 0 0 18px; padding:0;">{ca_html}</ul></div>'
+            f'<div><strong style="font-size:12px; text-transform:uppercase; color:var(--text-muted);">Coluna B</strong><ul style="margin:6px 0 0 18px; padding:0;">{cb_html}</ul></div>'
+            f'</div></li>'
+        )
 
     habilidades_html = ""
     if habilidades:
@@ -753,8 +813,13 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         habilidades_html = f'<div class="habilidades-row">{badges}</div>'
 
     # Badge de tipo (sempre visível)
-    cor_tipo_bg = "#dbeafe" if tipo_q == "multipla_escolha" else "#fef3c7"
-    cor_tipo_fg = "#1e40af" if tipo_q == "multipla_escolha" else "#78350f"
+    cores_tipo = {
+        "multipla_escolha": ("#dbeafe", "#1e40af"),
+        "discursiva":       ("#fef3c7", "#78350f"),
+        "vf":               ("#dcfce7", "#15803d"),
+        "associacao":       ("#fce7f3", "#9d174d"),
+    }
+    cor_tipo_bg, cor_tipo_fg = cores_tipo.get(tipo_q, cores_tipo["multipla_escolha"])
     tipo_badge = f' · <span class="badge" style="background:{cor_tipo_bg}; color:{cor_tipo_fg}; font-size:10px;">{tipo_info["icone"]} {tipo_info["label"]}</span>'
 
     cabecalho = f'Questão {numero} · {q["disciplina_nome"]}' if numero else q["disciplina_nome"]
@@ -1386,7 +1451,7 @@ def form_nova_questao_passo2(
     codigos_clean = [c.strip().upper() for c in habilidades_codigos.replace("\n", ",").split(",") if c.strip()]
     badges_bncc = "".join(f'<span class="badge">{c}</span>' for c in codigos_clean) if codigos_clean else '<span class="muted-line">— sem BNCC —</span>'
 
-    # Bloco de alternativas só aparece se for múltipla escolha
+    # Bloco específico do tipo da questão
     fieldset_alternativas = ""
     enunciado_detecta_alts = (tipo == "multipla_escolha")
     if tipo == "multipla_escolha":
@@ -1419,6 +1484,76 @@ def form_nova_questao_passo2(
                 <strong>📝 Questão discursiva</strong><br>
                 <span style="font-size:13px;">O aluno responderá em texto livre. No modo impresso, será reservado espaço para resposta manuscrita. A correção é manual — feita por você fora do sistema.</span>
             </div>
+        """
+    elif tipo == "vf":
+        # V ou F: até 5 afirmações, cada uma com radio V/F
+        afirms_html = ""
+        for i in range(VF_MAX_AFIRMACOES):
+            editor_afirm = _editor_enunciado_html(
+                name=f"vf_afirm_{i}_texto", valor_inicial="", required=False,
+                label="", compact=True, min_height=42,
+                placeholder=f"Afirmação {i+1} (deixe em branco se não usar)"
+            )
+            afirms_html += (
+                f'<div style="display:grid; grid-template-columns:1fr auto; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+                f'<div style="margin:0;"><strong style="font-size:13px;">Afirmação {i+1}</strong>{editor_afirm}</div>'
+                f'<div style="display:flex; gap:10px; align-items:center; padding-top:24px; white-space:nowrap;">'
+                f'<label style="margin:0; font-size:13px;"><input type="radio" name="vf_afirm_{i}_gabarito" value="V" style="width:auto; margin:0 4px 0 0;">V</label>'
+                f'<label style="margin:0; font-size:13px;"><input type="radio" name="vf_afirm_{i}_gabarito" value="F" style="width:auto; margin:0 4px 0 0;">F</label>'
+                f'</div></div>'
+            )
+        fieldset_alternativas = f"""
+            <fieldset>
+                <legend>Afirmações — marque V ou F para cada (até {VF_MAX_AFIRMACOES})</legend>
+                <p class="muted-line" style="font-size:12px; margin:0 0 10px 0;">Deixe em branco as afirmações que não usar (mínimo 2 afirmações preenchidas).</p>
+                {afirms_html}
+            </fieldset>
+        """
+    elif tipo == "associacao":
+        # Associação: 2 colunas de até 5 itens; coluna A tem texto + qual letra da B é a resposta correta
+        col_a_html = ""
+        for i in range(ASSOC_MAX_PARES):
+            editor_a = _editor_enunciado_html(
+                name=f"assoc_a_{i}_texto", valor_inicial="", required=False,
+                label="", compact=True, min_height=42,
+                placeholder=f"Item {i+1} da coluna A (em branco se não usar)"
+            )
+            # Select pra escolher qual letra da B é o gabarito
+            letras_options = '<option value="">—</option>' + "".join(
+                f'<option value="{chr(97+j)}">{chr(97+j)}</option>' for j in range(ASSOC_MAX_PARES)
+            )
+            col_a_html += (
+                f'<div style="display:grid; grid-template-columns:auto 1fr auto; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+                f'<strong style="padding-top:20px;">{i+1}.</strong>'
+                f'<div style="margin:0;">{editor_a}</div>'
+                f'<label style="margin:0; padding-top:14px; font-size:12px; white-space:nowrap;">Resposta: '
+                f'<select name="assoc_a_{i}_gabarito" style="width:auto; display:inline-block; margin-left:4px;">{letras_options}</select>'
+                f'</label></div>'
+            )
+        col_b_html = ""
+        for j in range(ASSOC_MAX_PARES):
+            letra_b = chr(97+j)
+            editor_b = _editor_enunciado_html(
+                name=f"assoc_b_{letra_b}_texto", valor_inicial="", required=False,
+                label="", compact=True, min_height=42,
+                placeholder=f"Item ({letra_b}) da coluna B (em branco se não usar)"
+            )
+            col_b_html += (
+                f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+                f'<strong style="padding-top:20px;">({letra_b})</strong>'
+                f'<div style="margin:0;">{editor_b}</div>'
+                f'</div>'
+            )
+        fieldset_alternativas = f"""
+            <fieldset>
+                <legend>Coluna A — itens (1, 2, 3...) com gabarito da resposta</legend>
+                <p class="muted-line" style="font-size:12px; margin:0 0 10px 0;">Para cada item da coluna A, indique qual letra da coluna B é a resposta correta. Mínimo 2 pares preenchidos.</p>
+                {col_a_html}
+            </fieldset>
+            <fieldset>
+                <legend>Coluna B — opções de associação (a, b, c...)</legend>
+                {col_b_html}
+            </fieldset>
         """
 
     # Hidden fields carregam dados do passo 1; valores escapados
@@ -1496,6 +1631,8 @@ async def criar_questao(
 ):
     if tipo not in TIPOS_QUESTAO:
         tipo = "multipla_escolha"
+    # Form recebe dinamicamente os campos de V/F e Associação; pega tudo via request
+    form_extra = await request.form()
     prof = get_current_professor(request)
     prof_id = prof["id"] if prof else None
     conn = get_db()
@@ -1520,10 +1657,36 @@ async def criar_questao(
                 f.write(content_bytes)
             conn.execute("INSERT INTO imagens (questao_id, caminho, legenda, fonte, ordem) VALUES (?, ?, ?, ?, ?)", (questao_id, f"static/imagens/{unique_name}", legenda.strip() or None, fonte.strip() or None, ordem))
 
-    # Alternativas só para múltipla escolha
+    # Conteúdo específico do tipo
     if tipo == "multipla_escolha":
         for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
             conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)", (questao_id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
+    elif tipo == "vf":
+        ordem_real = 0
+        for i in range(VF_MAX_AFIRMACOES):
+            texto_afirm = _sanitizar_html_enunciado(str(form_extra.get(f"vf_afirm_{i}_texto", "")))
+            gabarito = str(form_extra.get(f"vf_afirm_{i}_gabarito", "")).strip().upper()
+            if texto_afirm and gabarito in ("V", "F"):
+                conn.execute("INSERT INTO vf_afirmacoes (questao_id, ordem, texto, gabarito) VALUES (?, ?, ?, ?)",
+                             (questao_id, ordem_real, texto_afirm, gabarito))
+                ordem_real += 1
+    elif tipo == "associacao":
+        # Coluna A (com gabarito)
+        ordem_real = 0
+        for i in range(ASSOC_MAX_PARES):
+            texto_a = _sanitizar_html_enunciado(str(form_extra.get(f"assoc_a_{i}_texto", "")))
+            gabarito = str(form_extra.get(f"assoc_a_{i}_gabarito", "")).strip().lower()
+            if texto_a and gabarito:
+                conn.execute("INSERT INTO assoc_itens_a (questao_id, ordem, texto, gabarito_letra) VALUES (?, ?, ?, ?)",
+                             (questao_id, ordem_real, texto_a, gabarito))
+                ordem_real += 1
+        # Coluna B (opções)
+        for j in range(ASSOC_MAX_PARES):
+            letra_b = chr(97+j)
+            texto_b = _sanitizar_html_enunciado(str(form_extra.get(f"assoc_b_{letra_b}_texto", "")))
+            if texto_b:
+                conn.execute("INSERT INTO assoc_itens_b (questao_id, letra, texto) VALUES (?, ?, ?)",
+                             (questao_id, letra_b, texto_b))
 
     for parte in habilidades_codigos.replace("\n", ",").split(","):
         codigo = parte.strip().upper()
@@ -3292,6 +3455,9 @@ def form_editar_questao(id: int, request: Request):
 
     disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
     alts = conn.execute("SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra", (id,)).fetchall()
+    vf_afirms = conn.execute("SELECT ordem, texto, gabarito FROM vf_afirmacoes WHERE questao_id = ? ORDER BY ordem", (id,)).fetchall()
+    assoc_a = conn.execute("SELECT ordem, texto, gabarito_letra FROM assoc_itens_a WHERE questao_id = ? ORDER BY ordem", (id,)).fetchall()
+    assoc_b = conn.execute("SELECT letra, texto FROM assoc_itens_b WHERE questao_id = ? ORDER BY letra", (id,)).fetchall()
     textos = conn.execute("SELECT id, conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem", (id,)).fetchall()
     imagens = conn.execute("SELECT id, caminho, legenda, fonte FROM imagens WHERE questao_id = ? ORDER BY ordem", (id,)).fetchall()
     habilidades = conn.execute("SELECT h.codigo FROM questao_habilidades qh JOIN habilidades_bncc h ON h.id = qh.habilidade_id WHERE qh.questao_id = ? ORDER BY h.codigo", (id,)).fetchall()
@@ -3376,7 +3542,7 @@ def form_editar_questao(id: int, request: Request):
         tipo_q = "multipla_escolha"
     tipo_info = TIPOS_QUESTAO[tipo_q]
 
-    # Bloco de alternativas só pra múltipla escolha
+    # Bloco de alternativas / afirmações / pares — conforme o tipo
     fieldset_alts = ""
     if tipo_q == "multipla_escolha":
         fieldset_alts = f"""
@@ -3390,6 +3556,85 @@ def form_editar_questao(id: int, request: Request):
             <div style="background:#eff6ff; color:#1e3a8a; border:1px solid #3b82f6; padding:14px 16px; border-radius:6px; margin:12px 0;">
                 <strong>📝 Questão discursiva</strong> — resposta livre, correção manual.
             </div>
+        """
+    elif tipo_q == "vf":
+        afirms_dict = {af["ordem"]: af for af in vf_afirms}
+        afirms_html_edit = ""
+        for i in range(VF_MAX_AFIRMACOES):
+            af = afirms_dict.get(i)
+            valor = af["texto"] if af else ""
+            gab = af["gabarito"] if af else None
+            editor = _editor_enunciado_html(
+                name=f"vf_afirm_{i}_texto", valor_inicial=valor, required=False,
+                label="", compact=True, min_height=42,
+                placeholder=f"Afirmação {i+1} (deixe em branco se não usar)"
+            )
+            ck_v = " checked" if gab == "V" else ""
+            ck_f = " checked" if gab == "F" else ""
+            afirms_html_edit += (
+                f'<div style="display:grid; grid-template-columns:1fr auto; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+                f'<div style="margin:0;"><strong style="font-size:13px;">Afirmação {i+1}</strong>{editor}</div>'
+                f'<div style="display:flex; gap:10px; align-items:center; padding-top:24px; white-space:nowrap;">'
+                f'<label style="margin:0; font-size:13px;"><input type="radio" name="vf_afirm_{i}_gabarito" value="V"{ck_v} style="width:auto; margin:0 4px 0 0;">V</label>'
+                f'<label style="margin:0; font-size:13px;"><input type="radio" name="vf_afirm_{i}_gabarito" value="F"{ck_f} style="width:auto; margin:0 4px 0 0;">F</label>'
+                f'</div></div>'
+            )
+        fieldset_alts = f"""
+            <fieldset>
+                <legend>Afirmações — marque V ou F (até {VF_MAX_AFIRMACOES})</legend>
+                {afirms_html_edit}
+            </fieldset>
+        """
+    elif tipo_q == "associacao":
+        assoc_a_dict = {a["ordem"]: a for a in assoc_a}
+        assoc_b_dict = {b["letra"]: b for b in assoc_b}
+        col_a_html_edit = ""
+        for i in range(ASSOC_MAX_PARES):
+            item_a = assoc_a_dict.get(i)
+            val_a = item_a["texto"] if item_a else ""
+            gab_a = item_a["gabarito_letra"] if item_a else ""
+            editor_a = _editor_enunciado_html(
+                name=f"assoc_a_{i}_texto", valor_inicial=val_a, required=False,
+                label="", compact=True, min_height=42,
+                placeholder=f"Item {i+1} da coluna A"
+            )
+            letras_opts = '<option value="">—</option>' + "".join(
+                f'<option value="{chr(97+j)}"{" selected" if gab_a == chr(97+j) else ""}>{chr(97+j)}</option>'
+                for j in range(ASSOC_MAX_PARES)
+            )
+            col_a_html_edit += (
+                f'<div style="display:grid; grid-template-columns:auto 1fr auto; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+                f'<strong style="padding-top:20px;">{i+1}.</strong>'
+                f'<div style="margin:0;">{editor_a}</div>'
+                f'<label style="margin:0; padding-top:14px; font-size:12px; white-space:nowrap;">Resposta: '
+                f'<select name="assoc_a_{i}_gabarito" style="width:auto; display:inline-block; margin-left:4px;">{letras_opts}</select>'
+                f'</label></div>'
+            )
+        col_b_html_edit = ""
+        for j in range(ASSOC_MAX_PARES):
+            letra_b = chr(97+j)
+            item_b = assoc_b_dict.get(letra_b)
+            val_b = item_b["texto"] if item_b else ""
+            editor_b = _editor_enunciado_html(
+                name=f"assoc_b_{letra_b}_texto", valor_inicial=val_b, required=False,
+                label="", compact=True, min_height=42,
+                placeholder=f"Item ({letra_b}) da coluna B"
+            )
+            col_b_html_edit += (
+                f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+                f'<strong style="padding-top:20px;">({letra_b})</strong>'
+                f'<div style="margin:0;">{editor_b}</div>'
+                f'</div>'
+            )
+        fieldset_alts = f"""
+            <fieldset>
+                <legend>Coluna A — itens (1, 2...) com gabarito</legend>
+                {col_a_html_edit}
+            </fieldset>
+            <fieldset>
+                <legend>Coluna B — opções (a, b...)</legend>
+                {col_b_html_edit}
+            </fieldset>
         """
 
     content = f"""
@@ -3556,12 +3801,41 @@ async def atualizar_questao(
     tipo_atual = q_existente["tipo"] if "tipo" in q_existente.keys() and q_existente["tipo"] else "multipla_escolha"
     conn.execute("UPDATE questoes SET disciplina_id = ?, enunciado = ?, ano = ? WHERE id = ?", (disciplina_id, _sanitizar_html_enunciado(enunciado), ano.strip() or None, id))
 
-    # Alternativas só pra múltipla escolha
+    # Recarrega o form pra pegar campos dinâmicos
+    form_extra = await request.form()
+
     if tipo_atual == "multipla_escolha":
         conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
         for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
             conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)",
                          (id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
+    elif tipo_atual == "vf":
+        conn.execute("DELETE FROM vf_afirmacoes WHERE questao_id = ?", (id,))
+        ordem_real = 0
+        for i in range(VF_MAX_AFIRMACOES):
+            texto_afirm = _sanitizar_html_enunciado(str(form_extra.get(f"vf_afirm_{i}_texto", "")))
+            gabarito = str(form_extra.get(f"vf_afirm_{i}_gabarito", "")).strip().upper()
+            if texto_afirm and gabarito in ("V", "F"):
+                conn.execute("INSERT INTO vf_afirmacoes (questao_id, ordem, texto, gabarito) VALUES (?, ?, ?, ?)",
+                             (id, ordem_real, texto_afirm, gabarito))
+                ordem_real += 1
+    elif tipo_atual == "associacao":
+        conn.execute("DELETE FROM assoc_itens_a WHERE questao_id = ?", (id,))
+        conn.execute("DELETE FROM assoc_itens_b WHERE questao_id = ?", (id,))
+        ordem_real = 0
+        for i in range(ASSOC_MAX_PARES):
+            texto_a = _sanitizar_html_enunciado(str(form_extra.get(f"assoc_a_{i}_texto", "")))
+            gabarito = str(form_extra.get(f"assoc_a_{i}_gabarito", "")).strip().lower()
+            if texto_a and gabarito:
+                conn.execute("INSERT INTO assoc_itens_a (questao_id, ordem, texto, gabarito_letra) VALUES (?, ?, ?, ?)",
+                             (id, ordem_real, texto_a, gabarito))
+                ordem_real += 1
+        for j in range(ASSOC_MAX_PARES):
+            letra_b = chr(97+j)
+            texto_b = _sanitizar_html_enunciado(str(form_extra.get(f"assoc_b_{letra_b}_texto", "")))
+            if texto_b:
+                conn.execute("INSERT INTO assoc_itens_b (questao_id, letra, texto) VALUES (?, ?, ?)",
+                             (id, letra_b, texto_b))
 
     conn.execute("DELETE FROM questao_habilidades WHERE questao_id = ?", (id,))
     for parte in habilidades_codigos.replace("\n", ",").split(","):
@@ -4227,7 +4501,7 @@ def imprimir_prova(prova_id: int):
         return RedirectResponse("/provas", status_code=303)
 
     questoes = conn.execute("""
-        SELECT q.id, q.enunciado, d.nome AS disciplina_nome
+        SELECT q.id, q.enunciado, q.tipo, d.nome AS disciplina_nome
         FROM prova_questoes pq
         JOIN questoes q ON q.id = pq.questao_id
         JOIN disciplinas d ON d.id = q.disciplina_id
@@ -4236,9 +4510,9 @@ def imprimir_prova(prova_id: int):
 
     questoes_html = ""
     for idx, q in enumerate(questoes, start=1):
+        tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
         textos = conn.execute("SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
         imagens = conn.execute("SELECT caminho, legenda, fonte FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
-        alts = conn.execute("SELECT letra, texto FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
 
         textos_html = ""
         for t in textos:
@@ -4251,7 +4525,47 @@ def imprimir_prova(prova_id: int):
             fonte_html = f'<figcaption><small>Fonte: {img["fonte"]}</small></figcaption>' if img["fonte"] else ""
             imagens_html += f'<figure><img src="/{img["caminho"]}" alt="">{legenda_html}{fonte_html}</figure>'
 
-        alts_html = "".join(f'<li><strong>{a["letra"]})</strong> {a["texto"]}</li>' for a in alts)
+        # Conteúdo específico do tipo
+        if tipo_q == "multipla_escolha":
+            alts = conn.execute("SELECT letra, texto FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
+            corpo_resposta = "<ul class=\"q-alts\">" + "".join(f'<li><strong>{a["letra"]})</strong> {a["texto"]}</li>' for a in alts) + "</ul>"
+        elif tipo_q == "discursiva":
+            # Linhas em branco pra resposta manuscrita
+            linhas = "".join('<div style="border-bottom: 1px solid #999; height: 22px; margin-bottom: 4px;"></div>' for _ in range(6))
+            corpo_resposta = f'<div style="margin-top:10px;"><strong style="font-size:11px; color:#555;">Resposta:</strong>{linhas}</div>'
+        elif tipo_q == "vf":
+            afirms = conn.execute("SELECT ordem, texto FROM vf_afirmacoes WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+            linhas = ""
+            for af in afirms:
+                num_sub = f"{idx}.{af['ordem']+1}"
+                linhas += (
+                    f'<div style="display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center; margin-bottom:6px; padding:4px 0; border-bottom:1px dotted #ccc;">'
+                    f'<strong style="min-width:32px;">{num_sub}</strong>'
+                    f'<span>{af["texto"]}</span>'
+                    f'<span style="font-size:11px; color:#555; white-space:nowrap;">( ) V&nbsp;&nbsp;( ) F</span>'
+                    f'</div>'
+                )
+            corpo_resposta = f'<div style="margin-top:8px;"><strong style="font-size:11px; color:#555;">Julgue cada afirmação:</strong>{linhas}</div>'
+        elif tipo_q == "associacao":
+            itens_a = conn.execute("SELECT ordem, texto FROM assoc_itens_a WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+            itens_b = conn.execute("SELECT letra, texto FROM assoc_itens_b WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
+            ca = "".join(f'<li><strong>{a["ordem"]+1}.</strong> {a["texto"]}</li>' for a in itens_a)
+            cb = "".join(f'<li><strong>({b["letra"]})</strong> {b["texto"]}</li>' for b in itens_b)
+            # Linhas pra o aluno escrever as respostas (1→ , 2→ , ...)
+            respostas = " ".join(
+                f'<span style="border-bottom:1px solid #555; display:inline-block; min-width:30px;">&nbsp;</span> ({a["ordem"]+1})'
+                for a in itens_a
+            )
+            corpo_resposta = (
+                f'<div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:8px;">'
+                f'<div><strong style="font-size:11px; color:#555;">Coluna A</strong><ul style="margin:6px 0 0 20px;">{ca}</ul></div>'
+                f'<div><strong style="font-size:11px; color:#555;">Coluna B</strong><ul style="margin:6px 0 0 20px;">{cb}</ul></div>'
+                f'</div>'
+                f'<div style="margin-top:10px; padding:6px 10px; background:#f9f9f9; border:1px dashed #aaa; border-radius:4px; font-size:12px;">'
+                f'<strong>Resposta — associe cada item da A à letra da B:</strong> {respostas}</div>'
+            )
+        else:
+            corpo_resposta = ""
 
         bncc_pref = _bncc_prefix(conn, q["id"])
         questoes_html += f"""
@@ -4259,7 +4573,7 @@ def imprimir_prova(prova_id: int):
             <div class="q-head">Questão {idx} · {q['disciplina_nome']}</div>
             {textos_html}{imagens_html}
             <div class="q-enunciado">{bncc_pref}{q['enunciado']}</div>
-            <ul class="q-alts">{alts_html}</ul>
+            {corpo_resposta}
         </div>
         """
 
