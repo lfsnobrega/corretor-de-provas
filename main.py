@@ -346,6 +346,11 @@ def init_db():
         # Questões antigas viram múltipla escolha (que era o único tipo até agora)
         conn.execute("UPDATE questoes SET tipo = 'multipla_escolha' WHERE tipo IS NULL")
 
+    # Migração: respostas ganham coluna pra V/F e Associação (JSON)
+    cols_resp = {row[1] for row in conn.execute("PRAGMA table_info(respostas)").fetchall()}
+    if "dados_extra" not in cols_resp:
+        conn.execute("ALTER TABLE respostas ADD COLUMN dados_extra TEXT")
+
     # Tabelas pra V ou F
     conn.execute("""CREATE TABLE IF NOT EXISTS vf_afirmacoes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3107,16 +3112,80 @@ def _bncc_prefix(conn, questao_id):
     return f"<strong>({codigos})</strong> "
 
 
+def _gravar_resposta_questao(conn, aplicacao_id, aluno_id, questao_id, tipo, valor):
+    """Grava uma resposta no formato correto pro tipo da questão.
+    valor:
+      - multipla_escolha: string "A"/"B"/"C"/"D"/None
+      - vf: dict {"0":"V", "1":"F", ...}
+      - associacao: dict {"0":"b", "1":"a", ...}
+      - discursiva: ignora (correção manual fora do sistema)"""
+    import json as _json
+    if tipo == "multipla_escolha":
+        if valor and valor in ("A", "B", "C", "D"):
+            conn.execute(
+                "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?, ?, ?, ?)",
+                (aplicacao_id, aluno_id, questao_id, valor)
+            )
+    elif tipo in ("vf", "associacao"):
+        if isinstance(valor, dict) and any(v for v in valor.values() if v):
+            conn.execute(
+                "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, dados_extra) VALUES (?, ?, ?, ?)",
+                (aplicacao_id, aluno_id, questao_id, _json.dumps(valor))
+            )
+    # discursiva: nada
+
+
 def _calcular_nota(conn, aplicacao_id, aluno_id):
+    """Calcula (acertos, total) considerando todos os tipos.
+    Regra: múltipla escolha = 0/1 (compara letra). V/F e Associação = 0/1 só se TODAS as
+    afirmações/pares estiverem corretas. Discursiva entra no total mas conta 0 (correção manual)."""
+    import json as _json
     apl = conn.execute("SELECT prova_id FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
     if not apl:
         return (0, 0)
-    total = conn.execute("SELECT COUNT(*) AS c FROM prova_questoes WHERE prova_id = ?", (apl["prova_id"],)).fetchone()["c"]
-    acertos = conn.execute("""
-        SELECT COUNT(*) AS c FROM respostas r
-        JOIN alternativas alt ON alt.questao_id = r.questao_id AND alt.letra = r.alternativa_letra
-        WHERE r.aplicacao_id = ? AND r.aluno_id = ? AND alt.correta = 1
-    """, (aplicacao_id, aluno_id)).fetchone()["c"]
+    questoes = conn.execute("""
+        SELECT q.id, q.tipo FROM prova_questoes pq
+        JOIN questoes q ON q.id = pq.questao_id
+        WHERE pq.prova_id = ? ORDER BY pq.ordem
+    """, (apl["prova_id"],)).fetchall()
+    total = len(questoes)
+    acertos = 0
+    for q in questoes:
+        tipo = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+        resp = conn.execute(
+            "SELECT alternativa_letra, dados_extra FROM respostas WHERE aplicacao_id = ? AND aluno_id = ? AND questao_id = ?",
+            (aplicacao_id, aluno_id, q["id"])
+        ).fetchone()
+        if not resp:
+            continue
+        if tipo == "multipla_escolha":
+            ok = conn.execute(
+                "SELECT 1 FROM alternativas WHERE questao_id = ? AND letra = ? AND correta = 1",
+                (q["id"], resp["alternativa_letra"])
+            ).fetchone()
+            if ok:
+                acertos += 1
+        elif tipo == "vf":
+            try:
+                marcadas = _json.loads(resp["dados_extra"] or "{}")
+            except Exception:
+                marcadas = {}
+            gabaritos = {str(a["ordem"]): a["gabarito"] for a in conn.execute(
+                "SELECT ordem, gabarito FROM vf_afirmacoes WHERE questao_id = ?", (q["id"],)
+            ).fetchall()}
+            if gabaritos and all(marcadas.get(k) == v for k, v in gabaritos.items()):
+                acertos += 1
+        elif tipo == "associacao":
+            try:
+                marcadas = _json.loads(resp["dados_extra"] or "{}")
+            except Exception:
+                marcadas = {}
+            gabaritos = {str(a["ordem"]): a["gabarito_letra"] for a in conn.execute(
+                "SELECT ordem, gabarito_letra FROM assoc_itens_a WHERE questao_id = ?", (q["id"],)
+            ).fetchall()}
+            if gabaritos and all(marcadas.get(k) == v for k, v in gabaritos.items()):
+                acertos += 1
+        # discursiva: não soma acerto automático
     return (acertos, total)
 
 
@@ -4654,8 +4723,136 @@ def imprimir_prova(prova_id: int):
 </html>""")
 
 
-def _gerar_cartao_resposta_pdf(apl, alunos, n_questoes):
-    """Gera PDF com cartões resposta padronizados (um por aluno) para OMR posterior."""
+def _calcular_layout_cartao(questoes_info):
+    """Calcula coordenadas das bolhas pro cartão de respostas.
+    Recebe lista de dicts: [{id, num, tipo, vf_count, assoc_a_count, assoc_b_count}, ...]
+    Retorna lista de blocos: [{num, tipo, top_y_mm, height_mm, bubbles: [{label, x_mm, y_mm}], header: str}]
+    Coordenadas em mm. Origem (0,0) é o canto superior esquerdo da folha A4 (210x297mm).
+    Usado tanto pelo gerador de PDF quanto pelo leitor OMR — garantia de sincronia."""
+    # Dimensões A4
+    PAGE_W = 210
+    PAGE_H = 297
+    MARGEM = 10
+    MARKER = 8
+
+    # Área útil: abaixo do cabeçalho (~55mm pra título/aluno/QR)
+    AREA_TOP_Y = 75      # começa abaixo do header
+    AREA_BOTTOM_Y = PAGE_H - MARGEM - MARKER - 3   # acima dos marcadores inferiores
+    BLOCK_W_MM = 80
+    BLOCK_X_INIT = 25    # x do início da coluna 1
+    NUM_OFFSET_X = 18    # onde fica o número
+    FIRST_BUBBLE_X = 28  # onde começa a primeira bolha
+
+    ROW_H = 8           # altura padrão de linha
+    BUBBLE_SPACING = 9  # distância entre bolhas
+    HEADER_H = 6        # cabeçalho de cada bloco (tipo da questão)
+
+    blocos = []
+    cur_y = AREA_TOP_Y
+    cur_col = 0
+    cur_x = BLOCK_X_INIT + cur_col * BLOCK_W_MM
+
+    for info in questoes_info:
+        tipo = info["tipo"]
+        if tipo == "discursiva":
+            continue  # discursiva não vai pro cartão (correção manual)
+
+        # Calcular altura do bloco
+        if tipo == "multipla_escolha":
+            n_linhas = 1
+        elif tipo == "vf":
+            n_linhas = info.get("vf_count", 0)
+            if n_linhas == 0:
+                continue
+        elif tipo == "associacao":
+            n_linhas = info.get("assoc_a_count", 0)
+            if n_linhas == 0:
+                continue
+        else:
+            continue
+
+        bloco_h = HEADER_H + n_linhas * ROW_H + 2  # +2 pequena folga
+
+        # Cabe na coluna atual?
+        if cur_y + bloco_h > AREA_BOTTOM_Y:
+            cur_col += 1
+            if cur_col >= 2:
+                # extrapolou 2 colunas — quebrar pra próxima página
+                # (por enquanto não suportamos; aviso silencioso e cortamos)
+                break
+            cur_x = BLOCK_X_INIT + cur_col * BLOCK_W_MM
+            cur_y = AREA_TOP_Y
+
+        bubbles = []
+        labels_header = ""
+
+        if tipo == "multipla_escolha":
+            labels_header = "A   B   C   D"
+            for i, letra in enumerate(["A", "B", "C", "D"]):
+                bx = cur_x + FIRST_BUBBLE_X + i * BUBBLE_SPACING
+                by = cur_y + HEADER_H + 4
+                bubbles.append({"label": letra, "x_mm": bx, "y_mm": by, "afirm": None, "item": None})
+
+        elif tipo == "vf":
+            labels_header = "V   F"
+            for k in range(n_linhas):
+                by = cur_y + HEADER_H + 4 + k * ROW_H
+                for i, vf in enumerate(["V", "F"]):
+                    bx = cur_x + FIRST_BUBBLE_X + i * BUBBLE_SPACING
+                    bubbles.append({"label": vf, "x_mm": bx, "y_mm": by, "afirm": k, "item": None})
+
+        elif tipo == "associacao":
+            n_letras = info.get("assoc_b_count", 0)
+            letras = [chr(97 + i) for i in range(n_letras)]
+            labels_header = "   ".join(letras)
+            for k in range(n_linhas):
+                by = cur_y + HEADER_H + 4 + k * ROW_H
+                for i, letra in enumerate(letras):
+                    bx = cur_x + FIRST_BUBBLE_X + i * BUBBLE_SPACING
+                    bubbles.append({"label": letra, "x_mm": bx, "y_mm": by, "afirm": None, "item": k})
+
+        blocos.append({
+            "num": info["num"],
+            "questao_id": info["id"],
+            "tipo": tipo,
+            "top_y_mm": cur_y,
+            "x_mm": cur_x,
+            "height_mm": bloco_h,
+            "header": labels_header,
+            "bubbles": bubbles,
+            "n_linhas": n_linhas,
+        })
+
+        cur_y += bloco_h + 2  # +2 espaço entre blocos
+
+    return blocos
+
+
+def _coletar_info_questoes_cartao(conn, prova_id):
+    """Coleta info necessária pra layout do cartão a partir da prova."""
+    questoes = conn.execute("""
+        SELECT q.id, q.tipo
+        FROM prova_questoes pq
+        JOIN questoes q ON q.id = pq.questao_id
+        WHERE pq.prova_id = ?
+        ORDER BY pq.ordem
+    """, (prova_id,)).fetchall()
+    infos = []
+    for idx, q in enumerate(questoes, start=1):
+        tipo = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+        info = {"id": q["id"], "num": idx, "tipo": tipo, "vf_count": 0, "assoc_a_count": 0, "assoc_b_count": 0}
+        if tipo == "vf":
+            info["vf_count"] = conn.execute("SELECT COUNT(*) AS c FROM vf_afirmacoes WHERE questao_id = ?", (q["id"],)).fetchone()["c"]
+        elif tipo == "associacao":
+            info["assoc_a_count"] = conn.execute("SELECT COUNT(*) AS c FROM assoc_itens_a WHERE questao_id = ?", (q["id"],)).fetchone()["c"]
+            info["assoc_b_count"] = conn.execute("SELECT COUNT(*) AS c FROM assoc_itens_b WHERE questao_id = ?", (q["id"],)).fetchone()["c"]
+        infos.append(info)
+    return infos
+
+
+def _gerar_cartao_resposta_pdf(apl, alunos, questoes_info):
+    """Gera PDF com cartões resposta padronizados (um por aluno) para OMR posterior.
+    questoes_info: lista de dicts retornada por _coletar_info_questoes_cartao()."""
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import mm
@@ -4664,6 +4861,10 @@ def _gerar_cartao_resposta_pdf(apl, alunos, n_questoes):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
+
+    blocos = _calcular_layout_cartao(questoes_info)
+    n_questoes_no_cartao = len(blocos)
+    bubble_radius = 2.2 * mm
 
     for aluno in alunos:
         # 4 marcadores de canto pra OMR (quadrados pretos)
@@ -4687,7 +4888,7 @@ def _gerar_cartao_resposta_pdf(apl, alunos, n_questoes):
         num_str = f"Nº {aluno['numero']} · " if aluno["numero"] else ""
         c.drawString(30*mm, height - 46*mm, f"{num_str}Código: {aluno['codigo_unico']}")
 
-        # QR Code: codifica aluno_id e aplicacao_id pra identificação automática via OMR
+        # QR Code: codifica aluno_id e aplicacao_id
         qr_data = f"CR:{aluno['id']}:{apl['id']}"
         qr_obj = qrcode.QRCode(box_size=10, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
         qr_obj.add_data(qr_data)
@@ -4702,52 +4903,52 @@ def _gerar_cartao_resposta_pdf(apl, alunos, n_questoes):
         c.setFont("Helvetica", 8)
         c.drawString(30*mm, height - 55*mm, "Preencha com caneta preta. Pinte toda a bolha. Não use corretivo nem rasure.")
 
-        # Grade de bolhas — 1 ou 2 colunas dependendo do n de questões
-        n_cols = 1 if n_questoes <= 25 else 2
-        questions_per_col = (n_questoes + n_cols - 1) // n_cols
+        # Renderiza blocos
+        for blk in blocos:
+            tipo = blk["tipo"]
+            # Cabeçalho do bloco: "Q3 (V/F)"  com a legenda das colunas
+            label_tipo = {"multipla_escolha": "", "vf": "(V/F)", "associacao": "(Assoc.)"}.get(tipo, "")
+            c.setFont("Helvetica-Bold", 9)
+            # Posição em PDF: y é "altura - y_mm" (PDF tem origem em baixo)
+            head_y_pdf = height - blk["top_y_mm"] * mm
+            c.drawString(blk["x_mm"] * mm, head_y_pdf, f"Q{blk['num']} {label_tipo}")
+            # Header de colunas (A B C D / V F / a b c)
+            c.setFont("Helvetica-Bold", 8)
+            c.setFillColorRGB(0.4, 0.4, 0.4)
+            c.drawString((blk["x_mm"] + 25) * mm, head_y_pdf, blk["header"])
+            c.setFillColorRGB(0, 0, 0)
 
-        bubble_radius = 2.5 * mm
-        row_height = 8 * mm
-        col_letters = ["A", "B", "C", "D"]
-        col_letter_spacing = 12 * mm
+            # Pra V/F e Associação, mostrar números das afirmações/itens (1, 2, 3...)
+            if tipo == "vf":
+                c.setFont("Helvetica", 8)
+                for k in range(blk["n_linhas"]):
+                    by_mm = blk["top_y_mm"] + 6 + 4 + k * 8
+                    c.drawRightString((blk["x_mm"] + 16) * mm, (height - by_mm * mm) - 1,
+                                       f"{blk['num']}.{k+1}")
+            elif tipo == "associacao":
+                c.setFont("Helvetica", 8)
+                for k in range(blk["n_linhas"]):
+                    by_mm = blk["top_y_mm"] + 6 + 4 + k * 8
+                    c.drawRightString((blk["x_mm"] + 16) * mm, (height - by_mm * mm) - 1,
+                                       f"{k+1}.")
+            elif tipo == "multipla_escolha":
+                c.setFont("Helvetica", 9)
+                by_mm = blk["top_y_mm"] + 6 + 4
+                c.drawRightString((blk["x_mm"] + 16) * mm, (height - by_mm * mm) - 1,
+                                   f"{blk['num']}.")
 
-        if n_cols == 1:
-            block_width = 80 * mm
-            start_x_first = 55 * mm
-        else:
-            block_width = 80 * mm
-            start_x_first = 25 * mm
+            # Bolhas
+            for b in blk["bubbles"]:
+                # Converte mm → PDF point (origem do PDF é canto inf esquerdo)
+                bx_pdf = b["x_mm"] * mm
+                by_pdf = height - b["y_mm"] * mm
+                c.circle(bx_pdf, by_pdf, bubble_radius, stroke=1, fill=0)
 
-        start_y = height - 75 * mm
-
-        for col_idx in range(n_cols):
-            block_x = start_x_first + col_idx * block_width
-
-            # Cabeçalho A B C D
-            c.setFont("Helvetica-Bold", 10)
-            for i, letra in enumerate(col_letters):
-                c.drawCentredString(block_x + 22*mm + i * col_letter_spacing, start_y + 4*mm, letra)
-
-            # Questões desta coluna
-            start_q = col_idx * questions_per_col
-            end_q = min(start_q + questions_per_col, n_questoes)
-
-            c.setFont("Helvetica", 10)
-            for offset in range(end_q - start_q):
-                q_num = start_q + offset + 1
-                y = start_y - offset * row_height
-                if y < 25 * mm:
-                    break
-                c.drawRightString(block_x + 15*mm, y - 1*mm, f"{q_num}.")
-                for i in range(4):
-                    x = block_x + 22*mm + i * col_letter_spacing
-                    c.circle(x, y, bubble_radius, stroke=1, fill=0)
-
-        # Rodapé com identificador legível
+        # Rodapé
         c.setFont("Helvetica", 7)
         c.setFillColorRGB(0.5, 0.5, 0.5)
         c.drawString(margin + marker_size + 4*mm, margin + 2*mm,
-                     f"Cartão resposta · Aluno {aluno['id']} · Aplicação {apl['id']} · {n_questoes} questões")
+                     f"Cartão resposta · Aluno {aluno['id']} · Aplicação {apl['id']} · {n_questoes_no_cartao} questões")
         c.setFillColorRGB(0, 0, 0)
 
         c.showPage()
@@ -4781,7 +4982,8 @@ def cartao_resposta_pdf(aplicacao_id: int):
 
     apl_dict = dict(apl)
     apl_dict["id"] = aplicacao_id
-    buffer = _gerar_cartao_resposta_pdf(apl_dict, alunos, len(questoes))
+    questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+    buffer = _gerar_cartao_resposta_pdf(apl_dict, alunos, questoes_info)
 
     base_name = (apl["titulo"] or apl["prova_titulo"]).lower().replace(" ", "_")
     safe = "".join(c for c in base_name if c.isalnum() or c in "_-")[:40]
@@ -4842,7 +5044,7 @@ def _decode_image_universal(image_bytes, filename=""):
     return img, None
 
 
-def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", threshold_modo="normal"):
+def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", threshold_modo="normal", questoes_info=None):
     """Processa imagem de cartão resposta preenchido:
     - Detecta marcadores de canto
     - Corrige perspectiva
@@ -4976,34 +5178,63 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
     def mm_to_px_y(mm_y_from_bottom):
         return int((297 - mm_y_from_bottom) / 297 * canon_h)
 
-    n_cols = 1 if n_questoes_esperado <= 25 else 2
-    questions_per_col = (n_questoes_esperado + n_cols - 1) // n_cols
-    block_x_mm_start = 55 if n_cols == 1 else 25
-    block_width_mm = 80
-    bubble_radius_mm = 2.5
-    bubble_radius_px = int(bubble_radius_mm / 210 * canon_w)
-    col_letter_spacing_mm = 12
-    start_y_mm = 222
-    row_height_mm = 8
+    # Importante: mm_to_px_y aceita coord medida a partir do topo da página (igual layout do cartão).
+    # Se o sistema usar "mm_y_from_bottom" em coord, converter por subtração.
+    def mm_top_to_px_y(mm_y_from_top):
+        return int(mm_y_from_top / 297 * canon_h)
 
-    bubble_positions = []  # (q_num, letra, x_px, y_px)
-    for col_idx in range(n_cols):
-        block_x_mm = block_x_mm_start + col_idx * block_width_mm
-        start_q = col_idx * questions_per_col
-        end_q = min(start_q + questions_per_col, n_questoes_esperado)
-        for offset in range(end_q - start_q):
-            q_num = start_q + offset + 1
-            y_mm = start_y_mm - offset * row_height_mm
-            y_px = mm_to_px_y(y_mm)
-            for i, letra in enumerate(["A", "B", "C", "D"]):
-                x_mm = block_x_mm + 22 + i * col_letter_spacing_mm
-                x_px = mm_to_px_x(x_mm)
-                bubble_positions.append((q_num, letra, x_px, y_px))
+    # === NOVO: layout dinâmico baseado em questoes_info se foi passado ===
+    # Fallback: legado, layout fixo A/B/C/D pra n_questoes_esperado
+    bubble_positions = []  # (q_num, letra/label, x_px, y_px, afirm, item, tipo)
+
+    if questoes_info is not None and len(questoes_info) > 0:
+        # Usa o mesmo cálculo do gerador pra ter mesmas coordenadas
+        blocos = _calcular_layout_cartao(questoes_info)
+        bubble_radius_mm = 2.2
+        bubble_radius_px = int(bubble_radius_mm / 210 * canon_w)
+        for blk in blocos:
+            for b in blk["bubbles"]:
+                x_px = mm_to_px_x(b["x_mm"])
+                y_px = mm_top_to_px_y(b["y_mm"])
+                bubble_positions.append({
+                    "q": blk["num"], "tipo": blk["tipo"],
+                    "label": b["label"], "afirm": b["afirm"], "item": b["item"],
+                    "x": x_px, "y": y_px
+                })
+    else:
+        # Modo legado: layout antigo (1 ou 2 colunas, A/B/C/D só)
+        n_cols = 1 if n_questoes_esperado <= 25 else 2
+        questions_per_col = (n_questoes_esperado + n_cols - 1) // n_cols
+        block_x_mm_start = 55 if n_cols == 1 else 25
+        block_width_mm = 80
+        bubble_radius_mm = 2.5
+        bubble_radius_px = int(bubble_radius_mm / 210 * canon_w)
+        col_letter_spacing_mm = 12
+        start_y_mm = 222
+        row_height_mm = 8
+
+        for col_idx in range(n_cols):
+            block_x_mm = block_x_mm_start + col_idx * block_width_mm
+            start_q = col_idx * questions_per_col
+            end_q = min(start_q + questions_per_col, n_questoes_esperado)
+            for offset in range(end_q - start_q):
+                q_num = start_q + offset + 1
+                y_mm = start_y_mm - offset * row_height_mm
+                y_px = mm_to_px_y(y_mm)
+                for i, letra in enumerate(["A", "B", "C", "D"]):
+                    x_mm = block_x_mm + 22 + i * col_letter_spacing_mm
+                    x_px = mm_to_px_x(x_mm)
+                    bubble_positions.append({
+                        "q": q_num, "tipo": "multipla_escolha",
+                        "label": letra, "afirm": None, "item": None,
+                        "x": x_px, "y": y_px
+                    })
 
     # Sample darkness for each bubble
     sample_radius = max(3, bubble_radius_px - 2)
     bubble_data = []
-    for q_num, letra, x, y in bubble_positions:
+    for bp in bubble_positions:
+        x, y = bp["x"], bp["y"]
         y1 = max(0, y - sample_radius)
         y2 = min(canon_h, y + sample_radius)
         x1 = max(0, x - sample_radius)
@@ -5012,16 +5243,25 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
         if region.size == 0:
             continue
         mean = float(region.mean())
-        bubble_data.append({"q": q_num, "letra": letra, "x": x, "y": y, "mean": mean, "marked": False})
+        bubble_data.append({**bp, "mean": mean, "marked": False})
 
-    # Decide which bubble (if any) is marked per question
-    by_q = {}
+    # Agrupa por (questao, afirmação/item) — cada grupo decide independentemente
+    # Pra multipla_escolha: agrupar só por q
+    # Pra vf: agrupar por (q, afirm) — 2 bolhas por grupo (V/F)
+    # Pra associacao: agrupar por (q, item) — N bolhas por grupo
+    grupos = {}
     for b in bubble_data:
-        by_q.setdefault(b["q"], []).append(b)
+        if b["tipo"] == "multipla_escolha":
+            key = (b["q"], None, None)
+        elif b["tipo"] == "vf":
+            key = (b["q"], b["afirm"], None)
+        elif b["tipo"] == "associacao":
+            key = (b["q"], None, b["item"])
+        else:
+            continue
+        grupos.setdefault(key, []).append(b)
 
-    answers = {}
-    warnings = []
-    # Thresholds adaptáveis: 'normal' (calibrado) ou 'permissivo' (aceita marcas mais claras)
+    # Thresholds
     if threshold_modo == "permissivo":
         DARK_THRESHOLD = 140
         AMBIGUOUS_THRESHOLD = 165
@@ -5031,23 +5271,48 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
         AMBIGUOUS_THRESHOLD = 140
         LIGHT_THRESHOLD = 180
 
-    for q_num, bubbles in sorted(by_q.items()):
+    # answers estruturada por tipo:
+    # - multipla_escolha: { q_num: "A"/None }
+    # - vf: { q_num: {"0": "V", "1": "F", ...} }
+    # - associacao: { q_num: {"0": "b", "1": "a", ...} }
+    answers = {}
+    warnings = []
+    for (q_num, afirm, item), bubbles in sorted(grupos.items(), key=lambda x: (x[0][0], x[0][1] if x[0][1] is not None else -1, x[0][2] if x[0][2] is not None else -1)):
         bubbles.sort(key=lambda b: b["mean"])
         darkest = bubbles[0]
         second = bubbles[1] if len(bubbles) > 1 else None
+        tipo = darkest["tipo"]
 
+        # Decide marcação deste grupo
         if darkest["mean"] > LIGHT_THRESHOLD:
-            answers[q_num] = None
+            marcado = None
         elif darkest["mean"] < DARK_THRESHOLD:
-            answers[q_num] = darkest["letra"]
+            marcado = darkest["label"]
             darkest["marked"] = True
             if second and second["mean"] < AMBIGUOUS_THRESHOLD:
-                warnings.append(f"Questão {q_num}: marcação ambígua entre {darkest['letra']} e {second['letra']} (confira)")
+                ctx = f"Q{q_num}"
+                if afirm is not None: ctx += f".{afirm+1}"
+                if item is not None: ctx += f" item {item+1}"
+                warnings.append(f"{ctx}: marcação ambígua entre {darkest['label']} e {second['label']} (confira)")
         else:
-            # Light/uncertain mark
-            answers[q_num] = darkest["letra"]
+            marcado = darkest["label"]
             darkest["marked"] = True
-            warnings.append(f"Questão {q_num}: marca fraca em {darkest['letra']} (confira)")
+            ctx = f"Q{q_num}"
+            if afirm is not None: ctx += f".{afirm+1}"
+            if item is not None: ctx += f" item {item+1}"
+            warnings.append(f"{ctx}: marca fraca em {darkest['label']} (confira)")
+
+        # Salva conforme tipo
+        if tipo == "multipla_escolha":
+            answers[q_num] = marcado
+        elif tipo == "vf":
+            if q_num not in answers or not isinstance(answers[q_num], dict):
+                answers[q_num] = {}
+            answers[q_num][str(afirm)] = marcado
+        elif tipo == "associacao":
+            if q_num not in answers or not isinstance(answers[q_num], dict):
+                answers[q_num] = {}
+            answers[q_num][str(item)] = marcado
 
     # === STEP 5: Build preview with overlays ===
     preview = warped.copy()
@@ -5154,8 +5419,9 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
         (apl["prova_id"],)
     ).fetchall()
     n_questoes = len(questoes)
+    questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
 
-    result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "")
+    result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
 
     if not result["success"]:
         conn.close()
@@ -5906,6 +6172,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
         (apl["prova_id"],)
     ).fetchall()
     n_questoes = len(questoes)
+    questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
 
     # Processar cada foto
     cards_html_parts = []
@@ -5921,7 +6188,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
             cards_html_parts.append(_render_card_erro(idx, foto.filename, "Arquivo vazio."))
             continue
 
-        result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "")
+        result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
 
         if not result["success"]:
             n_erro += 1
@@ -5966,7 +6233,8 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
 
         cards_html_parts.append(_render_card_revisao_lote(
             idx, foto.filename, aluno, result, n_questoes,
-            ja_entregue=ja_entregue, duplicata_lote=duplicata_lote
+            ja_entregue=ja_entregue, duplicata_lote=duplicata_lote,
+            questoes_info=questoes_info
         ))
 
     conn.close()
@@ -6050,8 +6318,9 @@ def _render_card_erro(idx, filename, mensagem_erro, preview_b64=None):
     """
 
 
-def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entregue=None, duplicata_lote=False):
-    """Card visual de uma foto lida com sucesso. Inclui form fields editáveis."""
+def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entregue=None, duplicata_lote=False, questoes_info=None):
+    """Card visual de uma foto lida com sucesso. Inclui form fields editáveis.
+    questoes_info: lista [{id, num, tipo, vf_count, assoc_a_count, assoc_b_count}] pra renderizar conforme tipo."""
     nome_seguro = (filename or f"foto_{idx+1}").replace("<", "&lt;")
     aluno_id = result["aluno_id"]
 
@@ -6084,18 +6353,65 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
         items = "".join(f"<li>{w}</li>" for w in avisos)
         avisos_html = f'<ul style="margin:8px 0 0 18px; font-size:12px; color:#854d0e;">{items}</ul>'
 
-    # Grid de respostas editáveis
+    # Grid de respostas editáveis — adapta conforme tipo
     answers = result["answers"]
+    info_by_num = {i["num"]: i for i in (questoes_info or [])}
     tabela_html = ""
     for q_num in range(1, n_questoes + 1):
+        info = info_by_num.get(q_num, {"tipo": "multipla_escolha"})
+        tipo_q = info.get("tipo", "multipla_escolha")
         detected = answers.get(q_num)
-        cells = ""
-        for letra in ["A", "B", "C", "D"]:
-            checked = " checked" if detected == letra else ""
-            cells += f'<td style="text-align:center; padding:2px;"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value="{letra}"{checked} style="width:auto; margin:0;"> {letra}</label></td>'
-        em_branco_checked = " checked" if detected is None else ""
-        cells += f'<td style="text-align:center; padding:2px; background:var(--bg-subtle);"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value=""{em_branco_checked} style="width:auto; margin:0;"> ∅</label></td>'
-        tabela_html += f'<tr><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
+
+        if tipo_q == "multipla_escolha":
+            cells = ""
+            for letra in ["A", "B", "C", "D"]:
+                checked = " checked" if detected == letra else ""
+                cells += f'<td style="text-align:center; padding:2px;"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value="{letra}"{checked} style="width:auto; margin:0;"> {letra}</label></td>'
+            em_branco_checked = " checked" if detected is None else ""
+            cells += f'<td style="text-align:center; padding:2px; background:var(--bg-subtle);"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value=""{em_branco_checked} style="width:auto; margin:0;"> ∅</label></td>'
+            tabela_html += f'<tr><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
+        elif tipo_q == "vf":
+            n_afirms = info.get("vf_count", 0)
+            detected_dict = detected if isinstance(detected, dict) else {}
+            sub_rows = ""
+            for k in range(n_afirms):
+                val = detected_dict.get(str(k))
+                ck_v = " checked" if val == "V" else ""
+                ck_f = " checked" if val == "F" else ""
+                ck_n = " checked" if not val else ""
+                sub_rows += (
+                    f'<tr><td style="padding:3px 6px; font-weight:600; color:var(--text-muted);">Q{q_num}.{k+1}</td>'
+                    f'<td colspan="5" style="padding:2px;">'
+                    f'<label style="margin-right:14px;"><input type="radio" name="card_{idx}_q_{q_num}_vf_{k}" value="V"{ck_v} style="width:auto; margin:0 3px 0 0;">V</label>'
+                    f'<label style="margin-right:14px;"><input type="radio" name="card_{idx}_q_{q_num}_vf_{k}" value="F"{ck_f} style="width:auto; margin:0 3px 0 0;">F</label>'
+                    f'<label><input type="radio" name="card_{idx}_q_{q_num}_vf_{k}" value=""{ck_n} style="width:auto; margin:0 3px 0 0;">∅</label>'
+                    f'</td></tr>'
+                )
+            tabela_html += sub_rows
+        elif tipo_q == "associacao":
+            n_a = info.get("assoc_a_count", 0)
+            n_b = info.get("assoc_b_count", 0)
+            detected_dict = detected if isinstance(detected, dict) else {}
+            letras = [chr(97+i) for i in range(n_b)]
+            sub_rows = ""
+            for k in range(n_a):
+                val = detected_dict.get(str(k))
+                opts = ""
+                for letra in letras:
+                    ck = " checked" if val == letra else ""
+                    opts += f'<label style="margin-right:10px;"><input type="radio" name="card_{idx}_q_{q_num}_assoc_{k}" value="{letra}"{ck} style="width:auto; margin:0 3px 0 0;">{letra}</label>'
+                ck_n = " checked" if not val else ""
+                opts += f'<label><input type="radio" name="card_{idx}_q_{q_num}_assoc_{k}" value=""{ck_n} style="width:auto; margin:0 3px 0 0;">∅</label>'
+                sub_rows += (
+                    f'<tr><td style="padding:3px 6px; font-weight:600; color:var(--text-muted);">Q{q_num}.{k+1}</td>'
+                    f'<td colspan="5" style="padding:2px;">{opts}</td></tr>'
+                )
+            tabela_html += sub_rows
+        elif tipo_q == "discursiva":
+            tabela_html += (
+                f'<tr><td style="padding:3px 6px; font-weight:600; color:var(--text-muted);">Q{q_num}</td>'
+                f'<td colspan="5" style="padding:3px 6px; font-size:11px; color:var(--text-muted); font-style:italic;">📝 Discursiva — correção manual</td></tr>'
+            )
 
     return f"""
     <div class="lote-card" style="border:2px solid {border_color}; border-radius:8px; padding:14px; margin-bottom:10px; background:{bg};">
@@ -6180,13 +6496,38 @@ async def confirmar_lote(aplicacao_id: int, request: Request):
         # Override completo de respostas anteriores deste aluno
         conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
 
+        # Coleta tipos das questões da prova
+        tipos_q = {q["id"]: (q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha")
+                   for q in conn.execute("""
+                       SELECT q.id, q.tipo FROM prova_questoes pq
+                       JOIN questoes q ON q.id = pq.questao_id
+                       WHERE pq.prova_id = ? ORDER BY pq.ordem
+                   """, (apl["prova_id"],)).fetchall()}
+
         for q_num, q_id in enumerate(questao_ids, start=1):
-            letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
-            if letra in ("A", "B", "C", "D"):
-                conn.execute(
-                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?, ?, ?, ?)",
-                    (aplicacao_id, aluno_id, q_id, letra)
-                )
+            tipo_q = tipos_q.get(q_id, "multipla_escolha")
+            if tipo_q == "multipla_escolha":
+                letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
+                _gravar_resposta_questao(conn, aplicacao_id, aluno_id, q_id, tipo_q, letra or None)
+            elif tipo_q == "vf":
+                # form tem campos card_X_q_Y_vf_N = "V" ou "F" pra cada afirmação N
+                marcadas = {}
+                for k in range(VF_MAX_AFIRMACOES):
+                    v = form.get(f"card_{idx}_q_{q_num}_vf_{k}", "").strip().upper()
+                    if v in ("V", "F"):
+                        marcadas[str(k)] = v
+                if marcadas:
+                    _gravar_resposta_questao(conn, aplicacao_id, aluno_id, q_id, tipo_q, marcadas)
+            elif tipo_q == "associacao":
+                # form tem campos card_X_q_Y_assoc_N = letra pra cada item N
+                marcadas = {}
+                for k in range(ASSOC_MAX_PARES):
+                    v = form.get(f"card_{idx}_q_{q_num}_assoc_{k}", "").strip().lower()
+                    if v:
+                        marcadas[str(k)] = v
+                if marcadas:
+                    _gravar_resposta_questao(conn, aplicacao_id, aluno_id, q_id, tipo_q, marcadas)
+            # discursiva: nada (correção manual)
 
         existing = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
                                 (aplicacao_id, aluno_id)).fetchone()
