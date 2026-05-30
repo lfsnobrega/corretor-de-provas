@@ -29,6 +29,14 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 RACAS = ["Branca", "Preta", "Parda", "Amarela", "Indígena"]
 ANOS = ["6º ano", "7º ano", "8º ano", "9º ano"]
 
+# Tipos de questão suportados. Cada um vira um fluxo de cadastro/resposta diferente.
+TIPOS_QUESTAO = {
+    "multipla_escolha": {"label": "Múltipla escolha (A/B/C/D)", "icone": "🔘"},
+    "discursiva":       {"label": "Discursiva (resposta livre)", "icone": "📝"},
+    # "vf":             {"label": "Verdadeiro ou Falso", "icone": "✓✗"},     # fase 2
+    # "associacao":     {"label": "Associação de colunas", "icone": "↔"},    # fase 3
+}
+
 # === Autenticação ===
 # Variáveis de ambiente esperadas em produção. Em dev, defaults permitem testar.
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
@@ -329,6 +337,10 @@ def init_db():
         conn.execute("ALTER TABLE questoes ADD COLUMN ano TEXT")
     if "criada_por_professor_id" not in cols_q:
         conn.execute("ALTER TABLE questoes ADD COLUMN criada_por_professor_id INTEGER")
+    if "tipo" not in cols_q:
+        conn.execute("ALTER TABLE questoes ADD COLUMN tipo TEXT DEFAULT 'multipla_escolha'")
+        # Questões antigas viram múltipla escolha (que era o único tipo até agora)
+        conn.execute("UPDATE questoes SET tipo = 'multipla_escolha' WHERE tipo IS NULL")
     # Migrations multi-prof: criada_por_professor_id em provas e aplicacoes
     cols_p = {row[1] for row in conn.execute("PRAGMA table_info(provas)").fetchall()}
     if "criada_por_professor_id" not in cols_p:
@@ -722,15 +734,28 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         fonte_html = f'<figcaption><small>Fonte: {img["fonte"]}</small></figcaption>' if img["fonte"] else ""
         imagens_html += f'<figure><img src="/{img["caminho"]}" alt="">{legenda_html}{fonte_html}</figure>'
 
+    tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+    tipo_info = TIPOS_QUESTAO.get(tipo_q, TIPOS_QUESTAO["multipla_escolha"])
+
     alts_html = ""
-    for a in alts:
-        cls = ' class="correct"' if a["correta"] else ''
-        marca = ' ✓' if a["correta"] else ''
-        alts_html += f'<li{cls}><strong>{a["letra"]})</strong> {a["texto"]}{marca}</li>'
+    if tipo_q == "multipla_escolha":
+        for a in alts:
+            cls = ' class="correct"' if a["correta"] else ''
+            marca = ' ✓' if a["correta"] else ''
+            alts_html += f'<li{cls}><strong>{a["letra"]})</strong> {a["texto"]}{marca}</li>'
+    elif tipo_q == "discursiva":
+        # Discursiva não tem alternativas; mostra um aviso visual
+        alts_html = '<li style="list-style:none; padding:8px 12px; background:var(--bg-subtle); border-left:3px solid #3b82f6; color:var(--text-muted); font-style:italic;">📝 Questão discursiva — resposta livre (correção manual)</li>'
+
     habilidades_html = ""
     if habilidades:
         badges = "".join(f'<span class="badge">{h["codigo"]}</span>' for h in habilidades)
         habilidades_html = f'<div class="habilidades-row">{badges}</div>'
+
+    # Badge de tipo (sempre visível)
+    cor_tipo_bg = "#dbeafe" if tipo_q == "multipla_escolha" else "#fef3c7"
+    cor_tipo_fg = "#1e40af" if tipo_q == "multipla_escolha" else "#78350f"
+    tipo_badge = f' · <span class="badge" style="background:{cor_tipo_bg}; color:{cor_tipo_fg}; font-size:10px;">{tipo_info["icone"]} {tipo_info["label"]}</span>'
 
     cabecalho = f'Questão {numero} · {q["disciplina_nome"]}' if numero else q["disciplina_nome"]
     ano_badge = f' · <span style="color:var(--text-muted); font-weight:400;">{ano_q}</span>' if ano_q else ""
@@ -763,7 +788,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'<div class="question" style="margin-bottom:8px; padding:12px 16px;">'
             f'<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">'
             f'<div style="flex:1; min-width:0;">'
-            f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{autor_badge_inline}{habs_inline}</div>'
+            f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{tipo_badge}{autor_badge_inline}{habs_inline}</div>'
             f'<div style="margin-top:6px; color:var(--text); font-size:14px; line-height:1.5;">{preview}</div>'
             f'</div>'
             f'<button type="button" onclick="toggleQuestao({q["id"]})" id="q-toggle-{q["id"]}" '
@@ -779,7 +804,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'</div>'
         )
 
-    return f'<div class="question"><div class="question-header">{cabecalho}{ano_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
+    return f'<div class="question"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1063,7 +1088,7 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
 
     # Montar query com filtros aplicados — agora trazendo também o autor
     sql = """
-        SELECT DISTINCT q.id, q.enunciado, q.ano, q.criada_por_professor_id,
+        SELECT DISTINCT q.id, q.enunciado, q.ano, q.criada_por_professor_id, q.tipo,
                d.id AS disciplina_id, d.nome AS disciplina_nome,
                aut.nome AS autor_nome
         FROM questoes q
@@ -1310,12 +1335,18 @@ def form_nova_questao_passo1():
     </script>
     """
 
+    tipo_options = "".join(
+        f'<option value="{k}">{v["icone"]} {v["label"]}</option>'
+        for k, v in TIPOS_QUESTAO.items()
+    )
+
     content = f"""
         <div class="page-header">
             <h1>Nova questão</h1>
-            <p class="subtitle">Passo 1 de 2 — defina disciplina, ano de escolaridade e habilidades BNCC.</p>
+            <p class="subtitle">Passo 1 de 2 — defina o tipo, disciplina, ano e habilidades.</p>
         </div>
         <form action="/questoes/nova/passo2" method="post">
+            <label>Tipo de questão<select name="tipo" required>{tipo_options}</select></label>
             <div style="display:grid; grid-template-columns: 2fr 1fr; gap:12px;">
                 <label>Disciplina<select name="disciplina_id" required>{options}</select></label>
                 <label>Ano de escolaridade<select name="ano">{anos_options}</select></label>
@@ -1337,8 +1368,11 @@ def form_nova_questao_passo2(
     disciplina_id: int = Form(...),
     ano: str = Form(""),
     habilidades_codigos: str = Form(""),
+    tipo: str = Form("multipla_escolha"),
 ):
     """Passo 2: cadastramento do conteúdo da questão. Dados do Passo 1 ficam em hidden fields."""
+    if tipo not in TIPOS_QUESTAO:
+        tipo = "multipla_escolha"
     conn = get_db()
     disciplina = conn.execute("SELECT * FROM disciplinas WHERE id = ?", (disciplina_id,)).fetchone()
     conn.close()
@@ -1346,33 +1380,53 @@ def form_nova_questao_passo2(
         return RedirectResponse("/questoes/nova", status_code=303)
 
     ano_label = ano if ano else "— não definido —"
+    tipo_info = TIPOS_QUESTAO[tipo]
 
     # Badges informativas das habilidades digitadas no passo 1
     codigos_clean = [c.strip().upper() for c in habilidades_codigos.replace("\n", ",").split(",") if c.strip()]
     badges_bncc = "".join(f'<span class="badge">{c}</span>' for c in codigos_clean) if codigos_clean else '<span class="muted-line">— sem BNCC —</span>'
 
-    alternativas_html = ""
-    for letra in ["A", "B", "C", "D"]:
-        required_radio = ' required' if letra == "A" else ''
-        editor_alt = _editor_enunciado_html(
-            name=f"alt_{letra.lower()}", valor_inicial="", required=True,
-            label="", compact=True, min_height=42,
-            placeholder=f"Texto da alternativa {letra}"
-        )
-        alternativas_html += (
-            f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:flex-start; margin-bottom:10px;">'
-            f'<label style="margin:8px 0 0 0; display:flex; align-items:center; gap:8px; white-space:nowrap;">'
-            f'<input type="radio" name="correta" value="{letra}"{required_radio} style="width:auto; margin:0;"> <strong>{letra})</strong>'
-            f'</label>'
-            f'<div style="margin:0;">{editor_alt}</div>'
-            f'</div>'
-        )
+    # Bloco de alternativas só aparece se for múltipla escolha
+    fieldset_alternativas = ""
+    enunciado_detecta_alts = (tipo == "multipla_escolha")
+    if tipo == "multipla_escolha":
+        alternativas_html = ""
+        for letra in ["A", "B", "C", "D"]:
+            required_radio = ' required' if letra == "A" else ''
+            editor_alt = _editor_enunciado_html(
+                name=f"alt_{letra.lower()}", valor_inicial="", required=True,
+                label="", compact=True, min_height=42,
+                placeholder=f"Texto da alternativa {letra}"
+            )
+            alternativas_html += (
+                f'<div style="display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+                f'<label style="margin:8px 0 0 0; display:flex; align-items:center; gap:8px; white-space:nowrap;">'
+                f'<input type="radio" name="correta" value="{letra}"{required_radio} style="width:auto; margin:0;"> <strong>{letra})</strong>'
+                f'</label>'
+                f'<div style="margin:0;">{editor_alt}</div>'
+                f'</div>'
+            )
+        fieldset_alternativas = f"""
+            <fieldset>
+                <legend>Alternativas — marque o radio da correta</legend>
+                {alternativas_html}
+            </fieldset>
+        """
+    elif tipo == "discursiva":
+        # Discursiva: sem alternativas. Aviso visual.
+        fieldset_alternativas = """
+            <div style="background:#eff6ff; color:#1e3a8a; border:1px solid #3b82f6; padding:14px 16px; border-radius:6px; margin:12px 0;">
+                <strong>📝 Questão discursiva</strong><br>
+                <span style="font-size:13px;">O aluno responderá em texto livre. No modo impresso, será reservado espaço para resposta manuscrita. A correção é manual — feita por você fora do sistema.</span>
+            </div>
+        """
 
     # Hidden fields carregam dados do passo 1; valores escapados
     import html as _html
     h_disc = _html.escape(str(disciplina_id), quote=True)
     h_ano = _html.escape(ano, quote=True)
     h_habs = _html.escape(habilidades_codigos, quote=True)
+    h_tipo = _html.escape(tipo, quote=True)
 
     content = f"""
         <div class="page-header">
@@ -1381,6 +1435,7 @@ def form_nova_questao_passo2(
         </div>
 
         <div style="background:var(--bg-subtle); border:1px solid var(--border); border-radius:8px; padding:12px 16px; margin-bottom:18px; display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+            <div><strong>Tipo:</strong> {tipo_info['icone']} {tipo_info['label']}</div>
             <div><strong>Disciplina:</strong> {disciplina["nome"]}</div>
             <div><strong>Ano:</strong> {ano_label}</div>
             <div><strong>BNCC:</strong> {badges_bncc}</div>
@@ -1393,6 +1448,7 @@ def form_nova_questao_passo2(
             <input type="hidden" name="disciplina_id" value="{h_disc}">
             <input type="hidden" name="ano" value="{h_ano}">
             <input type="hidden" name="habilidades_codigos" value="{h_habs}">
+            <input type="hidden" name="tipo" value="{h_tipo}">
 
             <fieldset>
                 <legend>Textos de apoio (opcionais)</legend>
@@ -1412,12 +1468,9 @@ def form_nova_questao_passo2(
                 <label>Fonte da imagem 2<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar. Dica: se você colar uma questão completa com A) B) C) D), eu preencho as alternativas automaticamente.", detectar_alternativas=True)}
+            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar.", detectar_alternativas=enunciado_detecta_alts)}
 
-            <fieldset>
-                <legend>Alternativas — marque o radio da correta</legend>
-                {alternativas_html}
-            </fieldset>
+            {fieldset_alternativas}
 
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Cadastrar questão</button>
@@ -1432,20 +1485,23 @@ def form_nova_questao_passo2(
 async def criar_questao(
     request: Request,
     disciplina_id: int = Form(...), enunciado: str = Form(...),
-    alt_a: str = Form(...), alt_b: str = Form(...), alt_c: str = Form(...), alt_d: str = Form(...),
-    correta: str = Form(...), habilidades_codigos: str = Form(""),
+    tipo: str = Form("multipla_escolha"),
+    alt_a: str = Form(""), alt_b: str = Form(""), alt_c: str = Form(""), alt_d: str = Form(""),
+    correta: str = Form(""), habilidades_codigos: str = Form(""),
     ano: str = Form(""),
     texto1_conteudo: str = Form(""), texto1_fonte: str = Form(""),
     texto2_conteudo: str = Form(""), texto2_fonte: str = Form(""),
     imagem1: Optional[UploadFile] = File(None), imagem1_legenda: str = Form(""), imagem1_fonte: str = Form(""),
     imagem2: Optional[UploadFile] = File(None), imagem2_legenda: str = Form(""), imagem2_fonte: str = Form(""),
 ):
+    if tipo not in TIPOS_QUESTAO:
+        tipo = "multipla_escolha"
     prof = get_current_professor(request)
     prof_id = prof["id"] if prof else None
     conn = get_db()
     cursor = conn.execute(
-        "INSERT INTO questoes (disciplina_id, enunciado, ano, criada_por_professor_id) VALUES (?, ?, ?, ?)",
-        (disciplina_id, _sanitizar_html_enunciado(enunciado), ano.strip() or None, prof_id)
+        "INSERT INTO questoes (disciplina_id, enunciado, ano, criada_por_professor_id, tipo) VALUES (?, ?, ?, ?, ?)",
+        (disciplina_id, _sanitizar_html_enunciado(enunciado), ano.strip() or None, prof_id, tipo)
     )
     questao_id = cursor.lastrowid
 
@@ -1464,8 +1520,10 @@ async def criar_questao(
                 f.write(content_bytes)
             conn.execute("INSERT INTO imagens (questao_id, caminho, legenda, fonte, ordem) VALUES (?, ?, ?, ?, ?)", (questao_id, f"static/imagens/{unique_name}", legenda.strip() or None, fonte.strip() or None, ordem))
 
-    for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
-        conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)", (questao_id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
+    # Alternativas só para múltipla escolha
+    if tipo == "multipla_escolha":
+        for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
+            conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)", (questao_id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
 
     for parte in habilidades_codigos.replace("\n", ",").split(","):
         codigo = parte.strip().upper()
@@ -1643,7 +1701,7 @@ def _render_picker_questoes(conn, selected_ids=None):
     import json
 
     questoes_db = conn.execute("""
-        SELECT q.id, q.enunciado, q.ano, d.nome AS disciplina_nome
+        SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome
         FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
         ORDER BY d.nome, q.id
     """).fetchall()
@@ -1881,7 +1939,7 @@ def form_editar_prova(id: int):
         return RedirectResponse("/provas", status_code=303)
     
     todas_questoes = conn.execute("""
-        SELECT q.id, q.enunciado, d.nome AS disciplina_nome 
+        SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome 
         FROM questoes q 
         JOIN disciplinas d ON d.id = q.disciplina_id 
         ORDER BY d.nome, q.id
@@ -3313,15 +3371,38 @@ def form_editar_questao(id: int, request: Request):
         imagens_existentes_html = f'<h3>Imagens existentes</h3>{items}'
 
     enunciado_safe = q["enunciado"]
+    tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+    if tipo_q not in TIPOS_QUESTAO:
+        tipo_q = "multipla_escolha"
+    tipo_info = TIPOS_QUESTAO[tipo_q]
+
+    # Bloco de alternativas só pra múltipla escolha
+    fieldset_alts = ""
+    if tipo_q == "multipla_escolha":
+        fieldset_alts = f"""
+            <fieldset>
+                <legend>Alternativas — marque o radio da correta</legend>
+                {alternativas_html}
+            </fieldset>
+        """
+    elif tipo_q == "discursiva":
+        fieldset_alts = """
+            <div style="background:#eff6ff; color:#1e3a8a; border:1px solid #3b82f6; padding:14px 16px; border-radius:6px; margin:12px 0;">
+                <strong>📝 Questão discursiva</strong> — resposta livre, correção manual.
+            </div>
+        """
 
     content = f"""
-        <div class="page-header"><h1>Editar questão</h1></div>
+        <div class="page-header"><h1>Editar questão</h1>
+            <p class="subtitle">{tipo_info['icone']} {tipo_info['label']} <span style="color:var(--text-muted); font-size:12px;">(o tipo não pode ser alterado depois da criação)</span></p>
+        </div>
         <div class="tip"><strong>Dica:</strong> use <code>$fórmula$</code> para fórmulas inline ou <code>$$fórmula$$</code> para centralizadas. Textos e imagens existentes podem ser removidos individualmente acima; os campos "Adicionar novos" só inserem novos itens.</div>
 
         {textos_existentes_html}
         {imagens_existentes_html}
 
         <form action="/questoes/{id}/editar" method="post" enctype="multipart/form-data">
+            <input type="hidden" name="tipo" value="{tipo_q}">
             <div style="display:grid; grid-template-columns: 2fr 1fr; gap:12px;">
                 <label>Disciplina<select name="disciplina_id" required>{options}</select></label>
                 <label>Ano de escolaridade<select name="ano">{anos_options}</select></label>
@@ -3347,12 +3428,9 @@ def form_editar_questao(id: int, request: Request):
                 <label>Fonte<input type="text" name="imagem2_fonte"></label>
             </fieldset>
 
-            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Cole texto com A) B) C) D) para preenchimento automático.", detectar_alternativas=True)}
+            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão.", detectar_alternativas=(tipo_q == "multipla_escolha"))}
 
-            <fieldset>
-                <legend>Alternativas — marque o radio da correta</legend>
-                {alternativas_html}
-            </fieldset>
+            {fieldset_alts}
 
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar alterações</button>
@@ -3448,8 +3526,9 @@ async def atualizar_questao(
     request: Request,
     disciplina_id: int = Form(...),
     enunciado: str = Form(...),
-    alt_a: str = Form(...), alt_b: str = Form(...), alt_c: str = Form(...), alt_d: str = Form(...),
-    correta: str = Form(...),
+    tipo: str = Form("multipla_escolha"),
+    alt_a: str = Form(""), alt_b: str = Form(""), alt_c: str = Form(""), alt_d: str = Form(""),
+    correta: str = Form(""),
     habilidades_codigos: str = Form(""),
     ano: str = Form(""),
     texto1_conteudo: str = Form(""), texto1_fonte: str = Form(""),
@@ -3459,7 +3538,7 @@ async def atualizar_questao(
 ):
     prof = get_current_professor(request)
     conn = get_db()
-    q_existente = conn.execute("SELECT criada_por_professor_id FROM questoes WHERE id = ?", (id,)).fetchone()
+    q_existente = conn.execute("SELECT criada_por_professor_id, tipo FROM questoes WHERE id = ?", (id,)).fetchone()
     if not q_existente:
         conn.close()
         return RedirectResponse("/questoes", status_code=303)
@@ -3473,12 +3552,16 @@ async def atualizar_questao(
             '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
             active="questoes"
         ), status_code=403)
+    # Tipo NÃO pode mudar depois de criada (preserva integridade de respostas históricas)
+    tipo_atual = q_existente["tipo"] if "tipo" in q_existente.keys() and q_existente["tipo"] else "multipla_escolha"
     conn.execute("UPDATE questoes SET disciplina_id = ?, enunciado = ?, ano = ? WHERE id = ?", (disciplina_id, _sanitizar_html_enunciado(enunciado), ano.strip() or None, id))
 
-    conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
-    for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
-        conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)",
-                     (id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
+    # Alternativas só pra múltipla escolha
+    if tipo_atual == "multipla_escolha":
+        conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
+        for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
+            conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)",
+                         (id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
 
     conn.execute("DELETE FROM questao_habilidades WHERE questao_id = ?", (id,))
     for parte in habilidades_codigos.replace("\n", ",").split(","):
