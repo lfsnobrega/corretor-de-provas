@@ -406,6 +406,36 @@ tr:hover td { background: var(--bg-subtle); }
 .card-meta { font-size: 12px; color: var(--text-muted); margin-top: 4px; line-height: 1.5; }
 .card-meta + .card-meta { margin-top: 2px; }
 
+/* ═══ LINHA DE ALUNO (detalhe de aplicação) ═══ */
+.student-row {
+  display: grid;
+  grid-template-columns: 36px 1fr 110px;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  margin-bottom: 6px;
+  transition: border-color 0.15s ease;
+}
+.student-row:hover { border-color: var(--border-strong); }
+.student-row .numero {
+  text-align: center;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--bg-subtle);
+  border-radius: 6px;
+  padding: 4px 0;
+}
+.student-row .codigo {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+}
+
 /* Lista limpa (usada em /disciplinas) */
 ul.clean {
   list-style: none;

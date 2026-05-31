@@ -5016,20 +5016,25 @@ def cartao_resposta_pdf(aplicacao_id: int):
 
     alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
     questoes = conn.execute("SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem", (apl["prova_id"],)).fetchall()
-    conn.close()
 
     if not alunos:
+        conn.close()
         return HTMLResponse(render_page("Erro", '<div class="empty"><p>Esta turma não tem alunos cadastrados.</p><a href="/aplicacoes/' + str(aplicacao_id) + '" class="btn">← Voltar</a></div>', active="aplicacoes"))
     if not questoes:
+        conn.close()
         return HTMLResponse(render_page("Erro", '<div class="empty"><p>Esta prova não tem questões.</p><a href="/aplicacoes/' + str(aplicacao_id) + '" class="btn">← Voltar</a></div>', active="aplicacoes"))
 
     apl_dict = dict(apl)
     apl_dict["id"] = aplicacao_id
     questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+    conn.close()
     buffer = _gerar_cartao_resposta_pdf(apl_dict, alunos, questoes_info)
 
     base_name = (apl["titulo"] or apl["prova_titulo"]).lower().replace(" ", "_")
-    safe = "".join(c for c in base_name if c.isalnum() or c in "_-")[:40]
+    # Remove acentos e caracteres não-ASCII (Content-Disposition exige ASCII puro)
+    import unicodedata as _ud
+    base_name = _ud.normalize('NFKD', base_name).encode('ascii', 'ignore').decode('ascii')
+    safe = "".join(c for c in base_name if c.isalnum() or c in "_-")[:40] or f"cartoes"
     filename = f"cartoes_resposta_{safe}_{aplicacao_id}.pdf"
 
     return StreamingResponse(
