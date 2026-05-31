@@ -631,6 +631,18 @@ window.MathJax = { tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] 
 
 INTER_FONT = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">'
 
+def _css_version():
+    """Hash curto do app.css pra cache-busting automático. Muda sempre que o CSS muda."""
+    import hashlib
+    try:
+        with open(os.path.join("static", "css", "app.css"), "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()[:8]
+    except Exception:
+        return "0"
+
+CSS_VERSION = _css_version()
+CSS_LINK = f'<link rel="stylesheet" href="/static/css/app.css?v={CSS_VERSION}">'
+
 # Script de tema (claro/escuro) — aplicado em todas as páginas via render_page.
 # Lê preferência do localStorage e aplica antes do render pra evitar flash.
 THEME_BOOT_SCRIPT = """<script>
@@ -673,7 +685,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     <title>{title} · Sistema Pedagógico do Walmir</title>
     {INTER_FONT}
     {THEME_BOOT_SCRIPT}
-    <link rel="stylesheet" href="/static/css/app.css">
+    {CSS_LINK}
     {head_extra}
 </head>
 <body>
@@ -711,7 +723,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     <title>{title} · Sistema Pedagógico do Walmir</title>
     {INTER_FONT}
     {THEME_BOOT_SCRIPT}
-    <link rel="stylesheet" href="/static/css/app.css">
+    {CSS_LINK}
     {head_extra}
 </head>
 <body>
@@ -3229,7 +3241,7 @@ def _pagina_simples(titulo, corpo_html):
     <meta name="color-scheme" content="light dark">
     <title>{titulo}</title>
     {INTER_FONT}
-    <link rel="stylesheet" href="/static/css/app.css">
+    {CSS_LINK}
 </head>
 <body>
     <main style="max-width: 600px; margin: 40px auto; padding: 0 20px;">
@@ -3249,7 +3261,7 @@ def _pagina_aluno(titulo, conteudo_html):
     <meta name="color-scheme" content="light dark">
     <title>{titulo}</title>
     {INTER_FONT}
-    <link rel="stylesheet" href="/static/css/app.css">
+    {CSS_LINK}
     {MATHJAX}
 </head>
 <body>
