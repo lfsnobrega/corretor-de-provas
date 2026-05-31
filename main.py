@@ -508,8 +508,11 @@ def pagina_login(request: Request, next: str = "/", erro: str = ""):
 
     content = f"""
     <div style="max-width:420px; margin:60px auto; padding:30px; background:var(--bg); border:1px solid var(--border); border-radius:8px;">
-        <h1 style="margin:0 0 6px 0;">Sistema Pedagógico do Walmir</h1>
-        <p class="muted-line" style="margin:0 0 24px 0;">E.M. Walmir de Freitas Monteiro</p>
+        <div style="text-align:center; margin-bottom:18px;">
+            <img src="/static/imagens/logo_walmir.png" alt="E.M. Walmir de Freitas Monteiro" style="max-width:200px; height:auto; display:block; margin:0 auto;">
+        </div>
+        <h1 style="margin:0 0 6px 0; text-align:center; font-size:22px;">Sistema Pedagógico</h1>
+        <p class="muted-line" style="margin:0 0 24px 0; text-align:center;">E.M. Walmir de Freitas Monteiro</p>
         {erro_html}
         {botao_login}
     </div>
@@ -689,7 +692,10 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
 <body>
     <div class="app">
         <aside class="sidebar" style="display:flex; flex-direction:column;">
-            <div class="sidebar-brand">Sistema Pedagógico do Walmir</div>
+            <div class="sidebar-brand" style="text-align:center; padding:8px 6px 4px;">
+                <img src="/static/imagens/logo_walmir.png" alt="E.M. Walmir de Freitas Monteiro" style="max-width:100%; height:auto; max-height:80px; display:block; margin:0 auto;">
+                <div style="font-size:11px; color:var(--text-muted); margin-top:6px; font-weight:600; letter-spacing:0.3px;">Sistema Pedagógico</div>
+            </div>
             <nav>
                 <a href="/"{nav_class('home')}>Início</a>
                 <div class="sidebar-section">Banco</div>
