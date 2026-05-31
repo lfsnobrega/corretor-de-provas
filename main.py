@@ -629,7 +629,29 @@ window.MathJax = { tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] 
 <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 """
 
-INTER_FONT = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">'
+INTER_FONT = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">'
+
+# Script de tema (claro/escuro) — aplicado em todas as páginas via render_page.
+# Lê preferência do localStorage e aplica antes do render pra evitar flash.
+THEME_BOOT_SCRIPT = """<script>
+(function(){
+  try {
+    var saved = localStorage.getItem('walmir-theme') || 'light';
+    document.documentElement.setAttribute('data-theme', saved);
+  } catch(e) { document.documentElement.setAttribute('data-theme', 'light'); }
+})();
+function _walmirToggleTheme() {
+  var html = document.documentElement;
+  var cur = html.getAttribute('data-theme') || 'light';
+  var next = cur === 'light' ? 'dark' : 'light';
+  html.setAttribute('data-theme', next);
+  try { localStorage.setItem('walmir-theme', next); } catch(e) {}
+  // Atualiza ícone e texto do botão (se presente)
+  document.querySelectorAll('[data-theme-toggle]').forEach(function(btn){
+    btn.innerHTML = next === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
+  });
+}
+</script>"""
 
 
 def render_page(title: str, content: str, active: str = "", head_extra: str = "", standalone: bool = False, professor: Optional[dict] = None) -> str:
@@ -650,6 +672,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     <meta name="color-scheme" content="light dark">
     <title>{title} · Sistema Pedagógico do Walmir</title>
     {INTER_FONT}
+    {THEME_BOOT_SCRIPT}
     <link rel="stylesheet" href="/static/css/app.css">
     {head_extra}
 </head>
@@ -658,7 +681,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
 </body>
 </html>"""
 
-    # Rodapé do sidebar com info do prof
+    # Rodapé do sidebar com info do prof + toggle de tema
     if professor is None:
         professor = _current_prof_ctx.get()
     user_block = ""
@@ -668,6 +691,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
             <div style="margin-top:auto; padding:12px; border-top:1px solid var(--border); font-size:12px;">
                 <div style="font-weight:600;">{professor.get("nome", "")}{admin_badge}</div>
                 <div style="color:var(--text-muted); font-size:11px; margin-top:2px; word-break:break-all;">{professor.get("email", "")}</div>
+                <button data-theme-toggle class="theme-toggle" onclick="_walmirToggleTheme()">🌙 Tema escuro</button>
                 <a href="/logout" style="display:inline-block; margin-top:8px; font-size:11px; color:var(--text-muted);">Sair</a>
             </div>
         """
@@ -686,6 +710,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     <meta name="color-scheme" content="light dark">
     <title>{title} · Sistema Pedagógico do Walmir</title>
     {INTER_FONT}
+    {THEME_BOOT_SCRIPT}
     <link rel="stylesheet" href="/static/css/app.css">
     {head_extra}
 </head>
@@ -3028,7 +3053,7 @@ def cartoes_qr(aplicacao_id: int, request: Request):
     <style>
         * {{ box-sizing: border-box; }}
         body {{
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-family: 'Sora', -apple-system, BlinkMacSystemFont, sans-serif;
             margin: 0;
             padding: 24px;
             background: #f5f5f5;
@@ -4666,7 +4691,7 @@ def imprimir_prova(prova_id: int):
     <style>
         * {{ box-sizing: border-box; }}
         body {{
-            font-family: 'Inter', -apple-system, sans-serif;
+            font-family: 'Sora', -apple-system, sans-serif;
             margin: 0 auto;
             padding: 24px;
             background: white;
