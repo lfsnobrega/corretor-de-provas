@@ -383,56 +383,47 @@ tr:hover td { background: var(--bg-subtle); }
 .badge-success { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
 .badge-purple { background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple-border); }
 
-/* Tema escuro: ajustes em estilos inline com cores claras hardcoded */
-[data-theme="dark"] [style*="background:#f0fdf4"],
-[data-theme="dark"] [style*="background: #f0fdf4"] {
-  background: var(--green-bg) !important;
-  color: var(--green) !important;
+/* ═══ CARDS LISTAGEM (turmas, habilidades BNCC, etc.) ═══ */
+.card-link {
+  display: block;
+  text-decoration: none;
+  color: var(--text);
+  margin-bottom: 10px;
+  transition: all 0.15s ease;
+  cursor: pointer;
 }
-[data-theme="dark"] [style*="background:#dcfce7"],
-[data-theme="dark"] [style*="background: #dcfce7"] {
-  background: var(--green-bg) !important;
-  color: var(--green) !important;
+.card-link:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+  box-shadow: var(--shadow-strong);
+  transform: translateY(-1px);
 }
-[data-theme="dark"] [style*="background:#dbeafe"],
-[data-theme="dark"] [style*="background: #dbeafe"] {
-  background: var(--bg-subtle) !important;
-  color: var(--accent) !important;
+.card-title { font-weight: 700; font-size: 15px; color: var(--text); margin-bottom: 6px; }
+.card-meta { font-size: 12px; color: var(--text-muted); margin-top: 4px; line-height: 1.5; }
+.card-meta + .card-meta { margin-top: 2px; }
+
+/* Lista limpa (usada em /disciplinas) */
+ul.clean {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  overflow: hidden;
 }
-[data-theme="dark"] [style*="background:#fef3c7"],
-[data-theme="dark"] [style*="background: #fef3c7"] {
-  background: var(--orange-bg) !important;
-  color: var(--orange) !important;
+ul.clean li {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 14px;
 }
-[data-theme="dark"] [style*="background:#fef2f2"],
-[data-theme="dark"] [style*="background: #fef2f2"] {
-  background: var(--red-bg) !important;
-  color: var(--red) !important;
-}
-[data-theme="dark"] [style*="background:#fefce8"],
-[data-theme="dark"] [style*="background: #fefce8"] {
-  background: var(--orange-bg) !important;
-  color: var(--orange) !important;
-}
-[data-theme="dark"] [style*="background:#eff6ff"],
-[data-theme="dark"] [style*="background: #eff6ff"] {
-  background: var(--bg-subtle) !important;
-  color: var(--accent) !important;
-}
-[data-theme="dark"] [style*="background:#ede9fe"],
-[data-theme="dark"] [style*="background: #ede9fe"] {
-  background: var(--purple-bg) !important;
-  color: var(--purple) !important;
-}
-/* Ajustes pra texto hardcoded em tema escuro */
-[data-theme="dark"] [style*="color:#166534"] { color: var(--green) !important; }
-[data-theme="dark"] [style*="color:#92400e"] { color: var(--orange) !important; }
-[data-theme="dark"] [style*="color:#1e40af"] { color: var(--accent) !important; }
-[data-theme="dark"] [style*="color:#1e3a8a"] { color: var(--accent) !important; }
-[data-theme="dark"] [style*="color:#854d0e"] { color: var(--orange) !important; }
-[data-theme="dark"] [style*="color:#7f1d1d"] { color: var(--red) !important; }
-[data-theme="dark"] [style*="color:#78350f"] { color: var(--orange) !important; }
-[data-theme="dark"] [style*="color:#5b21b6"] { color: var(--purple) !important; }
+ul.clean li:last-child { border-bottom: none; }
+ul.clean li:hover { background: var(--bg-subtle); }
+
+/* ═══ HOVER NOS LINKS DE NAVEGAÇÃO DE FORM ═══ */
+.btn-link { background: transparent; border: none; color: var(--accent); cursor: pointer; padding: 0; font: inherit; }
+.btn-link:hover { text-decoration: underline; }
 
 /* ═══ FORMS (mobile básico) ═══ */
 @media (max-width: 768px) {

@@ -1033,17 +1033,17 @@ def home(request: Request):
     label_encerradas = "Aplicações encerradas (escola)" if is_admin else "Aplicações encerradas"
     painel_metrics = f"""
         <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin:8px 0 14px 0;">
-            <div style="padding:14px; border:1px solid var(--border); border-radius:6px;">
-                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">{label_provas}</div>
-                <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_provas}</div>
+            <div class="status-card">
+                <div class="status-card-label">{label_provas}</div>
+                <div class="status-card-value">{minhas_provas}</div>
             </div>
-            <div style="padding:14px; border:1px solid #16a34a; border-radius:6px; background:#f0fdf4; color:#166534;">
-                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">{label_abertas}</div>
-                <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_aplicacoes_abertas}</div>
+            <div class="status-card status-card-success">
+                <div class="status-card-label">{label_abertas}</div>
+                <div class="status-card-value">{minhas_aplicacoes_abertas}</div>
             </div>
-            <div style="padding:14px; border:1px solid var(--border); border-radius:6px;">
-                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">{label_encerradas}</div>
-                <div style="font-size:24px; font-weight:600; margin-top:4px;">{minhas_aplicacoes_encerradas}</div>
+            <div class="status-card">
+                <div class="status-card-label">{label_encerradas}</div>
+                <div class="status-card-value">{minhas_aplicacoes_encerradas}</div>
             </div>
         </div>
     """
