@@ -150,7 +150,7 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                 pointer-events: none;
                 font-style: italic;
             }}
-            .ed-wrap:focus-within {{ box-shadow: 0 0 0 2px rgba(59,130,246,0.3); border-color: #3b82f6; }}
+            .ed-wrap:focus-within {{ box-shadow: 0 0 0 2px rgba(59,130,246,0.3); border-color: var(--accent); }}
             .editor-content blockquote {{ margin: 8px 0; padding: 6px 14px; border-left: 3px solid var(--border); color: var(--text-muted); font-style: italic; }}
             .editor-content ul {{ margin: 6px 0 6px 22px; }}
         </style>
@@ -289,7 +289,7 @@ def _require_admin_or_403(request: Request) -> HTMLResponse:
         return HTMLResponse(render_page(
             "Acesso restrito",
             '<div class="page-header"><h1>🔒 Acesso restrito</h1></div>'
-            '<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:16px; border-radius:6px;">'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
             '<p>Apenas o administrador da escola pode criar, editar ou excluir <strong>turmas e estudantes</strong>.</p>'
             '<p>Se você precisa de uma turma cadastrada, fale com o administrador.</p>'
             '</div>'
@@ -482,11 +482,11 @@ def pagina_login(request: Request, next: str = "/", erro: str = ""):
         return RedirectResponse(next or "/", status_code=303)
 
     import html as _html
-    erro_html = f'<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:12px; border-radius:6px; margin-bottom:16px;">{_html.escape(erro)}</div>' if erro else ""
+    erro_html = f'<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:12px; border-radius:6px; margin-bottom:16px;">{_html.escape(erro)}</div>' if erro else ""
 
     if DEV_MODE:
         botao_login = f"""
-            <div style="background:#fefce8; color:#854d0e; border:1px solid #ca8a04; padding:12px; border-radius:6px; margin-bottom:16px; font-size:13px;">
+            <div style="background:var(--orange-bg); color:var(--orange); border:1px solid var(--orange); padding:12px; border-radius:6px; margin-bottom:16px; font-size:13px;">
                 ⚙ <strong>Modo de desenvolvimento</strong> ativo (sem credenciais OAuth Google).
                 Em produção, este botão será substituído por "Entrar com Google".
             </div>
@@ -698,7 +698,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
         professor = _current_prof_ctx.get()
     user_block = ""
     if professor:
-        admin_badge = ' <span style="background:#7c3aed; color:white; font-size:9px; padding:1px 5px; border-radius:3px; vertical-align:middle;">ADMIN</span>' if professor.get("is_admin") else ""
+        admin_badge = ' <span style="background:var(--purple); color:white; font-size:9px; padding:1px 5px; border-radius:3px; vertical-align:middle;">ADMIN</span>' if professor.get("is_admin") else ""
         user_block = f"""
             <div style="margin-top:auto; padding:12px; border-top:1px solid var(--border); font-size:12px;">
                 <div style="font-weight:600;">{professor.get("nome", "")}{admin_badge}</div>
@@ -823,12 +823,12 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             marca = ' ✓' if a["correta"] else ''
             alts_html += f'<li{cls}><strong>{a["letra"]})</strong> {a["texto"]}{marca}</li>'
     elif tipo_q == "discursiva":
-        alts_html = '<li style="list-style:none; padding:8px 12px; background:var(--bg-subtle); border-left:3px solid #3b82f6; color:var(--text-muted); font-style:italic;">📝 Questão discursiva — resposta livre (correção manual)</li>'
+        alts_html = '<li style="list-style:none; padding:8px 12px; background:var(--bg-subtle); border-left:3px solid var(--accent); color:var(--text-muted); font-style:italic;">📝 Questão discursiva — resposta livre (correção manual)</li>'
     elif tipo_q == "vf":
         afirmacoes = conn.execute("SELECT ordem, texto, gabarito FROM vf_afirmacoes WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
         items = ""
         for af in afirmacoes:
-            cor = "#16a34a" if af["gabarito"] == "V" else "#dc2626"
+            cor = "var(--green)" if af["gabarito"] == "V" else "var(--red)"
             items += (
                 f'<li style="list-style:none; padding:6px 10px; background:var(--bg-subtle); margin-bottom:4px; border-radius:4px; border-left:3px solid {cor};">'
                 f'<strong style="color:{cor};">({af["gabarito"]})</strong> {af["texto"]}'
@@ -840,7 +840,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         itens_b = conn.execute("SELECT letra, texto FROM assoc_itens_b WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
         ca_html = "".join(
             f'<li style="margin-bottom:4px;"><strong>{a["ordem"]+1}.</strong> {a["texto"]} '
-            f'<span style="font-size:11px; color:#16a34a;">→ resposta: ({a["gabarito_letra"]})</span></li>'
+            f'<span style="font-size:11px; color:var(--green);">→ resposta: ({a["gabarito_letra"]})</span></li>'
             for a in itens_a
         )
         cb_html = "".join(
@@ -862,17 +862,17 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
 
     # Badge de tipo (sempre visível)
     cores_tipo = {
-        "multipla_escolha": ("#dbeafe", "#1e40af"),
-        "discursiva":       ("#fef3c7", "#78350f"),
-        "vf":               ("#dcfce7", "#15803d"),
-        "associacao":       ("#fce7f3", "#9d174d"),
+        "multipla_escolha": ("var(--accent-bg)", "var(--accent)"),
+        "discursiva":       ("var(--orange-bg)", "var(--orange)"),
+        "vf":               ("var(--green-bg)", "var(--green)"),
+        "associacao":       ("var(--purple-bg)", "var(--purple)"),
     }
     cor_tipo_bg, cor_tipo_fg = cores_tipo.get(tipo_q, cores_tipo["multipla_escolha"])
     tipo_badge = f' · <span class="badge" style="background:{cor_tipo_bg}; color:{cor_tipo_fg}; font-size:10px;">{tipo_info["icone"]} {tipo_info["label"]}</span>'
 
     cabecalho = f'Questão {numero} · {q["disciplina_nome"]}' if numero else q["disciplina_nome"]
     ano_badge = f' · <span style="color:var(--text-muted); font-weight:400;">{ano_q}</span>' if ano_q else ""
-    autor_badge_inline = f' · <span class="badge" style="background:#ede9fe; color:#5b21b6; font-size:10px;">Por: {autor_nome}</span>' if autor_nome else ""
+    autor_badge_inline = f' · <span class="badge" style="background:var(--purple-bg); color:var(--purple); font-size:10px;">Por: {autor_nome}</span>' if autor_nome else ""
 
     acoes_html = ""
     if mostrar_acoes and pode_editar:
@@ -881,7 +881,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'<a href="/questoes/{q["id"]}/editar" class="btn">Editar</a>'
             f'<form action="/questoes/{q["id"]}/deletar" method="post" style="margin:0;" '
             f'onsubmit="return confirm(\'Excluir esta questão? Se ela for usada em alguma prova, a exclusão será bloqueada.\');">'
-            f'<button type="submit" class="btn" style="background:#dc2626; color:white; border-color:#dc2626;">Excluir</button>'
+            f'<button type="submit" class="btn" style="background:var(--red); color:white; border-color:var(--red);">Excluir</button>'
             f'</form>'
             f'</div>'
         )
@@ -1052,10 +1052,10 @@ def home(request: Request):
     if minhas_ultimas:
         linhas = ""
         for u in minhas_ultimas:
-            status_dot = '<span style="color:#16a34a;">●</span>' if u["aberta"] else '<span style="color:var(--text-muted);">○</span>'
+            status_dot = '<span style="color:var(--green);">●</span>' if u["aberta"] else '<span style="color:var(--text-muted);">○</span>'
             modo_label = "online" if u["modo"] == "online" else "impressa"
             pct = (u["n_entregas"] / u["n_alunos"] * 100) if u["n_alunos"] > 0 else 0
-            autor_inline = f' · <span style="color:#7c3aed;">por {u["criador_nome"] or "—"}</span>' if is_admin else ""
+            autor_inline = f' · <span style="color:var(--purple);">por {u["criador_nome"] or "—"}</span>' if is_admin else ""
             linhas += (
                 f'<a href="/aplicacoes/{u["id"]}" style="display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; text-decoration:none; color:inherit;">'
                 f'<div style="min-width:0; flex:1;">{status_dot} <strong>{u["titulo"]}</strong> <span style="font-size:12px; color:var(--text-muted);">· {u["turma_nome"]} · {modo_label}{autor_inline}</span></div>'
@@ -1258,9 +1258,9 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
                 qs = _urlp.urlencode({"disciplina": disc_id, "ano": ano_v} if ano_v else {"disciplina": disc_id})
                 # Destaca badge se o filtro atual bate
                 ativo = (disciplina_id == disc_id and ((ano_v and ano == ano_v) or (not ano_v and not ano)))
-                cor_bg = "#2563eb" if ativo else "var(--bg)"
+                cor_bg = "var(--accent)" if ativo else "var(--bg)"
                 cor_fg = "white" if ativo else "var(--text)"
-                borda = "#2563eb" if ativo else "var(--border)"
+                borda = "var(--accent)" if ativo else "var(--border)"
                 badges_linha.append(
                     f'<a href="/questoes?{qs}" class="badge" style="background:{cor_bg}; color:{cor_fg}; '
                     f'border:1px solid {borda}; text-decoration:none; padding:3px 9px; font-size:11px;">'
@@ -1389,9 +1389,9 @@ def form_nova_questao_passo1():
                 let html = '';
                 for (const c of codigos) {
                     if (data[c]) {
-                        html += '<div style="padding:4px 8px; background:#f0fdf4; border-left:3px solid #16a34a; margin-bottom:3px; color:#1f2937;"><strong style="color:#166534;">' + c + '</strong>: ' + data[c].replace(/</g, '&lt;') + '</div>';
+                        html += '<div style="padding:4px 8px; background:var(--green-bg); border-left:3px solid var(--green); margin-bottom:3px; color:var(--text);"><strong style="color:var(--green);">' + c + '</strong>: ' + data[c].replace(/</g, '&lt;') + '</div>';
                     } else {
-                        html += '<div style="padding:4px 8px; background:#fef2f2; border-left:3px solid #dc2626; margin-bottom:3px; color:#7f1d1d;"><strong style="color:#991b1b;">' + c + '</strong>: ⚠ código não encontrado no catálogo (será criado sem descrição)</div>';
+                        html += '<div style="padding:4px 8px; background:var(--red-bg); border-left:3px solid var(--red); margin-bottom:3px; color:var(--red);"><strong style="color:var(--red);">' + c + '</strong>: ⚠ código não encontrado no catálogo (será criado sem descrição)</div>';
                     }
                 }
                 preview.innerHTML = html;
@@ -1425,7 +1425,7 @@ def form_nova_questao_passo1():
                 const escopo = disc ? ' (filtrado pela disciplina)' : ' (todas as disciplinas)';
                 let html = '<div style="color:var(--text-muted); padding:4px 0;">' + results.length + ' habilidade(s) encontrada(s)' + escopo + ' — clique para adicionar:</div>';
                 for (const r of results) {
-                    html += '<div data-codigo="' + r.codigo + '" style="padding:6px 8px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:pointer; background:var(--bg); color:#1f2937;" onmouseover="this.style.background=\\'#eff6ff\\'" onmouseout="this.style.background=\\'var(--bg)\\'"><strong style="color:#2563eb;">' + r.codigo + '</strong> · ' + r.descricao.replace(/</g, '&lt;') + '</div>';
+                    html += '<div data-codigo="' + r.codigo + '" style="padding:6px 8px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:pointer; background:var(--bg); color:var(--text);" onmouseover="this.style.background=\\'var(--accent-bg)\\'" onmouseout="this.style.background=\\'var(--bg)\\'"><strong style="color:var(--accent);">' + r.codigo + '</strong> · ' + r.descricao.replace(/</g, '&lt;') + '</div>';
                 }
                 divRes.innerHTML = html;
             } catch (e) { divRes.innerHTML = ''; }
@@ -1528,7 +1528,7 @@ def form_nova_questao_passo2(
     elif tipo == "discursiva":
         # Discursiva: sem alternativas. Aviso visual.
         fieldset_alternativas = """
-            <div style="background:#eff6ff; color:#1e3a8a; border:1px solid #3b82f6; padding:14px 16px; border-radius:6px; margin:12px 0;">
+            <div style="background:var(--accent-bg); color:var(--accent); border:1px solid var(--accent); padding:14px 16px; border-radius:6px; margin:12px 0;">
                 <strong>📝 Questão discursiva</strong><br>
                 <span style="font-size:13px;">O aluno responderá em texto livre. No modo impresso, será reservado espaço para resposta manuscrita. A correção é manual — feita por você fora do sistema.</span>
             </div>
@@ -1851,17 +1851,17 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
         cards = ""
         for p in provas:
             tm = tags_map.get(p["id"], {"disciplinas": set(), "anos": set()})
-            disc_tags = "".join(f'<span class="badge" style="background:#dbeafe; color:#1e40af;">{d}</span>' for d in sorted(tm["disciplinas"]))
+            disc_tags = "".join(f'<span class="badge" style="background:var(--accent-bg); color:var(--accent);">{d}</span>' for d in sorted(tm["disciplinas"]))
             ano_tags = "".join(f'<span class="badge">{a}</span>' for a in sorted(tm["anos"]))
             desc = f'<div style="font-size:13px; color:var(--text-muted); margin-top:4px;">{p["descricao"]}</div>' if p["descricao"] else ""
             n_apl = apl_count.get(p["id"], 0)
-            apl_badge = f'<span class="badge" style="background:#fef3c7; color:#92400e;">{n_apl} aplicação{"" if n_apl == 1 else "ões"}</span>' if n_apl else ""
+            apl_badge = f'<span class="badge" style="background:var(--orange-bg); color:var(--orange);">{n_apl} aplicação{"" if n_apl == 1 else "ões"}</span>' if n_apl else ""
 
             # Badge "Por: <nome>" só pra admin (pra ele saber de quem é cada prova)
             autor_badge = ""
             if is_admin:
                 nome_autor = p["criador_nome"] if p["criador_nome"] else "—"
-                autor_badge = f'<span class="badge" style="background:#ede9fe; color:#5b21b6;">Por: {nome_autor}</span>'
+                autor_badge = f'<span class="badge" style="background:var(--purple-bg); color:var(--purple);">Por: {nome_autor}</span>'
 
             cards += f"""
             <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin-bottom:10px;">
@@ -1880,7 +1880,7 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
                         <a href="/provas/{p["id"]}" class="btn" style="padding:4px 10px; font-size:12px;">Abrir</a>
                         <a href="/provas/{p["id"]}/editar" class="btn" style="padding:4px 10px; font-size:12px;">Editar</a>
                         <form action="/provas/{p["id"]}/deletar" method="post" style="margin:0;" onsubmit="return confirm('Excluir esta prova | tarefa? Se ela tiver aplicações, a exclusão será bloqueada.');">
-                            <button type="submit" class="btn" style="padding:4px 10px; font-size:12px; background:#dc2626; color:white; border-color:#dc2626;">Excluir</button>
+                            <button type="submit" class="btn" style="padding:4px 10px; font-size:12px; background:var(--red); color:white; border-color:var(--red);">Excluir</button>
                         </form>
                     </div>
                 </div>
@@ -2040,7 +2040,7 @@ function renderPicker() {
                 '<button type="button" onclick="mover(' + idx + ', -1)" ' + upDisabled + ' class="btn" style="padding:0 6px; font-size:11px;">▴</button>' +
                 '<button type="button" onclick="mover(' + idx + ', 1)" ' + downDisabled + ' class="btn" style="padding:0 6px; font-size:11px;">▾</button>' +
                 '</div>' +
-                '<button type="button" onclick="remover(' + quest.id + ')" class="btn" style="padding:4px 8px; font-size:11px; color:#dc2626;">✕</button>' +
+                '<button type="button" onclick="remover(' + quest.id + ')" class="btn" style="padding:4px 8px; font-size:11px; color:var(--red);">✕</button>' +
                 '</div>';
         }).join('');
     }
@@ -2215,8 +2215,8 @@ def deletar_prova(id: int):
     if uso_ativo:
         conn.close()
         content = """
-        <div style="border: 1px solid #dc2626; background: #fef2f2; padding: 20px; border-radius: 6px; margin-top:20px; color:#7f1d1d;">
-            <h3 style="color:#dc2626; margin-top:0;">Operação Impedida</h3>
+        <div style="border: 1px solid var(--red); background: var(--red-bg); padding: 20px; border-radius: 6px; margin-top:20px; color:var(--red);">
+            <h3 style="color:var(--red); margin-top:0;">Operação Impedida</h3>
             <p>Não é possível deletar esta prova | tarefa porque ela possui <strong>Aplicações</strong> em andamento ou histórico de notas associado a turmas.</p>
             <p>Se deseja realmente excluí-la, remova primeiro as respectivas aplicações na aba de "Aplicações".</p>
             <a href="/provas" class="btn" style="margin-top:10px;">Voltar para Provas</a>
@@ -2511,7 +2511,7 @@ def ver_turma(request: Request, turma_id: int):
                     f'<span style="color:var(--text-subtle);"> · </span>'
                     f'<form action="/alunos/{a["id"]}/deletar" method="post" style="display:inline; margin:0;" '
                     f"onsubmit=\"return confirm('Excluir {nome_escapado}? Se o aluno tiver entregas registradas, você poderá forçar a exclusão na próxima tela.');\">"
-                    f'<button type="submit" style="background:none; border:none; padding:0; color:#dc2626; cursor:pointer; font-size:inherit; font-family:inherit;">Excluir</button>'
+                    f'<button type="submit" style="background:none; border:none; padding:0; color:var(--red); cursor:pointer; font-size:inherit; font-family:inherit;">Excluir</button>'
                     f'</form>'
                     f'</div>'
                 )
@@ -2528,7 +2528,7 @@ def ver_turma(request: Request, turma_id: int):
             f'<div class="page-actions"><form action="/turmas/{turma_id}/deletar" method="post" style="margin:0;" '
             f"onsubmit=\"return confirm('Excluir esta turma?\\n\\nIsso removerá: alunos, aplicações desta turma, respostas e entregas associadas.') && "
             f"confirm('TEM CERTEZA? Esta ação é IRREVERSÍVEL e não pode ser desfeita.');\">"
-            f'<button type="submit" class="btn" style="background:#dc2626; color:white; border-color:#dc2626;">🗑️ Excluir turma</button>'
+            f'<button type="submit" class="btn" style="background:var(--red); color:white; border-color:var(--red);">🗑️ Excluir turma</button>'
             f'</form></div>'
         )
         form_adicionar = f"""
@@ -2687,12 +2687,12 @@ def listar_aplicacoes(
             subtitulo = f'<div style="font-size:13px; color:var(--text-muted); margin-top:2px;">{a["prova_titulo"]}</div>' if a["titulo"] and a["titulo"] != a["prova_titulo"] else ""
 
             modo_badge = (
-                '<span class="badge" style="background:#dbeafe; color:#1e40af;">📱 Online</span>'
+                '<span class="badge" style="background:var(--accent-bg); color:var(--accent);">📱 Online</span>'
                 if a["modo"] == "online"
-                else '<span class="badge" style="background:#fef3c7; color:#92400e;">📄 Impressa</span>'
+                else '<span class="badge" style="background:var(--orange-bg); color:var(--orange);">📄 Impressa</span>'
             )
             status_badge = (
-                '<span class="badge" style="background:#dcfce7; color:#166534;">Aberta</span>'
+                '<span class="badge" style="background:var(--green-bg); color:var(--green);">Aberta</span>'
                 if a["aberta"]
                 else '<span class="badge" style="background:var(--bg-muted); color:var(--text-muted);">Encerrada</span>'
             )
@@ -2700,7 +2700,7 @@ def listar_aplicacoes(
 
             n_e = a["qtd_entregas"] or 0
             n_a = a["qtd_alunos"] or 0
-            progresso_color = "#16a34a" if n_e == n_a and n_a > 0 else ("#ca8a04" if n_e > 0 else "var(--text-muted)")
+            progresso_color = "var(--green)" if n_e == n_a and n_a > 0 else ("var(--orange)" if n_e > 0 else "var(--text-muted)")
             progresso_badge = f'<span class="badge" style="color:{progresso_color};">{n_e}/{n_a} entregas</span>'
 
             data_str = f'<span style="font-size:12px; color:var(--text-muted);">{format_data_br(a["criada_em"])}</span>' if a["criada_em"] else ""
@@ -2709,7 +2709,7 @@ def listar_aplicacoes(
             autor_badge = ""
             if is_admin:
                 nome_autor = a["criador_nome"] if a["criador_nome"] else "—"
-                autor_badge = f'<span class="badge" style="background:#ede9fe; color:#5b21b6;">Por: {nome_autor}</span>'
+                autor_badge = f'<span class="badge" style="background:var(--purple-bg); color:var(--purple);">Por: {nome_autor}</span>'
 
             cards += f"""
             <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin-bottom:10px;">
@@ -2726,7 +2726,7 @@ def listar_aplicacoes(
                     <div style="display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end;">
                         <a href="/aplicacoes/{a["id"]}" class="btn btn-primary" style="padding:4px 10px; font-size:12px;">Abrir</a>
                         <form action="/aplicacoes/{a["id"]}/deletar" method="post" style="margin:0;" onsubmit="return confirm('Excluir esta aplicação? Os registros de entregas, respostas e notas dos alunos serão apagados permanentemente. Esta ação não pode ser desfeita.');">
-                            <button type="submit" class="btn" style="padding:4px 10px; font-size:12px; background:#dc2626; color:white; border-color:#dc2626;">Excluir</button>
+                            <button type="submit" class="btn" style="padding:4px 10px; font-size:12px; background:var(--red); color:white; border-color:var(--red);">Excluir</button>
                         </form>
                     </div>
                 </div>
@@ -2881,7 +2881,7 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
         acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/cartoes" class="btn btn-primary" target="_blank">Folha com QR Codes</a>'
     else:
         acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/cartao-resposta" class="btn btn-primary">📄 Cartões Resposta (PDF)</a>'
-        acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/escanear" class="btn btn-primary" style="background:#16a34a; border-color:#16a34a;">📷 Escanear cartão</a>'
+        acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/escanear" class="btn btn-primary" style="background:var(--green); border-color:var(--green);">📷 Escanear cartão</a>'
         acoes_btn += f'<a href="/provas/{apl["prova_id"]}/imprimir" class="btn" target="_blank">🖨️ Imprimir prova</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/analise" class="btn">📈 Análise pedagógica</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/exportar" class="btn">📊 Exportar Planilha Excel</a>'
@@ -2906,9 +2906,9 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
             data = alunos_data[a["id"]]
             transferido_badge = ""
             if a["transferido_para"]:
-                transferido_badge = f' <span class="badge" style="background:#fef3c7; color:#92400e; font-size:10px; vertical-align:middle;">→ {a["transferido_para"]}</span>'
+                transferido_badge = f' <span class="badge" style="background:var(--orange-bg); color:var(--orange); font-size:10px; vertical-align:middle;">→ {a["transferido_para"]}</span>'
             if data["entregue"]:
-                status_html = f'<div style="margin-top:4px;"><span class="badge" style="background:var(--success-bg, #e7f7ee); color:var(--success-text, #1a7f37);">Entregue · {data["score"]}/{total_questoes}</span></div>'
+                status_html = f'<div style="margin-top:4px;"><span class="badge" style="background:var(--success-bg, var(--green-bg)); color:var(--success-text, var(--green));">Entregue · {data["score"]}/{total_questoes}</span></div>'
             elif apl["modo"] == "online" and not a["transferido_para"]:
                 url = f'{base_url}/responder/{a["codigo_unico"]}/{aplicacao_id}'
                 status_html = f'<input type="text" value="{url}" readonly style="font-family:\'SF Mono\',monospace; font-size:11px; width:100%; margin:4px 0 0; padding:6px 8px;" onclick="this.select()">'
@@ -3068,22 +3068,22 @@ def cartoes_qr(aplicacao_id: int, request: Request):
             font-family: 'Sora', -apple-system, BlinkMacSystemFont, sans-serif;
             margin: 0;
             padding: 24px;
-            background: #f5f5f5;
-            color: #18181b;
+            background: var(--bg-subtle);
+            color: var(--text);
         }}
         .container {{ max-width: 21cm; margin: 0 auto; background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
         h1 {{ font-size: 22px; margin: 0 0 4px; }}
-        .meta {{ color: #71717a; font-size: 14px; margin: 0 0 24px; }}
+        .meta {{ color: var(--text-muted); font-size: 14px; margin: 0 0 24px; }}
         .actions {{ margin-bottom: 24px; display: flex; gap: 8px; }}
-        .btn {{ display: inline-block; padding: 8px 16px; border-radius: 6px; border: 1px solid #d4d4d8; background: white; color: #18181b; text-decoration: none; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; }}
-        .btn-primary {{ background: #2563eb; border-color: #2563eb; color: white; }}
+        .btn {{ display: inline-block; padding: 8px 16px; border-radius: 6px; border: 1px solid #d4d4d8; background: white; color: var(--text); text-decoration: none; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; }}
+        .btn-primary {{ background: var(--accent); border-color: var(--accent); color: white; }}
         .qr-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }}
-        .qr-card {{ border: 1px dashed #a1a1aa; border-radius: 6px; padding: 12px; text-align: center; page-break-inside: avoid; break-inside: avoid; }}
+        .qr-card {{ border: 1px dashed var(--text-muted); border-radius: 6px; padding: 12px; text-align: center; page-break-inside: avoid; break-inside: avoid; }}
         .qr-name {{ font-size: 13px; font-weight: 600; margin-bottom: 4px; }}
-        .qr-meta {{ font-size: 11px; color: #71717a; margin-bottom: 8px; }}
+        .qr-meta {{ font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }}
         .qr-meta code {{ font-family: 'SF Mono', Monaco, monospace; background: #f4f4f5; padding: 1px 4px; border-radius: 3px; }}
         .qr-card img {{ width: 100%; max-width: 160px; height: auto; display: block; margin: 0 auto; }}
-        .qr-instr {{ font-size: 10px; color: #a1a1aa; margin-top: 6px; font-style: italic; }}
+        .qr-instr {{ font-size: 10px; color: var(--text-muted); margin-top: 6px; font-style: italic; }}
         @media print {{
             @page {{ size: A4; margin: 1cm; }}
             body {{ background: white; padding: 0; }}
@@ -3304,14 +3304,14 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
             estilo = "padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px;"
             label = ""
             if a["letra"] == marcada and a["correta"]:
-                estilo += " background:var(--success-bg, #e7f7ee); border-color:var(--success-text, #1a7f37);"
-                label = ' <span style="color:var(--success-text, #1a7f37); font-weight:600;">✓ Marcada (correta)</span>'
+                estilo += " background:var(--success-bg, var(--green-bg)); border-color:var(--success-text, var(--green));"
+                label = ' <span style="color:var(--success-text, var(--green)); font-weight:600;">✓ Marcada (correta)</span>'
             elif a["letra"] == marcada and not a["correta"]:
-                estilo += " background:var(--danger-bg, #fde8e8); border-color:var(--danger-text, #c0392b);"
-                label = ' <span style="color:var(--danger-text, #c0392b); font-weight:600;">✗ Marcada (incorreta)</span>'
+                estilo += " background:var(--red-bg); border-color:var(--red);"
+                label = ' <span style="color:var(--danger-text, var(--red)); font-weight:600;">✗ Marcada (incorreta)</span>'
             elif a["correta"]:
-                estilo += " border-color:var(--success-text, #1a7f37); border-style:dashed;"
-                label = ' <span style="color:var(--success-text, #1a7f37); font-weight:600;">← Resposta correta</span>'
+                estilo += " border-color:var(--success-text, var(--green)); border-style:dashed;"
+                label = ' <span style="color:var(--success-text, var(--green)); font-weight:600;">← Resposta correta</span>'
 
             alts_html += f'<div style="{estilo}"><strong>{a["letra"]})</strong> {a["texto"]}{label}</div>'
 
@@ -3324,7 +3324,7 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
     conn.close()
 
     if entrega:
-        status_badge = f'<span class="badge" style="background:var(--success-bg, #e7f7ee); color:var(--success-text, #1a7f37);">Entregue · {score}/{total}</span>'
+        status_badge = f'<span class="badge" style="background:var(--success-bg, var(--green-bg)); color:var(--success-text, var(--green));">Entregue · {score}/{total}</span>'
         status_data = f' · Entregue em {entrega["finalizada_em"]}'
     elif respostas:
         status_badge = f'<span class="badge">Em andamento · {score}/{total} (parcial)</span>'
@@ -3557,7 +3557,7 @@ def form_editar_questao(id: int, request: Request):
         return HTMLResponse(render_page(
             "Sem permissão",
             '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
-            '<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:16px; border-radius:6px;">'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
             '<p>Essa questão foi criada por outro professor. Apenas <strong>o autor da questão</strong> ou o <strong>administrador</strong> podem editá-la.</p>'
             '<p>Você pode <strong>visualizar</strong> a questão e <strong>usá-la em suas próprias provas</strong> normalmente.</p>'
             '</div>'
@@ -3665,7 +3665,7 @@ def form_editar_questao(id: int, request: Request):
         """
     elif tipo_q == "discursiva":
         fieldset_alts = """
-            <div style="background:#eff6ff; color:#1e3a8a; border:1px solid #3b82f6; padding:14px 16px; border-radius:6px; margin:12px 0;">
+            <div style="background:var(--accent-bg); color:var(--accent); border:1px solid var(--accent); padding:14px 16px; border-radius:6px; margin:12px 0;">
                 <strong>📝 Questão discursiva</strong> — resposta livre, correção manual.
             </div>
         """
@@ -3815,9 +3815,9 @@ def form_editar_questao(id: int, request: Request):
                     let html = '';
                     for (const c of codigos) {{
                         if (data[c]) {{
-                            html += '<div style="padding:4px 8px; background:#f0fdf4; border-left:3px solid #16a34a; margin-bottom:3px; color:#1f2937;"><strong style="color:#166534;">' + c + '</strong>: ' + data[c].replace(/</g, '&lt;') + '</div>';
+                            html += '<div style="padding:4px 8px; background:var(--green-bg); border-left:3px solid var(--green); margin-bottom:3px; color:var(--text);"><strong style="color:var(--green);">' + c + '</strong>: ' + data[c].replace(/</g, '&lt;') + '</div>';
                         }} else {{
-                            html += '<div style="padding:4px 8px; background:#fef2f2; border-left:3px solid #dc2626; margin-bottom:3px; color:#7f1d1d;"><strong style="color:#991b1b;">' + c + '</strong>: ⚠ código não encontrado no catálogo</div>';
+                            html += '<div style="padding:4px 8px; background:var(--red-bg); border-left:3px solid var(--red); margin-bottom:3px; color:var(--red);"><strong style="color:var(--red);">' + c + '</strong>: ⚠ código não encontrado no catálogo</div>';
                         }}
                     }}
                     preview.innerHTML = html;
@@ -3852,7 +3852,7 @@ def form_editar_questao(id: int, request: Request):
                     const escopo = disc ? ' (filtrado pela disciplina)' : ' (todas as disciplinas)';
                     let html = '<div style="color:var(--text-muted); padding:4px 0;">' + results.length + ' habilidade(s) encontrada(s)' + escopo + ' — clique para adicionar:</div>';
                     for (const r of results) {{
-                        html += '<div data-codigo="' + r.codigo + '" style="padding:6px 8px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:pointer; background:var(--bg); color:#1f2937;" onmouseover="this.style.background=\\'#eff6ff\\'" onmouseout="this.style.background=\\'var(--bg)\\'"><strong style="color:#2563eb;">' + r.codigo + '</strong> · ' + r.descricao.replace(/</g, '&lt;') + '</div>';
+                        html += '<div data-codigo="' + r.codigo + '" style="padding:6px 8px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:pointer; background:var(--bg); color:var(--text);" onmouseover="this.style.background=\\'var(--accent-bg)\\'" onmouseout="this.style.background=\\'var(--bg)\\'"><strong style="color:var(--accent);">' + r.codigo + '</strong> · ' + r.descricao.replace(/</g, '&lt;') + '</div>';
                     }}
                     divRes.innerHTML = html;
                 }} catch (e) {{ divRes.innerHTML = ''; }}
@@ -3904,7 +3904,7 @@ async def atualizar_questao(
         return HTMLResponse(render_page(
             "Sem permissão",
             '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
-            '<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:16px; border-radius:6px;">'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
             '<p>Apenas o autor da questão ou o administrador podem editá-la.</p></div>'
             '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
             active="questoes"
@@ -3998,7 +3998,7 @@ def deletar_questao(id: int, request: Request):
         return HTMLResponse(render_page(
             "Sem permissão",
             '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
-            '<div style="background:#fef2f2; color:#7f1d1d; border:1px solid #dc2626; padding:16px; border-radius:6px;">'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
             '<p>Apenas o autor da questão ou o administrador podem excluí-la.</p></div>'
             '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
             active="questoes"
@@ -4007,8 +4007,8 @@ def deletar_questao(id: int, request: Request):
     if em_uso > 0:
         conn.close()
         content = """
-        <div style="border: 1px solid #dc2626; background: #fef2f2; padding: 20px; border-radius: 6px; margin-top:20px; color:#7f1d1d;">
-            <h3 style="color:#dc2626; margin-top:0;">Operação Impedida</h3>
+        <div style="border: 1px solid var(--red); background: var(--red-bg); padding: 20px; border-radius: 6px; margin-top:20px; color:var(--red);">
+            <h3 style="color:var(--red); margin-top:0;">Operação Impedida</h3>
             <p>Não é possível excluir esta questão porque ela está sendo usada em uma ou mais <strong>provas</strong>.</p>
             <p>Se deseja realmente excluí-la, remova-a primeiro das provas que a usam (na tela de edição de prova).</p>
             <a href="/questoes" class="btn" style="margin-top:10px;">Voltar para Questões</a>
@@ -4117,11 +4117,11 @@ def _estatisticas_questao(conn, aplicacao_id, questao_id, alunos_entregues):
 def _cor_por_pct(pct):
     """Retorna cor de fundo conforme % de acerto (verde > 70%, amarelo 40-70%, vermelho < 40%)."""
     if pct >= 70:
-        return "#16a34a"  # verde
+        return "var(--green)"  # verde
     elif pct >= 40:
-        return "#ca8a04"  # amarelo/laranja
+        return "var(--orange)"  # amarelo/laranja
     else:
-        return "#dc2626"  # vermelho
+        return "var(--red)"  # vermelho
 
 
 def _barra_html(pct, largura_total=200):
@@ -4280,11 +4280,11 @@ def analise_aplicacao(aplicacao_id: int):
         destaques_html = f"""
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:24px 0;">
             <div class="card">
-                <div class="card-title" style="color:#dc2626;">Questões mais difíceis</div>
+                <div class="card-title" style="color:var(--red);">Questões mais difíceis</div>
                 <ul style="list-style:none; padding:0; margin:12px 0 0;">{items_dif}</ul>
             </div>
             <div class="card">
-                <div class="card-title" style="color:#16a34a;">Questões mais fáceis</div>
+                <div class="card-title" style="color:var(--green);">Questões mais fáceis</div>
                 <ul style="list-style:none; padding:0; margin:12px 0 0;">{items_fac}</ul>
             </div>
         </div>
@@ -4298,7 +4298,7 @@ def analise_aplicacao(aplicacao_id: int):
             pct_letra = (count / q["total"] * 100) if q["total"] > 0 else 0
             destaque = ""
             if letra == q["correta_letra"]:
-                destaque = ' style="background:#dcfce7; color:#166534; font-weight:600; padding:2px 6px; border-radius:4px;"'
+                destaque = ' style="background:var(--green-bg); color:var(--green); font-weight:600; padding:2px 6px; border-radius:4px;"'
             dist_html += f'<span{destaque}>{letra}: {count} ({pct_letra:.0f}%)</span>'
             if letra != "D":
                 dist_html += '<span style="color:var(--text-subtle); margin:0 6px;">·</span>'
@@ -5472,7 +5472,7 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
             <div class="page-header">
                 <h1>❌ Erro na leitura do cartão</h1>
             </div>
-            <div style="border:1px solid #dc2626; background:#fef2f2; padding:16px; border-radius:6px; margin:16px 0; color:#7f1d1d;">
+            <div style="border:1px solid var(--red); background:var(--red-bg); padding:16px; border-radius:6px; margin:16px 0; color:var(--red);">
                 <strong>Problema:</strong> {result.get("error", "Erro desconhecido")}
             </div>
             <p>Tente novamente com uma foto mais nítida, com melhor iluminação ou de um ângulo mais frontal.</p>
@@ -5493,7 +5493,7 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
         conn.close()
         content = f"""
             <div class="page-header"><h1>⚠️ Cartão de outra turma</h1></div>
-            <div style="border:1px solid #dc2626; background:#fef2f2; padding:16px; border-radius:6px; color:#7f1d1d;">
+            <div style="border:1px solid var(--red); background:var(--red-bg); padding:16px; border-radius:6px; color:var(--red);">
                 <p>O QR Code deste cartão aponta para o aluno <code>{result["aluno_id"]}</code>, que não pertence à turma <strong>{apl["turma_nome"]}</strong> desta aplicação.</p>
                 <p>Verifique se você está na aplicação certa antes de escanear.</p>
             </div>
@@ -5508,7 +5508,7 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
         conn.close()
         content = f"""
             <div class="page-header"><h1>⚠️ Cartão de outra aplicação</h1></div>
-            <div style="border:1px solid #dc2626; background:#fef2f2; padding:16px; border-radius:6px; color:#7f1d1d;">
+            <div style="border:1px solid var(--red); background:var(--red-bg); padding:16px; border-radius:6px; color:var(--red);">
                 <p>Este cartão foi gerado para a aplicação <code>{result["aplicacao_id_qr"]}</code>, mas você está na aplicação <code>{aplicacao_id}</code>.</p>
             </div>
             <div class="page-actions">
@@ -5544,11 +5544,11 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
     avisos_html = ""
     if result["warnings"]:
         items = "".join(f"<li>{w}</li>" for w in result["warnings"])
-        avisos_html = f'<div style="border:1px solid #ca8a04; background:#fefce8; padding:12px; border-radius:6px; margin:16px 0; color:#854d0e;"><strong>⚠️ Avisos da leitura:</strong><ul style="margin:6px 0 0 18px;">{items}</ul></div>'
+        avisos_html = f'<div style="border:1px solid var(--orange); background:var(--orange-bg); padding:12px; border-radius:6px; margin:16px 0; color:var(--orange);"><strong>⚠️ Avisos da leitura:</strong><ul style="margin:6px 0 0 18px;">{items}</ul></div>'
 
     override_aviso = ""
     if ja_entregue:
-        override_aviso = f'<div style="border:1px solid #ca8a04; background:#fefce8; padding:12px; border-radius:6px; margin:16px 0; color:#854d0e;"><strong>⚠️ Atenção:</strong> este aluno já tem entrega registrada ({ja_entregue["finalizada_em"]}). Confirmar irá <strong>sobrescrever</strong> as respostas anteriores.</div>'
+        override_aviso = f'<div style="border:1px solid var(--orange); background:var(--orange-bg); padding:12px; border-radius:6px; margin:16px 0; color:var(--orange);"><strong>⚠️ Atenção:</strong> este aluno já tem entrega registrada ({ja_entregue["finalizada_em"]}). Confirmar irá <strong>sobrescrever</strong> as respostas anteriores.</div>'
 
     content = f"""
         <div class="page-header">
@@ -5641,7 +5641,7 @@ async def confirmar_escaneamento(aplicacao_id: int, request: Request, aluno_id: 
 
     content = f"""
         <div class="page-header"><h1>✅ Cartão registrado</h1></div>
-        <div style="border:1px solid #16a34a; background:#f0fdf4; padding:20px; border-radius:6px; margin:16px 0; color:#166534;">
+        <div style="border:1px solid var(--green); background:var(--green-bg); padding:20px; border-radius:6px; margin:16px 0; color:var(--green);">
             <p style="margin:0;"><strong>Aluno:</strong> {aluno["nome"]} (Nº {aluno["numero"] or "—"})</p>
             <p style="margin:8px 0 0;"><strong>Nota:</strong> <span style="font-size:24px; font-weight:600;">{score}/{total}</span> ({(score/total*100 if total > 0 else 0):.0f}%)</p>
         </div>
@@ -5776,7 +5776,7 @@ def deletar_aluno(request: Request, aluno_id: int, forcar: int = 0):
         content = f"""
             <div class="page-header"><h1>⚠️ Confirmação necessária</h1></div>
 
-            <div style="border:1px solid #ca8a04; background:#fefce8; padding:16px; border-radius:6px; color:#854d0e;">
+            <div style="border:1px solid var(--orange); background:var(--orange-bg); padding:16px; border-radius:6px; color:var(--orange);">
                 <p style="margin:0;"><strong>{aluno["nome"]}</strong> tem <strong>{n_entregas} entrega(s)</strong> e <strong>{n_respostas} resposta(s)</strong> registradas no histórico.</p>
             </div>
 
@@ -5789,7 +5789,7 @@ def deletar_aluno(request: Request, aluno_id: int, forcar: int = 0):
                     <a href="/alunos/{aluno_id}/transferir" class="btn">→ Ir para transferência</a>
                 </div>
 
-                <div style="border:1px solid #dc2626; padding:14px; border-radius:6px; background:#fef2f2; color:#7f1d1d;">
+                <div style="border:1px solid var(--red); padding:14px; border-radius:6px; background:var(--red-bg); color:var(--red);">
                     <strong>Excluir definitivamente</strong> (use quando o aluno saiu da escola e o histórico não importa mais)
                     <p style="margin:6px 0 10px 0; font-size:13px;">
                         ⚠ Esta ação <strong>apaga permanentemente</strong>:<br>
@@ -5801,7 +5801,7 @@ def deletar_aluno(request: Request, aluno_id: int, forcar: int = 0):
                     </p>
                     <form action="/alunos/{aluno_id}/deletar?forcar=1" method="post" style="display:inline; margin:0;"
                           onsubmit="return confirm('CONFIRMAÇÃO FINAL\\n\\nVocê está prestes a EXCLUIR PERMANENTEMENTE o aluno {aluno["nome"]} e TODOS os seus dados ({n_entregas} entregas, {n_respostas} respostas).\\n\\nEsta ação NÃO PODE ser desfeita.\\n\\nDeseja prosseguir?');">
-                        <button type="submit" class="btn" style="background:#dc2626; color:white; border-color:#dc2626;">
+                        <button type="submit" class="btn" style="background:var(--red); color:white; border-color:var(--red);">
                             Sim, excluir tudo definitivamente
                         </button>
                     </form>
@@ -5983,17 +5983,17 @@ def form_importar_habilidades():
             <div class="page-actions"><a href="/habilidades" class="btn">← Voltar</a></div>
         </div>
 
-        <div class="tip" style="background:#dbeafe; color:#1e3a8a; border-color:#3b82f6;">
+        <div class="tip" style="background:var(--accent-bg); color:var(--accent); border-color:var(--accent);">
             <strong>Formatos aceitos:</strong>
-            <ul style="margin:8px 0 0 18px; line-height:1.6; color:#1e3a8a;">
+            <ul style="margin:8px 0 0 18px; line-height:1.6; color:var(--accent);">
                 <li><strong>Planilha oficial do MEC</strong> (downloadbncc.mec.gov.br) — basta ter uma coluna chamada <code>Habilidade</code> no formato <code>(CODIGO) descrição</code>. As outras colunas (Disciplina, Ano, etc.) são ignoradas.</li>
                 <li><strong>Excel/CSV personalizado</strong> — deve ter colunas <code>codigo</code> e <code>descricao</code> (nessa grafia).</li>
             </ul>
         </div>
 
-        <div class="tip" style="background:#fef3c7; color:#78350f; border-color:#ca8a04;">
+        <div class="tip" style="background:var(--orange-bg); color:var(--orange); border-color:var(--orange);">
             <strong>Comportamento da importação:</strong>
-            <ul style="margin:8px 0 0 18px; line-height:1.6; color:#78350f;">
+            <ul style="margin:8px 0 0 18px; line-height:1.6; color:var(--orange);">
                 <li>Códigos novos → <strong>cadastrados</strong></li>
                 <li>Códigos já existentes <strong>sem descrição</strong> → descrição é <strong>preenchida</strong></li>
                 <li>Códigos já existentes <strong>com descrição</strong> → mantida (não sobrescreve)</li>
@@ -6169,8 +6169,8 @@ async def processar_importacao_habilidades(arquivo: UploadFile = File(...)):
 
         <div class="metric-grid">
             <div class="metric"><div class="metric-label">Lidas do arquivo</div><div class="metric-value">{len(encontrados)}</div></div>
-            <div class="metric"><div class="metric-label">Novas cadastradas</div><div class="metric-value" style="color:#16a34a;">{novas}</div></div>
-            <div class="metric"><div class="metric-label">Atualizadas (descrição)</div><div class="metric-value" style="color:#ca8a04;">{atualizadas}</div></div>
+            <div class="metric"><div class="metric-label">Novas cadastradas</div><div class="metric-value" style="color:var(--green);">{novas}</div></div>
+            <div class="metric"><div class="metric-label">Atualizadas (descrição)</div><div class="metric-value" style="color:var(--orange);">{atualizadas}</div></div>
             <div class="metric"><div class="metric-label">Já existiam (mantidas)</div><div class="metric-value" style="color:var(--text-muted);">{mantidas}</div></div>
         </div>
 
@@ -6289,9 +6289,9 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
     resumo = f"""
         <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
             <div class="metric"><div class="metric-label">Fotos enviadas</div><div class="metric-value">{len(fotos)}</div></div>
-            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:#16a34a;">{n_ok}</div></div>
-            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:#ca8a04;">{n_warn}</div></div>
-            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:#dc2626;">{n_erro}</div></div>
+            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
+            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
         </div>
     """
 
@@ -6348,14 +6348,14 @@ def _render_card_erro(idx, filename, mensagem_erro, preview_b64=None):
     if preview_b64:
         preview_img = f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:200px; max-height:150px; border:1px solid var(--border); margin-top:8px; border-radius:4px;">'
     return f"""
-    <div class="lote-card" style="border:1px solid #dc2626; border-radius:8px; padding:14px; margin-bottom:10px; background:#fef2f2; color:#7f1d1d;">
+    <div class="lote-card" style="border:1px solid var(--red); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--red-bg); color:var(--red);">
         <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
-                <strong style="color:#991b1b;">✗ Foto {idx+1}: {nome_seguro}</strong>
-                <div style="font-size:13px; color:#7f1d1d; margin-top:4px;">{mensagem_erro}</div>
+                <strong style="color:var(--red);">✗ Foto {idx+1}: {nome_seguro}</strong>
+                <div style="font-size:13px; color:var(--red); margin-top:4px;">{mensagem_erro}</div>
                 {preview_img}
             </div>
-            <span style="font-size:12px; color:#991b1b; flex-shrink:0;">Não será salvo</span>
+            <span style="font-size:12px; color:var(--red); flex-shrink:0;">Não será salvo</span>
         </div>
     </div>
     """
@@ -6370,17 +6370,17 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
     # Status: verde se sem warnings, amarelo se tem warning, ou amarelo se duplicata
     tem_avisos = bool(result["warnings"]) or duplicata_lote or ja_entregue
     if tem_avisos:
-        border_color = "#ca8a04"
-        bg = "#fefce8"
+        border_color = "var(--orange)"
+        bg = "var(--orange-bg)"
         status_icon = "⚠"
-        status_color = "#854d0e"
+        status_color = "var(--orange)"
         body_default_display = "block"  # auto-expandido se tem aviso
         toggle_label = "▲ Recolher"
     else:
-        border_color = "#16a34a"
-        bg = "#f0fdf4"
+        border_color = "var(--green)"
+        bg = "var(--green-bg)"
         status_icon = "✓"
-        status_color = "#15803d"
+        status_color = "var(--green)"
         body_default_display = "none"  # colapsado por padrão
         toggle_label = "▼ Expandir"
 
@@ -6394,7 +6394,7 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
     avisos_html = ""
     if avisos:
         items = "".join(f"<li>{w}</li>" for w in avisos)
-        avisos_html = f'<ul style="margin:8px 0 0 18px; font-size:12px; color:#854d0e;">{items}</ul>'
+        avisos_html = f'<ul style="margin:8px 0 0 18px; font-size:12px; color:var(--orange);">{items}</ul>'
 
     # Grid de respostas editáveis — adapta conforme tipo
     answers = result["answers"]
@@ -6605,7 +6605,7 @@ async def confirmar_lote(aplicacao_id: int, request: Request):
 
     content = f"""
         <div class="page-header"><h1>✅ {len(salvos)} cartão(ões) salvos</h1></div>
-        <div style="border:1px solid #16a34a; background:#f0fdf4; padding:16px; border-radius:6px; margin:16px 0; color:#166534;">
+        <div style="border:1px solid var(--green); background:var(--green-bg); padding:16px; border-radius:6px; margin:16px 0; color:var(--green);">
             <p style="margin:0 0 10px 0;"><strong>Resultados:</strong></p>
             <table style="width:100%; border-collapse:collapse; font-size:13px;">
                 <thead><tr style="background:var(--bg);"><th style="padding:6px; text-align:left;">Aluno</th><th style="padding:6px;">Nº</th><th style="padding:6px;">Nota</th></tr></thead>
