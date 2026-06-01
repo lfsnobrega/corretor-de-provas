@@ -4949,19 +4949,14 @@ def _gerar_cartao_resposta_pdf(apl, alunos, questoes_info):
         # Renderiza blocos
         for blk in blocos:
             tipo = blk["tipo"]
-            # Cabeçalho do bloco: "Q3 (V/F)"  com a legenda das colunas
+            # Cabeçalho do bloco: "Q3 (V/F)"
             label_tipo = {"multipla_escolha": "", "vf": "(V/F)", "associacao": "(Assoc.)"}.get(tipo, "")
             c.setFont("Helvetica-Bold", 9)
             # Posição em PDF: y é "altura - y_mm" (PDF tem origem em baixo)
             head_y_pdf = height - blk["top_y_mm"] * mm
             c.drawString(blk["x_mm"] * mm, head_y_pdf, f"Q{blk['num']} {label_tipo}")
-            # Header de colunas (A B C D / V F / a b c)
-            c.setFont("Helvetica-Bold", 8)
-            c.setFillColorRGB(0.4, 0.4, 0.4)
-            c.drawString((blk["x_mm"] + 25) * mm, head_y_pdf, blk["header"])
-            c.setFillColorRGB(0, 0, 0)
 
-            # Pra V/F e Associação, mostrar números das afirmações/itens (1, 2, 3...)
+            # Numerações internas: V/F mostra "Q.1, Q.2..." e Associação mostra "1., 2., ..."
             if tipo == "vf":
                 c.setFont("Helvetica", 8)
                 for k in range(blk["n_linhas"]):
@@ -4974,11 +4969,23 @@ def _gerar_cartao_resposta_pdf(apl, alunos, questoes_info):
                     by_mm = blk["top_y_mm"] + 6 + 4 + k * 8
                     c.drawRightString((blk["x_mm"] + 16) * mm, (height - by_mm * mm) - 1,
                                        f"{k+1}.")
-            elif tipo == "multipla_escolha":
-                c.setFont("Helvetica", 9)
-                by_mm = blk["top_y_mm"] + 6 + 4
-                c.drawRightString((blk["x_mm"] + 16) * mm, (height - by_mm * mm) - 1,
-                                   f"{blk['num']}.")
+            # Múltipla escolha: numeração "Q1" no cabeçalho do bloco já basta (sem duplicar com "1.")
+
+            # Cabeçalho de letras: centralizadas EXATAMENTE acima de cada bolha (uma por coluna).
+            # Pega primeira ocorrência de cada x_mm distinto (= primeira linha de bolhas) preservando ordem.
+            seen_x = set()
+            col_labels = []
+            for b in blk["bubbles"]:
+                if b["x_mm"] not in seen_x:
+                    seen_x.add(b["x_mm"])
+                    col_labels.append(b)
+            c.setFont("Helvetica-Bold", 9)
+            c.setFillColorRGB(0.35, 0.35, 0.35)
+            for b in col_labels:
+                bx_pdf = b["x_mm"] * mm
+                label_y_pdf = height - (b["y_mm"] - 4.5) * mm
+                c.drawCentredString(bx_pdf, label_y_pdf, b["label"])
+            c.setFillColorRGB(0, 0, 0)
 
             # Bolhas
             for b in blk["bubbles"]:
