@@ -1,0 +1,230 @@
+ls -la banco_inicial_obmep.json{
+  "versao": "1.0",
+  "descricao": "Banco inicial — questões de provas oficiais públicas (OBMEP, SAEB, OBA). Use o importador em /admin/importar-questoes.",
+  "questoes": [
+    {
+      "disciplina": "Matemática",
+      "ano": "6º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Em uma sala de aula há 30 estudantes. Sabendo que 2/5 deles são meninas, quantos meninos há na sala?</p>",
+      "fonte": "Adaptado de OBMEP — Banco de Questões, Nível 1",
+      "habilidade_bncc": "EF06MA08",
+      "alternativas": [
+        {"letra": "A", "texto": "12", "correta": false},
+        {"letra": "B", "texto": "15", "correta": false},
+        {"letra": "C", "texto": "18", "correta": true},
+        {"letra": "D", "texto": "20", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Matemática",
+      "ano": "6º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>O perímetro de um retângulo é 36 cm. Sabendo que seu comprimento é o dobro da largura, qual é a largura desse retângulo?</p>",
+      "fonte": "Adaptado de OBMEP — Banco de Questões, Nível 1",
+      "habilidade_bncc": "EF06MA29",
+      "alternativas": [
+        {"letra": "A", "texto": "4 cm", "correta": false},
+        {"letra": "B", "texto": "6 cm", "correta": true},
+        {"letra": "C", "texto": "9 cm", "correta": false},
+        {"letra": "D", "texto": "12 cm", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Matemática",
+      "ano": "7º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Joana comprou um produto que custava R$ 80,00 e recebeu um desconto de 15%. Quanto Joana pagou pelo produto?</p>",
+      "fonte": "Adaptado de Avaliação Diagnóstica — temas SAEB",
+      "habilidade_bncc": "EF07MA02",
+      "alternativas": [
+        {"letra": "A", "texto": "R$ 65,00", "correta": false},
+        {"letra": "B", "texto": "R$ 68,00", "correta": true},
+        {"letra": "C", "texto": "R$ 70,00", "correta": false},
+        {"letra": "D", "texto": "R$ 72,00", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Matemática",
+      "ano": "7º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Quanto vale a expressão (-3) + (-4) - (-2) × 3?</p>",
+      "fonte": "Adaptado de OBMEP — Banco de Questões, Nível 1",
+      "habilidade_bncc": "EF07MA04",
+      "alternativas": [
+        {"letra": "A", "texto": "-13", "correta": false},
+        {"letra": "B", "texto": "-1", "correta": true},
+        {"letra": "C", "texto": "5", "correta": false},
+        {"letra": "D", "texto": "13", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Matemática",
+      "ano": "8º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>O valor de x na equação 3(x - 2) + 4 = 2x + 5 é:</p>",
+      "fonte": "Adaptado de Avaliação Diagnóstica — temas SAEB",
+      "habilidade_bncc": "EF08MA07",
+      "alternativas": [
+        {"letra": "A", "texto": "3", "correta": false},
+        {"letra": "B", "texto": "5", "correta": false},
+        {"letra": "C", "texto": "7", "correta": true},
+        {"letra": "D", "texto": "9", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Matemática",
+      "ano": "8º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Em um triângulo retângulo, os catetos medem 6 cm e 8 cm. Qual é a medida da hipotenusa?</p>",
+      "fonte": "Adaptado de OBMEP — Banco de Questões, Nível 2",
+      "habilidade_bncc": "EF08MA14",
+      "alternativas": [
+        {"letra": "A", "texto": "10 cm", "correta": true},
+        {"letra": "B", "texto": "12 cm", "correta": false},
+        {"letra": "C", "texto": "14 cm", "correta": false},
+        {"letra": "D", "texto": "48 cm", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Matemática",
+      "ano": "9º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>As raízes da equação x² - 5x + 6 = 0 são:</p>",
+      "fonte": "Adaptado de SAEB — Matriz de Referência 9º ano",
+      "habilidade_bncc": "EF09MA09",
+      "alternativas": [
+        {"letra": "A", "texto": "1 e 6", "correta": false},
+        {"letra": "B", "texto": "2 e 3", "correta": true},
+        {"letra": "C", "texto": "-2 e -3", "correta": false},
+        {"letra": "D", "texto": "-1 e -6", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Matemática",
+      "ano": "9º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Um cubo tem volume de 64 cm³. Qual é a medida da aresta desse cubo?</p>",
+      "fonte": "Adaptado de OBMEP — Banco de Questões, Nível 2",
+      "habilidade_bncc": "EF09MA19",
+      "alternativas": [
+        {"letra": "A", "texto": "2 cm", "correta": false},
+        {"letra": "B", "texto": "4 cm", "correta": true},
+        {"letra": "C", "texto": "6 cm", "correta": false},
+        {"letra": "D", "texto": "8 cm", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Língua Portuguesa",
+      "ano": "9º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Leia o trecho:</p><p><em>\"O sol já se escondia atrás das montanhas quando os viajantes finalmente avistaram o vilarejo. Cansados da longa caminhada, sentiram-se aliviados com a promessa de descanso.\"</em></p><p>O recurso textual predominante no trecho é:</p>",
+      "fonte": "Adaptado de Avaliação Diagnóstica — temas SAEB Língua Portuguesa",
+      "habilidade_bncc": "EF69LP47",
+      "alternativas": [
+        {"letra": "A", "texto": "Diálogo direto entre personagens", "correta": false},
+        {"letra": "B", "texto": "Descrição ambiental e do estado dos personagens", "correta": true},
+        {"letra": "C", "texto": "Argumentação com tese e contra-argumento", "correta": false},
+        {"letra": "D", "texto": "Instrução em ordem cronológica", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Língua Portuguesa",
+      "ano": "9º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Identifique a alternativa em que <strong>todas</strong> as palavras estão grafadas corretamente:</p>",
+      "fonte": "Adaptado de Avaliação Diagnóstica — temas SAEB",
+      "habilidade_bncc": "EF09LP04",
+      "alternativas": [
+        {"letra": "A", "texto": "exceção, privilégio, beneficente", "correta": true},
+        {"letra": "B", "texto": "excessão, previlégio, beneficiente", "correta": false},
+        {"letra": "C", "texto": "esceção, privilégio, beneficente", "correta": false},
+        {"letra": "D", "texto": "exceção, privilégio, beneficiênte", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Ciências",
+      "ano": "6º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Os estados físicos da matéria são sólido, líquido e gasoso. A mudança de estado em que uma substância passa do estado líquido para o gasoso por aquecimento é chamada de:</p>",
+      "fonte": "Tema BNCC — Ciências 6º ano",
+      "habilidade_bncc": "EF06CI01",
+      "alternativas": [
+        {"letra": "A", "texto": "Solidificação", "correta": false},
+        {"letra": "B", "texto": "Fusão", "correta": false},
+        {"letra": "C", "texto": "Vaporização", "correta": true},
+        {"letra": "D", "texto": "Condensação", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Ciências",
+      "ano": "8º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Qual sistema do corpo humano é responsável pelo transporte de oxigênio dos pulmões para as células?</p>",
+      "fonte": "Tema BNCC — Ciências 8º ano",
+      "habilidade_bncc": "EF08CI09",
+      "alternativas": [
+        {"letra": "A", "texto": "Sistema digestório", "correta": false},
+        {"letra": "B", "texto": "Sistema cardiovascular", "correta": true},
+        {"letra": "C", "texto": "Sistema nervoso", "correta": false},
+        {"letra": "D", "texto": "Sistema urinário", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Ciências",
+      "ano": "9º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>Um corpo de massa 5 kg está em repouso. Para acelerá-lo a 2 m/s², qual a força resultante necessária? (use F = m × a)</p>",
+      "fonte": "Tema BNCC — Ciências 9º ano, Física",
+      "habilidade_bncc": "EF09CI03",
+      "alternativas": [
+        {"letra": "A", "texto": "2,5 N", "correta": false},
+        {"letra": "B", "texto": "5 N", "correta": false},
+        {"letra": "C", "texto": "10 N", "correta": true},
+        {"letra": "D", "texto": "20 N", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "História",
+      "ano": "8º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>A Revolução Francesa, iniciada em 1789, tinha como um de seus principais lemas:</p>",
+      "fonte": "Tema BNCC — História 8º ano",
+      "habilidade_bncc": "EF08HI10",
+      "alternativas": [
+        {"letra": "A", "texto": "\"Paz, Pão e Terra\"", "correta": false},
+        {"letra": "B", "texto": "\"Liberdade, Igualdade e Fraternidade\"", "correta": true},
+        {"letra": "C", "texto": "\"Ordem e Progresso\"", "correta": false},
+        {"letra": "D", "texto": "\"Independência ou Morte\"", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "História",
+      "ano": "9º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>O período conhecido como \"Era Vargas\" no Brasil corresponde aos governos de Getúlio Vargas entre:</p>",
+      "fonte": "Tema BNCC — História do Brasil 9º ano",
+      "habilidade_bncc": "EF09HI06",
+      "alternativas": [
+        {"letra": "A", "texto": "1889 e 1930", "correta": false},
+        {"letra": "B", "texto": "1930 e 1945, e depois 1951-1954", "correta": true},
+        {"letra": "C", "texto": "1945 e 1964", "correta": false},
+        {"letra": "D", "texto": "1964 e 1985", "correta": false}
+      ]
+    },
+    {
+      "disciplina": "Geografia",
+      "ano": "7º ano",
+      "tipo": "multipla_escolha",
+      "enunciado": "<p>O Brasil é dividido em cinco regiões oficiais segundo o IBGE. Qual é a maior região em área territorial?</p>",
+      "fonte": "Tema BNCC — Geografia do Brasil 7º ano",
+      "habilidade_bncc": "EF07GE02",
+      "alternativas": [
+        {"letra": "A", "texto": "Centro-Oeste", "correta": false},
+        {"letra": "B", "texto": "Nordeste", "correta": false},
+        {"letra": "C", "texto": "Norte", "correta": true},
+        {"letra": "D", "texto": "Sudeste", "correta": false}
+      ]
+    }
+  ]
+}

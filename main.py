@@ -14,6 +14,7 @@ import re
 import uuid
 import qrcode
 import base64
+import html
 import secrets
 import json
 import urllib.parse
@@ -1132,6 +1133,247 @@ def criar_disciplina(nome: str = Form(...)):
     finally:
         conn.close()
     return RedirectResponse("/disciplinas", status_code=303)
+
+
+# ═══════════════════════════════════════════════════════════════
+# IMPORTADOR DE BANCO DE QUESTÕES (JSON em batch)
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/admin/importar-questoes", response_class=HTMLResponse)
+def form_importar_questoes(request: Request):
+    """Tela admin: upload de JSON com questões pra importar em batch."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+
+    content = """
+        <div class="page-header">
+            <h1>📥 Importar banco de questões</h1>
+            <p class="subtitle">Carregue um arquivo <code>.json</code> com questões estruturadas. Útil para popular o banco com provas oficiais (OBMEP, SAEB, OBA, etc.).</p>
+        </div>
+
+        <div class="card" style="background:var(--accent-bg); border-left:3px solid var(--accent);">
+            <h3 style="margin-top:0;">📋 Formato esperado</h3>
+            <p style="font-size:13px;">O arquivo deve conter um objeto JSON com a chave <code>questoes</code> contendo uma lista. Cada questão precisa de:</p>
+            <ul style="font-size:13px; margin:8px 0 0 20px;">
+                <li><code>disciplina</code> — nome (será criada se não existir)</li>
+                <li><code>ano</code> — ex: <code>"6º ano"</code>, <code>"7º ano"</code>, etc.</li>
+                <li><code>tipo</code> — por enquanto só <code>"multipla_escolha"</code></li>
+                <li><code>enunciado</code> — texto da questão (HTML permitido)</li>
+                <li><code>fonte</code> (opcional) — ex: <code>"OBMEP 2019, Nível 1, Q5"</code></li>
+                <li><code>habilidade_bncc</code> (opcional) — código (ex: <code>"EF06MA15"</code>)</li>
+                <li><code>alternativas</code> — lista com <code>{letra, texto, correta}</code></li>
+            </ul>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:10px;">
+                Veja o arquivo de exemplo: <code>banco_inicial_obmep.json</code> distribuído junto com o sistema.
+            </p>
+        </div>
+
+        <form method="post" action="/admin/importar-questoes/preview" enctype="multipart/form-data" style="margin-top:18px;">
+            <label>
+                Arquivo JSON
+                <input type="file" name="arquivo" accept=".json,application/json" required>
+            </label>
+            <div style="margin-top:14px;">
+                <button type="submit" class="btn btn-primary">Visualizar preview →</button>
+                <a href="/" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Importar questões", content, active=""))
+
+
+@app.post("/admin/importar-questoes/preview", response_class=HTMLResponse)
+async def preview_importar_questoes(request: Request):
+    """Recebe JSON, valida estrutura e mostra preview antes de confirmar."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+
+    form = await request.form()
+    arquivo = form.get("arquivo")
+    if not arquivo:
+        return HTMLResponse(render_page("Erro", '<div class="card" style="background:var(--red-bg); color:var(--red);">Nenhum arquivo enviado.</div><a href="/admin/importar-questoes" class="btn">← Voltar</a>'))
+
+    import json as _json
+    try:
+        conteudo = await arquivo.read()
+        dados = _json.loads(conteudo.decode("utf-8"))
+    except Exception as e:
+        return HTMLResponse(render_page("Erro", f'<div class="card" style="background:var(--red-bg); color:var(--red);">Erro ao ler JSON: {html.escape(str(e))}</div><a href="/admin/importar-questoes" class="btn">← Voltar</a>'))
+
+    questoes_raw = dados.get("questoes", [])
+    if not isinstance(questoes_raw, list) or not questoes_raw:
+        return HTMLResponse(render_page("Erro", '<div class="card" style="background:var(--red-bg); color:var(--red);">JSON inválido: chave <code>questoes</code> ausente ou vazia.</div><a href="/admin/importar-questoes" class="btn">← Voltar</a>'))
+
+    # Validação de cada questão
+    erros = []
+    questoes_validas = []
+    for i, q in enumerate(questoes_raw, start=1):
+        problemas = []
+        if not q.get("disciplina"): problemas.append("disciplina ausente")
+        if not q.get("enunciado"): problemas.append("enunciado ausente")
+        tipo = q.get("tipo", "multipla_escolha")
+        if tipo != "multipla_escolha": problemas.append(f"tipo '{tipo}' não suportado por importação ainda")
+        alts = q.get("alternativas", [])
+        if not isinstance(alts, list) or len(alts) < 2:
+            problemas.append("alternativas insuficientes (mínimo 2)")
+        else:
+            n_corretas = sum(1 for a in alts if a.get("correta"))
+            if n_corretas != 1:
+                problemas.append(f"deve ter exatamente 1 alternativa correta ({n_corretas} marcadas)")
+        if problemas:
+            erros.append(f"<li>Questão #{i}: {', '.join(problemas)}</li>")
+        else:
+            questoes_validas.append(q)
+
+    # Armazena o JSON na sessão pra confirmar depois (codifica em base64 pra ficar na URL)
+    import base64
+    payload_b64 = base64.urlsafe_b64encode(_json.dumps({"questoes": questoes_validas}).encode("utf-8")).decode("ascii")
+
+    # Tabela de preview
+    rows = ""
+    for i, q in enumerate(questoes_validas[:50], start=1):  # mostra até 50
+        alt_corr = next((a["letra"] for a in q["alternativas"] if a.get("correta")), "?")
+        enun_curto = re.sub(r'<[^>]+>', '', q["enunciado"])[:120]
+        fonte = q.get("fonte", "—")
+        rows += f"""
+            <tr>
+                <td>{i}</td>
+                <td>{html.escape(q.get('disciplina', '—'))}</td>
+                <td>{html.escape(q.get('ano', '—'))}</td>
+                <td style="max-width:400px;">{html.escape(enun_curto)}{"..." if len(q["enunciado"]) > 120 else ""}</td>
+                <td><span class="badge-success badge">✓ {alt_corr}</span></td>
+                <td style="font-size:11px; color:var(--text-muted);">{html.escape(fonte)}</td>
+            </tr>
+        """
+    if len(questoes_validas) > 50:
+        rows += f'<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:14px;">… e mais {len(questoes_validas) - 50} questões válidas (não exibidas pra economizar espaço)</td></tr>'
+
+    erros_html = ""
+    if erros:
+        erros_html = f"""
+            <div class="card" style="background:var(--orange-bg); border-left:3px solid var(--orange); margin-top:14px;">
+                <strong style="color:var(--orange);">⚠️ {len(erros)} questão(ões) com problemas (serão ignoradas):</strong>
+                <ul style="margin-top:6px; font-size:13px;">{"".join(erros)}</ul>
+            </div>
+        """
+
+    content = f"""
+        <div class="page-header">
+            <h1>👀 Preview da importação</h1>
+            <p class="subtitle">{len(questoes_validas)} questões prontas pra importar · {len(erros)} com erros</p>
+        </div>
+
+        {erros_html}
+
+        <div style="overflow-x:auto; margin-top:14px;">
+            <table>
+                <thead>
+                    <tr><th>#</th><th>Disciplina</th><th>Ano</th><th>Enunciado (resumo)</th><th>Gabarito</th><th>Fonte</th></tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
+
+        <form method="post" action="/admin/importar-questoes/confirmar" style="margin-top:18px;">
+            <input type="hidden" name="payload" value="{payload_b64}">
+            <button type="submit" class="btn btn-primary" {"disabled" if not questoes_validas else ""}>
+                ✓ Confirmar importação de {len(questoes_validas)} questões
+            </button>
+            <a href="/admin/importar-questoes" class="btn">← Voltar</a>
+        </form>
+    """
+    return HTMLResponse(render_page("Preview da importação", content, active=""))
+
+
+@app.post("/admin/importar-questoes/confirmar", response_class=HTMLResponse)
+async def confirmar_importar_questoes(request: Request):
+    """Efetiva a importação: cria disciplinas/habilidades novas se necessário, insere questões + alternativas."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+
+    prof = get_current_professor(request)
+    form = await request.form()
+    import json as _json, base64
+    try:
+        payload_b64 = form.get("payload", "")
+        dados = _json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8"))
+        questoes = dados.get("questoes", [])
+    except Exception as e:
+        return HTMLResponse(render_page("Erro", f'<div class="card" style="background:var(--red-bg); color:var(--red);">Erro ao decodificar payload: {html.escape(str(e))}</div>'))
+
+    conn = get_db()
+    importadas = 0
+    bncc_criadas = 0
+    disciplinas_criadas = 0
+
+    try:
+        for q in questoes:
+            # 1. Disciplina (cria se não existir)
+            disc_nome = q["disciplina"].strip()
+            row = conn.execute("SELECT id FROM disciplinas WHERE LOWER(nome) = LOWER(?)", (disc_nome,)).fetchone()
+            if row:
+                disc_id = row["id"]
+            else:
+                c = conn.execute("INSERT INTO disciplinas (nome) VALUES (?)", (disc_nome,))
+                disc_id = c.lastrowid
+                disciplinas_criadas += 1
+
+            # 2. Enunciado com fonte apêndice
+            enunciado = q["enunciado"]
+            fonte = q.get("fonte", "").strip()
+            if fonte:
+                enunciado = enunciado + f'<p style="font-size:11px; color:var(--text-muted); margin-top:10px; font-style:italic;">📚 Fonte: {html.escape(fonte)}</p>'
+
+            # 3. Insere questão
+            c = conn.execute(
+                "INSERT INTO questoes (disciplina_id, enunciado, ano, tipo, criada_por_professor_id) VALUES (?, ?, ?, ?, ?)",
+                (disc_id, enunciado, q.get("ano", ""), q.get("tipo", "multipla_escolha"), prof["id"])
+            )
+            qid = c.lastrowid
+
+            # 4. Alternativas
+            for a in q["alternativas"]:
+                conn.execute(
+                    "INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)",
+                    (qid, a["letra"].upper(), a["texto"], 1 if a.get("correta") else 0)
+                )
+
+            # 5. Habilidade BNCC (vincula se existe; cria fantasma se não existir)
+            bncc = q.get("habilidade_bncc", "").strip()
+            if bncc:
+                row = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (bncc,)).fetchone()
+                if not row:
+                    c2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (bncc, "(importada — sem descrição)"))
+                    h_id = c2.lastrowid
+                    bncc_criadas += 1
+                else:
+                    h_id = row["id"]
+                conn.execute("INSERT INTO questao_habilidades (questao_id, habilidade_id) VALUES (?, ?)", (qid, h_id))
+
+            importadas += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    content = f"""
+        <div class="page-header">
+            <h1>✅ Importação concluída</h1>
+        </div>
+        <div class="card" style="background:var(--green-bg); border-left:3px solid var(--green);">
+            <h3 style="margin-top:0; color:var(--green);">🎉 {importadas} questão(ões) cadastrada(s) com sucesso!</h3>
+            <ul style="margin-top:8px; font-size:13px;">
+                <li>{importadas} questões inseridas no banco coletivo</li>
+                {"<li>" + str(disciplinas_criadas) + " disciplina(s) criada(s) automaticamente</li>" if disciplinas_criadas else ""}
+                {"<li>" + str(bncc_criadas) + " código(s) BNCC novo(s) cadastrado(s)</li>" if bncc_criadas else ""}
+            </ul>
+        </div>
+        <div class="page-actions" style="margin-top:18px;">
+            <a href="/questoes" class="btn btn-primary">Ver banco de questões →</a>
+            <a href="/admin/importar-questoes" class="btn">Importar mais</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Importação concluída", content, active=""))
 
 
 @app.get("/habilidades", response_class=HTMLResponse)
