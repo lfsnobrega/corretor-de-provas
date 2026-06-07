@@ -894,7 +894,10 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         )
 
     if compact:
-        preview = q["enunciado"][:160] + ("..." if len(q["enunciado"]) > 160 else "")
+        # IMPORTANTE: strip de tags HTML antes do slice. Cortar HTML em 160 chars pode
+        # deixar uma tag aberta (ex: <p style="..."> sem </p>), quebrando o layout.
+        preview_text = re.sub(r'<[^>]+>', '', q["enunciado"])
+        preview = html.escape(preview_text[:160]) + ("..." if len(preview_text) > 160 else "")
         habs_inline = ""
         if habilidades:
             habs_inline = " " + "".join(f'<span class="badge" style="font-size:10px;">{h["codigo"]}</span>' for h in habilidades)
