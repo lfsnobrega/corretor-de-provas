@@ -434,7 +434,7 @@ def get_current_professor(request: Request) -> Optional[dict]:
         return None
     return {
         "id": prof["id"], "email": prof["email"], "nome": prof["nome"],
-        "foto_url": prof["foto_url"], "is_admin": bool(prof["is_admin"]), "is_gestor": bool(prof.get("is_gestor", 0)),
+        "foto_url": prof["foto_url"], "is_admin": bool(prof["is_admin"]), "is_gestor": bool(prof["is_gestor"] if "is_gestor" in prof.keys() else 0),
     }
 
 
