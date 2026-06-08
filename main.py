@@ -6015,7 +6015,7 @@ def form_escanear(aplicacao_id: int):
 
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:18px; margin-top:24px;">
 
-            <form action="/aplicacoes/{aplicacao_id}/escanear" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+            <form id="form-single" action="/aplicacoes/{aplicacao_id}/escanear" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
                 <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
                 <p class="muted-line" style="font-size:13px;">Recomendado pra correção ao vivo, durante a aplicação.</p>
                 <label>Foto<input type="file" name="foto" accept="image/*" capture="environment" required></label>
@@ -6023,13 +6023,32 @@ def form_escanear(aplicacao_id: int):
                 <button type="submit" class="btn btn-primary" style="width:100%;">Processar 1 foto</button>
             </form>
 
-            <form action="/aplicacoes/{aplicacao_id}/escanear-lote" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+            <form id="form-lote" action="/aplicacoes/{aplicacao_id}/escanear-lote" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
                 <h3 style="margin-top:0;">📁 Lote (várias de uma vez)</h3>
                 <p class="muted-line" style="font-size:13px;">Recomendado quando você já tem todas as fotos prontas (galeria).</p>
-                <label>Fotos (selecione várias)<input type="file" name="fotos" accept="image/*" multiple required></label>
-                <p class="muted-line" style="font-size:11px;">Segura Ctrl/Cmd ou arrasta pra selecionar várias.</p>
+                <label>Fotos ou PDF<input type="file" name="fotos" accept="image/*,.pdf" multiple required></label>
+                <p class="muted-line" style="font-size:11px;">Selecione imagens (JPEG/HEIC) <strong>ou</strong> um PDF com várias páginas.</p>
                 <button type="submit" class="btn btn-primary" style="width:100%;">Processar lote</button>
             </form>
+
+            <script>
+            (function() {{
+                function travar(form) {{
+                    form.addEventListener('submit', function() {{
+                        var btn = form.querySelector('button[type="submit"]');
+                        if (btn) {{
+                            btn.disabled = true;
+                            btn.textContent = '⏳ Processando…';
+                            btn.style.opacity = '0.7';
+                        }}
+                    }});
+                }}
+                var fs = document.getElementById('form-single');
+                var fl = document.getElementById('form-lote');
+                if (fs) travar(fs);
+                if (fl) travar(fl);
+            }})();
+            </script>
 
         </div>
     """
@@ -6789,9 +6808,37 @@ async def processar_importacao_habilidades(arquivo: UploadFile = File(...)):
 #  FASE C3: OMR EM LOTE
 # ==========================================
 
+def _extrair_imagens_de_arquivo(file_bytes: bytes, filename: str) -> list:
+    """Recebe bytes de um arquivo (imagem ou PDF) e retorna lista de (nome, bytes_jpeg).
+    Para imagens: retorna lista com um único item.
+    Para PDF: usa pdf2image para extrair cada página como JPEG.
+    Retorna lista de tuplas (nome_exibicao, image_bytes).
+    """
+    fname_lower = (filename or "").lower()
+    if fname_lower.endswith(".pdf"):
+        try:
+            from pdf2image import convert_from_bytes
+            paginas = convert_from_bytes(file_bytes, dpi=200, fmt="jpeg")
+            resultado = []
+            for i, pil_img in enumerate(paginas, start=1):
+                import io
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=90)
+                nome_pag = f"{filename} — pág. {i}"
+                resultado.append((nome_pag, buf.getvalue()))
+            return resultado
+        except ImportError:
+            # pdf2image não instalado — retorna erro sinalizado
+            return [(filename, None)]
+        except Exception as e:
+            return [(filename, None)]
+    else:
+        return [(filename, file_bytes)]
+
+
 @app.post("/aplicacoes/{aplicacao_id}/escanear-lote", response_class=HTMLResponse)
 async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile] = File(...)):
-    """Recebe N fotos, processa cada uma, mostra tela de revisão com grid de cards.
+    """Recebe N fotos ou 1 PDF multipágina, processa cada uma, mostra tela de revisão com grid de cards.
     O salvamento é feito num único submit do form de confirmação."""
     if not fotos:
         return HTMLResponse(render_page("Erro", '<div class="empty"><p>Nenhum arquivo enviado.</p></div>', active="aplicacoes"))
@@ -6813,25 +6860,40 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
     n_questoes = len(questoes)
     questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
 
-    # Processar cada foto
+    # Expandir arquivos: imagens ficam como estão, PDFs viram N imagens (uma por página)
+    arquivos_expandidos = []  # lista de (nome_exibicao, image_bytes)
+    for foto in fotos:
+        raw = await foto.read()
+        if not raw:
+            arquivos_expandidos.append((foto.filename or "sem nome", None))
+            continue
+        expandidos = _extrair_imagens_de_arquivo(raw, foto.filename or "")
+        arquivos_expandidos.extend(expandidos)
+
+    # Processar cada imagem expandida
     cards_html_parts = []
     n_ok = 0
     n_warn = 0
     n_erro = 0
     alunos_ja_no_lote = set()  # detectar duplicatas dentro do mesmo lote
 
-    for idx, foto in enumerate(fotos):
-        image_bytes = await foto.read()
+    for idx, (nome_exib, image_bytes) in enumerate(arquivos_expandidos):
         if not image_bytes:
             n_erro += 1
-            cards_html_parts.append(_render_card_erro(idx, foto.filename, "Arquivo vazio."))
+            # Verificar se foi falha de PDF sem pdf2image instalado
+            if (nome_exib or "").lower().endswith(".pdf"):
+                cards_html_parts.append(_render_card_erro(idx, nome_exib,
+                    "PDF recebido mas 'pdf2image' não está instalado no servidor. "
+                    "Execute: pip install pdf2image --break-system-packages"))
+            else:
+                cards_html_parts.append(_render_card_erro(idx, nome_exib, "Arquivo vazio."))
             continue
 
-        result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
+        result = _processar_cartao_resposta(image_bytes, n_questoes, filename=nome_exib or "", questoes_info=questoes_info)
 
         if not result["success"]:
             n_erro += 1
-            cards_html_parts.append(_render_card_erro(idx, foto.filename, result.get("error", "Erro desconhecido")))
+            cards_html_parts.append(_render_card_erro(idx, nome_exib, result.get("error", "Erro desconhecido")))
             continue
 
         # Validar aluno + aplicação
@@ -6840,7 +6902,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
         if not aluno:
             n_erro += 1
             cards_html_parts.append(_render_card_erro(
-                idx, foto.filename,
+                idx, nome_exib,
                 f"QR aponta para aluno {result['aluno_id']} que NÃO pertence à turma {apl['turma_nome']}.",
                 preview_b64=result.get("preview_base64")
             ))
@@ -6849,7 +6911,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
         if result["aplicacao_id_qr"] != aplicacao_id:
             n_erro += 1
             cards_html_parts.append(_render_card_erro(
-                idx, foto.filename,
+                idx, nome_exib,
                 f"Cartão de OUTRA aplicação (id {result['aplicacao_id_qr']}).",
                 preview_b64=result.get("preview_base64")
             ))
@@ -6871,7 +6933,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
             n_ok += 1
 
         cards_html_parts.append(_render_card_revisao_lote(
-            idx, foto.filename, aluno, result, n_questoes,
+            idx, nome_exib, aluno, result, n_questoes,
             ja_entregue=ja_entregue, duplicata_lote=duplicata_lote,
             questoes_info=questoes_info
         ))
@@ -6884,7 +6946,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
 
     resumo = f"""
         <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
-            <div class="metric"><div class="metric-label">Fotos enviadas</div><div class="metric-value">{len(fotos)}</div></div>
+            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{len(arquivos_expandidos)}</div></div>
             <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
             <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
             <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
