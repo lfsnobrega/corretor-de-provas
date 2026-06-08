@@ -3449,6 +3449,80 @@ def _gravar_resposta_questao(conn, aplicacao_id, aluno_id, questao_id, tipo, val
     # discursiva: nada
 
 
+# ═══════════════════════════════════════════════════════════════
+# FAIXAS DE PROFICIÊNCIA SAEB (escala 0-10)
+# ═══════════════════════════════════════════════════════════════
+FAIXAS_SAEB = [
+    {"nome": "Insuficiente", "min": 0.0,  "max": 5.0,  "cor": "var(--red)",    "cor_bg": "var(--red-bg)",    "cor_border": "var(--red-border)",    "emoji": "🔴", "hex": "#dc2626"},
+    {"nome": "Básico",       "min": 5.0,  "max": 6.6,  "cor": "var(--orange)", "cor_bg": "var(--orange-bg)", "cor_border": "var(--orange-border)", "emoji": "🟡", "hex": "#ea580c"},
+    {"nome": "Adequado",     "min": 6.6,  "max": 8.0,  "cor": "var(--accent)", "cor_bg": "var(--accent-bg)", "cor_border": "var(--accent-border)", "emoji": "🔵", "hex": "#0284c7"},
+    {"nome": "Avançado",     "min": 8.0,  "max": 10.01,"cor": "var(--green)",  "cor_bg": "var(--green-bg)",  "cor_border": "var(--green-border)",  "emoji": "🟢", "hex": "#16a34a"},
+]
+
+def _faixa_saeb(nota_10):
+    """Retorna o dict da faixa SAEB pra uma nota de 0 a 10."""
+    for f in FAIXAS_SAEB:
+        if f["min"] <= nota_10 < f["max"]:
+            return f
+    return FAIXAS_SAEB[-1] if nota_10 >= 8.0 else FAIXAS_SAEB[0]
+
+
+def _calcular_nota_objetiva(conn, aplicacao_id, aluno_id):
+    """Variante de _calcular_nota que IGNORA discursivas no total.
+    Retorna (acertos, total_objetivas, nota_10). Usado pra análises SAEB."""
+    import json as _json
+    apl = conn.execute("SELECT prova_id FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
+    if not apl:
+        return (0, 0, 0.0)
+    questoes = conn.execute("""
+        SELECT q.id, q.tipo FROM prova_questoes pq
+        JOIN questoes q ON q.id = pq.questao_id
+        WHERE pq.prova_id = ? ORDER BY pq.ordem
+    """, (apl["prova_id"],)).fetchall()
+    total_obj = 0
+    acertos = 0
+    for q in questoes:
+        tipo = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+        if tipo == "discursiva":
+            continue  # ignora discursivas no cálculo de proficiência
+        total_obj += 1
+        resp = conn.execute(
+            "SELECT alternativa_letra, dados_extra FROM respostas WHERE aplicacao_id = ? AND aluno_id = ? AND questao_id = ?",
+            (aplicacao_id, aluno_id, q["id"])
+        ).fetchone()
+        if not resp:
+            continue
+        if tipo == "multipla_escolha":
+            ok = conn.execute(
+                "SELECT 1 FROM alternativas WHERE questao_id = ? AND letra = ? AND correta = 1",
+                (q["id"], resp["alternativa_letra"])
+            ).fetchone()
+            if ok:
+                acertos += 1
+        elif tipo == "vf":
+            try:
+                marcadas = _json.loads(resp["dados_extra"] or "{}")
+            except Exception:
+                marcadas = {}
+            gabaritos = {str(a["ordem"]): a["gabarito"] for a in conn.execute(
+                "SELECT ordem, gabarito FROM vf_afirmacoes WHERE questao_id = ?", (q["id"],)
+            ).fetchall()}
+            if gabaritos and all(marcadas.get(k) == v for k, v in gabaritos.items()):
+                acertos += 1
+        elif tipo == "associacao":
+            try:
+                marcadas = _json.loads(resp["dados_extra"] or "{}")
+            except Exception:
+                marcadas = {}
+            gabaritos = {str(a["ordem"]): a["gabarito_letra"] for a in conn.execute(
+                "SELECT ordem, gabarito_letra FROM assoc_itens_a WHERE questao_id = ?", (q["id"],)
+            ).fetchall()}
+            if gabaritos and all(marcadas.get(k) == v for k, v in gabaritos.items()):
+                acertos += 1
+    nota_10 = (acertos / total_obj * 10.0) if total_obj > 0 else 0.0
+    return (acertos, total_obj, nota_10)
+
+
 def _calcular_nota(conn, aplicacao_id, aluno_id):
     """Calcula (acertos, total) considerando todos os tipos.
     Regra: múltipla escolha = 0/1 (compara letra). V/F e Associação = 0/1 só se TODAS as
@@ -4454,12 +4528,26 @@ def analise_aplicacao(aplicacao_id: int):
     notas_alunos = []
     for aluno_id in alunos_entregues:
         score, total = _calcular_nota(conn, aplicacao_id, aluno_id)
-        notas_alunos.append({"aluno_id": aluno_id, "score": score, "total": total})
+        # Variante objetiva (sem discursivas) pra calcular nota 10 + faixa SAEB
+        acertos_obj, total_obj, nota_10 = _calcular_nota_objetiva(conn, aplicacao_id, aluno_id)
+        faixa = _faixa_saeb(nota_10)
+        notas_alunos.append({
+            "aluno_id": aluno_id, "score": score, "total": total,
+            "acertos_obj": acertos_obj, "total_obj": total_obj,
+            "nota_10": nota_10, "faixa": faixa,
+        })
 
     media_acertos = sum(n["score"] for n in notas_alunos) / total_entregas
     media_pct = (media_acertos / total_questoes) * 100 if total_questoes > 0 else 0
     maior_nota = max(n["score"] for n in notas_alunos)
     menor_nota = min(n["score"] for n in notas_alunos)
+    # Média na escala 0-10 (só objetivas)
+    media_10 = sum(n["nota_10"] for n in notas_alunos) / total_entregas if total_entregas else 0
+    faixa_media = _faixa_saeb(media_10)
+    # Distribuição nas 4 faixas
+    dist_faixas = {f["nome"]: 0 for f in FAIXAS_SAEB}
+    for n in notas_alunos:
+        dist_faixas[n["faixa"]["nome"]] += 1
 
     questoes_stats = []
     for idx, q in enumerate(questoes, start=1):
@@ -4524,10 +4612,222 @@ def analise_aplicacao(aplicacao_id: int):
                 "score": n["score"],
                 "total": n["total"],
                 "pct": pct,
+                "nota_10": n["nota_10"],
+                "faixa": n["faixa"],
             })
-    ranking.sort(key=lambda x: x["score"], reverse=True)
+    ranking.sort(key=lambda x: x["nota_10"], reverse=True)
+
+    # Alertas automáticos
+    alunos_alerta = [r for r in ranking if r["faixa"]["nome"] == "Insuficiente"]
+    alunos_destaque = [r for r in ranking if r["faixa"]["nome"] == "Avançado"]
 
     conn.close()
+
+    # ═══ BLOCO SAEB: KPI principal (média da turma + faixa) ═══
+    saeb_kpi_html = f"""
+        <div class="card" style="background:{faixa_media['cor_bg']}; border-left:4px solid {faixa_media['cor']}; padding:18px 20px; margin-bottom:18px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
+                <div>
+                    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; font-weight:700; color:{faixa_media['cor']};">Proficiência média da turma</div>
+                    <div style="font-size:36px; font-weight:800; color:{faixa_media['cor']}; line-height:1.1; margin-top:4px;">{media_10:.1f} <small style="font-size:18px; opacity:0.7;">/10</small></div>
+                    <div style="font-size:14px; color:var(--text); margin-top:6px; font-weight:600;">{faixa_media['emoji']} {faixa_media['nome']}</div>
+                </div>
+                <div style="font-size:12px; color:var(--text-muted); max-width:300px;">
+                    Calculado sobre {total_entregas} aluno(s) entregue(s) considerando apenas questões objetivas (MC, V/F, Associação). Discursivas são corrigidas manualmente.
+                </div>
+            </div>
+        </div>
+    """
+
+    # ═══ DISTRIBUIÇÃO NAS 4 FAIXAS (4 cards + gráfico) ═══
+    cards_faixas = ""
+    for f in FAIXAS_SAEB:
+        qtd = dist_faixas[f["nome"]]
+        pct_faixa = (qtd / total_entregas * 100) if total_entregas else 0
+        cards_faixas += f"""
+            <div class="card" style="background:{f['cor_bg']}; border-color:{f['cor_border']}; padding:14px 16px; text-align:center;">
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; font-weight:700; color:{f['cor']};">{f['emoji']} {f['nome']}</div>
+                <div style="font-size:28px; font-weight:800; color:{f['cor']}; line-height:1.1; margin-top:6px;">{qtd}</div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">{pct_faixa:.0f}% da turma</div>
+            </div>
+        """
+    distribuicao_html = f"""
+        <h2 style="margin-top:24px;">📊 Distribuição por faixa de proficiência</h2>
+        <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:18px;">
+            {cards_faixas}
+        </div>
+        <div class="card" style="padding:16px;">
+            <canvas id="chartDistFaixas" style="max-height:280px;"></canvas>
+        </div>
+    """
+
+    # ═══ GRÁFICO de % de acerto por questão ═══
+    questoes_labels_js = "[" + ", ".join(f'"Q{q["numero"]}"' for q in questoes_stats) + "]"
+    questoes_valores_js = "[" + ", ".join(f'{q["pct_acerto"]:.1f}' for q in questoes_stats) + "]"
+    # Cores: vermelho < 50%, laranja 50-65%, azul 66-79%, verde >= 80%
+    questoes_cores_js = "[" + ", ".join(
+        f'"{_faixa_saeb(q["pct_acerto"]/10)["hex"]}"' for q in questoes_stats
+    ) + "]"
+    chart_questoes_html = f"""
+        <h2 style="margin-top:32px;">📈 % de acerto por questão</h2>
+        <div class="card" style="padding:16px;">
+            <canvas id="chartQuestoes" style="max-height:320px;"></canvas>
+        </div>
+    """
+
+    # ═══ ALERTAS automáticos ═══
+    alertas_html = ""
+    if alunos_alerta or alunos_destaque:
+        alerta_list = ""
+        if alunos_alerta:
+            items = "".join(
+                f'<li style="padding:6px 0; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border);">'
+                f'<span><strong>{a["nome"]}</strong>{" · Nº " + str(a["numero"]) if a["numero"] else ""}</span>'
+                f'<span style="font-weight:700; color:var(--red);">{a["nota_10"]:.1f}/10</span>'
+                f'</li>'
+                for a in alunos_alerta
+            )
+            alerta_list = f"""
+                <div class="card" style="background:var(--red-bg); border-left:4px solid var(--red); padding:14px 16px;">
+                    <div style="font-size:13px; font-weight:700; color:var(--red); margin-bottom:8px;">🔴 Atenção necessária — {len(alunos_alerta)} aluno(s) na faixa Insuficiente</div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">Recomende reforço, retomada de conteúdo ou acompanhamento individual.</div>
+                    <ul style="list-style:none; padding:0; margin:0;">{items}</ul>
+                </div>
+            """
+        destaque_list = ""
+        if alunos_destaque:
+            items = "".join(
+                f'<li style="padding:6px 0; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border);">'
+                f'<span><strong>{a["nome"]}</strong>{" · Nº " + str(a["numero"]) if a["numero"] else ""}</span>'
+                f'<span style="font-weight:700; color:var(--green);">{a["nota_10"]:.1f}/10</span>'
+                f'</li>'
+                for a in alunos_destaque
+            )
+            destaque_list = f"""
+                <div class="card" style="background:var(--green-bg); border-left:4px solid var(--green); padding:14px 16px;">
+                    <div style="font-size:13px; font-weight:700; color:var(--green); margin-bottom:8px;">🟢 Destaque positivo — {len(alunos_destaque)} aluno(s) na faixa Avançado</div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">Vale parabenizar e considerar atividades de aprofundamento.</div>
+                    <ul style="list-style:none; padding:0; margin:0;">{items}</ul>
+                </div>
+            """
+        alertas_html = f"""
+            <h2 style="margin-top:32px;">🎯 Alertas automáticos</h2>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+                {alerta_list or '<div></div>'}
+                {destaque_list or '<div></div>'}
+            </div>
+        """
+
+    # ═══ Script Chart.js (renderiza os 2 gráficos) ═══
+    dist_data_js = "[" + ", ".join(str(dist_faixas[f["nome"]]) for f in FAIXAS_SAEB) + "]"
+    dist_cores_js = "[" + ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB) + "]"
+    dist_labels_js = "[" + ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB) + "]"
+
+    charts_script = f"""
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" onerror="window._chartFail=true"></script>
+    <script>
+    (function() {{
+      // Fallback visual se Chart.js não carregou (ex: rede sem acesso ao CDN)
+      if (typeof Chart === 'undefined') {{
+        document.querySelectorAll('canvas[id^=chart]').forEach(function(c) {{
+          var msg = document.createElement('div');
+          msg.style.cssText = 'padding:20px; text-align:center; color:var(--text-muted); font-size:12px; font-style:italic;';
+          msg.innerHTML = '📡 Gráfico indisponível (Chart.js não carregou — verifique conexão).';
+          c.parentNode.replaceChild(msg, c);
+        }});
+        return;
+      }}
+
+      // Cores que se adaptam ao tema (texto e grid)
+      function temaCores() {{
+        var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+        return {{
+          texto: dark ? '#e2eaf5' : '#1e293b',
+          grid: dark ? '#1e3050' : '#e2e8f0',
+          tooltipBg: dark ? '#172341' : '#ffffff',
+          tooltipBorder: dark ? '#1e3050' : '#e2e8f0',
+        }};
+      }}
+
+      var cores = temaCores();
+
+      // ━━ Gráfico 1: distribuição nas 4 faixas ━━
+      var elDist = document.getElementById('chartDistFaixas');
+      if (elDist) {{
+        new Chart(elDist, {{
+          type: 'bar',
+          data: {{
+            labels: {dist_labels_js},
+            datasets: [{{
+              label: 'Alunos',
+              data: {dist_data_js},
+              backgroundColor: {dist_cores_js},
+              borderRadius: 8,
+              borderSkipped: false,
+            }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+              legend: {{ display: false }},
+              tooltip: {{
+                backgroundColor: cores.tooltipBg,
+                titleColor: cores.texto,
+                bodyColor: cores.texto,
+                borderColor: cores.tooltipBorder,
+                borderWidth: 1,
+              }}
+            }},
+            scales: {{
+              x: {{ ticks: {{ color: cores.texto, font: {{ size: 12, weight: 600 }} }}, grid: {{ display: false }} }},
+              y: {{ beginAtZero: true, ticks: {{ color: cores.texto, precision: 0 }}, grid: {{ color: cores.grid }} }}
+            }}
+          }}
+        }});
+      }}
+
+      // ━━ Gráfico 2: % de acerto por questão ━━
+      var elQ = document.getElementById('chartQuestoes');
+      if (elQ) {{
+        new Chart(elQ, {{
+          type: 'bar',
+          data: {{
+            labels: {questoes_labels_js},
+            datasets: [{{
+              label: '% de acerto',
+              data: {questoes_valores_js},
+              backgroundColor: {questoes_cores_js},
+              borderRadius: 6,
+              borderSkipped: false,
+            }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+              legend: {{ display: false }},
+              tooltip: {{
+                backgroundColor: cores.tooltipBg,
+                titleColor: cores.texto,
+                bodyColor: cores.texto,
+                borderColor: cores.tooltipBorder,
+                borderWidth: 1,
+                callbacks: {{
+                  label: function(ctx) {{ return ctx.parsed.y.toFixed(1) + '% de acerto'; }}
+                }}
+              }}
+            }},
+            scales: {{
+              x: {{ ticks: {{ color: cores.texto }}, grid: {{ display: false }} }},
+              y: {{ beginAtZero: true, max: 100, ticks: {{ color: cores.texto, callback: v => v + '%' }}, grid: {{ color: cores.grid }} }}
+            }}
+          }}
+        }});
+      }}
+    }})();
+    </script>
+    """
 
     metrics_html = f"""
         <div class="metric-grid">
@@ -4607,41 +4907,54 @@ def analise_aplicacao(aplicacao_id: int):
     ranking_html = ""
     for pos, r in enumerate(ranking, start=1):
         num = r["numero"] if r["numero"] else "—"
-        cor_pct = _cor_por_pct(r["pct"])
+        f = r["faixa"]
+        # Recupera total objetivo do aluno (vem de notas_alunos)
+        n_dict = next((x for x in notas_alunos if x["aluno_id"] == r["aluno_id"]), {})
+        total_obj_aluno = n_dict.get("total_obj", 0)
+        acertos_obj_aluno = n_dict.get("acertos_obj", 0)
         ranking_html += f"""
         <div class="student-row">
             <div class="numero">{pos}º</div>
             <div>
                 <a href="/aplicacoes/{aplicacao_id}/aluno/{r["aluno_id"]}" style="color:inherit; text-decoration:none; font-weight:600;">{r["nome"]}</a>
-                <div style="font-size:12px; color:var(--text-muted);">Nº {num}</div>
+                <div style="font-size:12px; color:var(--text-muted);">Nº {num} · <span style="color:{f['cor']}; font-weight:600;">{f['emoji']} {f['nome']}</span></div>
             </div>
             <div style="text-align:right;">
-                <div style="font-size:15px; font-weight:600; color:{cor_pct};">{r["score"]}/{r["total"]}</div>
-                <div style="font-size:12px; color:var(--text-muted);">{r["pct"]:.0f}%</div>
+                <div style="font-size:15px; font-weight:700; color:{f['cor']};">{r["nota_10"]:.1f}/10</div>
+                <div style="font-size:11px; color:var(--text-muted);">{acertos_obj_aluno}/{total_obj_aluno} acertos</div>
             </div>
         </div>
         """
 
     content = f"""
         <div class="page-header">
-            <h1>Análise pedagógica</h1>
+            <h1>📈 Análise pedagógica</h1>
             <p class="subtitle">{apl["prova_titulo"]} · {apl["turma_nome"]} ({apl["ano_letivo"]})</p>
             <div class="page-actions">
                 <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar para a aplicação</a>
                 <a href="/aplicacoes/{aplicacao_id}/exportar" class="btn">📊 Exportar Excel</a>
             </div>
         </div>
+
+        {saeb_kpi_html}
         {metrics_html}
+
+        {distribuicao_html}
+        {alertas_html}
+
+        {chart_questoes_html}
         {destaques_html}
 
-        <h2>Ranking de alunos</h2>
+        <h2 style="margin-top:32px;">🏆 Ranking de alunos</h2>
         {ranking_html}
 
-        <h2 style="margin-top:32px;">Desempenho por questão</h2>
+        <h2 style="margin-top:32px;">Desempenho detalhado por questão</h2>
         {questoes_detalhe_html}
 
         <div style="margin-top:32px;"></div>
         {habilidades_detalhe_html}
+
+        {charts_script}
     """
     return render_page("Análise pedagógica", content, active="aplicacoes", head_extra=MATHJAX)
 
