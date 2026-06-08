@@ -770,6 +770,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/provas", "provas", "📝", "Cadastrar atividade")}
                 {link_turmas}
                 {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
+                {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
             </nav>
             {user_block}
         </aside>
@@ -2864,6 +2865,156 @@ def adicionar_aluno(request: Request,
 #  ROTAS DE APLICAÇÕES (ATUALIZADAS TAREFA A2)
 # ==========================================
 
+@app.get("/minhas-aplicacoes", response_class=HTMLResponse)
+def minhas_aplicacoes(
+    request: Request,
+    aba: Optional[str] = "abertas",
+    turma: Optional[str] = None,
+    prof_id: Optional[int] = None,
+):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    is_admin = bool(prof.get("is_admin"))
+    conn = get_db()
+
+    turma_id = int(turma) if turma and turma.isdigit() else None
+    aberta_val = 1 if aba == "abertas" else 0
+
+    where = ["a.aberta = ?"]
+    params = [aberta_val]
+
+    if not is_admin:
+        where.append("(a.criada_por_professor_id = ? OR a.criada_por_professor_id IS NULL)")
+        params.append(prof["id"])
+    elif prof_id:
+        where.append("a.criada_por_professor_id = ?")
+        params.append(prof_id)
+
+    if turma_id:
+        where.append("a.turma_id = ?")
+        params.append(turma_id)
+
+    where_clause = "WHERE " + " AND ".join(where)
+
+    aplicacoes = conn.execute(f"""
+        SELECT a.id, a.titulo, a.modo, a.aberta, a.criada_em,
+               p.titulo AS prova_titulo,
+               t.nome AS turma_nome, t.ano_letivo,
+               pr.nome AS criador_nome,
+               (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS qtd_entregas,
+               (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS qtd_alunos
+        FROM aplicacoes a
+        JOIN provas p ON p.id = a.prova_id
+        JOIN turmas t ON t.id = a.turma_id
+        LEFT JOIN professores pr ON pr.id = a.criada_por_professor_id
+        {where_clause}
+        ORDER BY a.id DESC
+    """, params).fetchall()
+
+    turmas_lista = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    professores_lista = conn.execute("SELECT id, nome FROM professores ORDER BY nome").fetchall() if is_admin else []
+
+    total_abertas = conn.execute(
+        "SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 1" +
+        ("" if is_admin else f" AND (criada_por_professor_id = {prof['id']} OR criada_por_professor_id IS NULL)")
+    ).fetchone()["c"]
+    total_encerradas = conn.execute(
+        "SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 0" +
+        ("" if is_admin else f" AND (criada_por_professor_id = {prof['id']} OR criada_por_professor_id IS NULL)")
+    ).fetchone()["c"]
+    conn.close()
+
+    # Tabs
+    tab_abertas_cls = "tab-active" if aba == "abertas" else ""
+    tab_encerradas_cls = "tab-active" if aba == "encerradas" else ""
+    tabs_html = f"""
+        <div style="display:flex; gap:0; border-bottom:2px solid var(--border); margin-bottom:18px;">
+            <a href="/minhas-aplicacoes?aba=abertas" style="padding:10px 20px; font-weight:600; font-size:14px; text-decoration:none;
+               border-bottom: 3px solid {'var(--accent)' if aba=='abertas' else 'transparent'};
+               color: {'var(--accent)' if aba=='abertas' else 'var(--text-muted)'}; margin-bottom:-2px;">
+               🟢 Abertas <span style="background:var(--green-bg); color:var(--green); border-radius:10px; padding:1px 7px; font-size:12px; margin-left:4px;">{total_abertas}</span>
+            </a>
+            <a href="/minhas-aplicacoes?aba=encerradas" style="padding:10px 20px; font-weight:600; font-size:14px; text-decoration:none;
+               border-bottom: 3px solid {'var(--accent)' if aba=='encerradas' else 'transparent'};
+               color: {'var(--accent)' if aba=='encerradas' else 'var(--text-muted)'}; margin-bottom:-2px;">
+               🔒 Encerradas <span style="background:var(--bg-subtle); color:var(--text-muted); border-radius:10px; padding:1px 7px; font-size:12px; margin-left:4px;">{total_encerradas}</span>
+            </a>
+        </div>
+    """
+
+    # Filtros
+    turmas_opts = '<option value="">Todas as turmas</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id == t["id"] else ""}>{t["nome"]} ({t["ano_letivo"]})</option>'
+        for t in turmas_lista
+    )
+    profs_opts = ""
+    if is_admin:
+        profs_opts = '<option value="">Todos os professores</option>' + "".join(
+            f'<option value="{p["id"]}"{" selected" if prof_id == p["id"] else ""}>{p["nome"]}</option>'
+            for p in professores_lista
+        )
+        filtro_prof = f'<label style="margin:0;">Professor<select name="prof_id">{profs_opts}</select></label>'
+    else:
+        filtro_prof = ""
+
+    filtros_html = f"""
+        <form method="get" action="/minhas-aplicacoes" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
+            <input type="hidden" name="aba" value="{aba}">
+            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+                <label style="margin:0;">Turma<select name="turma">{turmas_opts}</select></label>
+                {filtro_prof}
+                <button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>
+                <a href="/minhas-aplicacoes?aba={aba}" class="btn" style="margin:0;">Limpar</a>
+            </div>
+        </form>
+    """
+
+    # Cards
+    if aplicacoes:
+        cards = ""
+        for a in aplicacoes:
+            titulo_apl = a["titulo"] or a["prova_titulo"]
+            modo_icon = "📱" if a["modo"] == "online" else "📄"
+            status_badge = (
+                '<span style="background:var(--green-bg); color:var(--green); border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">Aberta</span>'
+                if a["aberta"] else
+                '<span style="background:var(--bg-subtle); color:var(--text-muted); border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">Encerrada</span>'
+            )
+            progresso = f'{a["qtd_entregas"]}/{a["qtd_alunos"]}' if a["qtd_alunos"] else "—"
+            criador = f'<span style="font-size:11px; color:var(--text-muted);">por {a["criador_nome"]}</span>' if is_admin and a["criador_nome"] else ""
+            cards += f"""
+                <div class="card-link" style="display:block; padding:14px 18px; margin-bottom:10px; border-radius:10px; border:1px solid var(--border); background:var(--card);">
+                    <div style="display:flex; align-items:center; gap:10px; justify-content:space-between; flex-wrap:wrap;">
+                        <div>
+                            <div style="font-weight:600; font-size:14px;">{modo_icon} {titulo_apl}</div>
+                            <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">{a["turma_nome"]} ({a["ano_letivo"]}) {criador}</div>
+                        </div>
+                        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                            {status_badge}
+                            <span style="font-size:12px; color:var(--text-muted);">Entregas: {progresso}</span>
+                            <a href="/aplicacoes/{a['id']}" class="btn" style="padding:5px 12px; font-size:12px;">Ver detalhes →</a>
+                            <a href="/aplicacoes/{a['id']}/analise" class="btn" style="padding:5px 12px; font-size:12px;">📈 Análise</a>
+                        </div>
+                    </div>
+                </div>
+            """
+    else:
+        label_aba = "abertas" if aba == "abertas" else "encerradas"
+        cards = f'<div class="empty">Nenhuma aplicação {label_aba} encontrada.</div>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Minhas aplicações</h1>
+            <p class="subtitle">{"Visão geral da escola" if is_admin else "Suas atividades aplicadas"}</p>
+        </div>
+        {tabs_html}
+        {filtros_html}
+        {cards}
+    """
+    return render_page("Minhas aplicações", content, active="minhas-aplicacoes")
+
+
 @app.get("/aplicacoes", response_class=HTMLResponse)
 def listar_aplicacoes(
     request: Request,
@@ -3156,6 +3307,10 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
         acoes_btn += f'<a href="/provas/{apl["prova_id"]}/imprimir" class="btn" target="_blank">🖨️ Imprimir prova</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/analise" class="btn">📈 Análise pedagógica</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/exportar" class="btn">📊 Exportar Planilha Excel</a>'
+    if apl["aberta"]:
+        acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/encerrar" style="margin:0;" onsubmit="return confirm(\'Encerrar esta aplicação? Novos envios serão bloqueados.\')"><button type="submit" class="btn" style="color:var(--red); border-color:var(--red);">🔒 Encerrar aplicação</button></form>'
+    else:
+        acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/reabrir" style="margin:0;"><button type="submit" class="btn" style="color:var(--green); border-color:var(--green);">🔓 Reabrir aplicação</button></form>'
     acoes_btn += '</div>'
 
     metrics_html = ""
@@ -3208,7 +3363,25 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
     return render_page(titulo, content, active="aplicacoes")
 
 
-@app.get("/responder/{codigo}/{aplicacao_id}", response_class=HTMLResponse)
+@app.post("/aplicacoes/{aplicacao_id}/encerrar")
+def encerrar_aplicacao(aplicacao_id: int):
+    conn = get_db()
+    conn.execute("UPDATE aplicacoes SET aberta = 0 WHERE id = ?", (aplicacao_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
+
+
+@app.post("/aplicacoes/{aplicacao_id}/reabrir")
+def reabrir_aplicacao(aplicacao_id: int):
+    conn = get_db()
+    conn.execute("UPDATE aplicacoes SET aberta = 1 WHERE id = ?", (aplicacao_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
+
+
+
 def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
     conn = get_db()
     aluno = conn.execute("SELECT * FROM alunos WHERE codigo_unico = ?", (codigo,)).fetchone()
@@ -6809,28 +6982,25 @@ async def processar_importacao_habilidades(arquivo: UploadFile = File(...)):
 # ==========================================
 
 def _extrair_imagens_de_arquivo(file_bytes: bytes, filename: str) -> list:
-    """Recebe bytes de um arquivo (imagem ou PDF) e retorna lista de (nome, bytes_jpeg).
+    """Recebe bytes de um arquivo (imagem ou PDF) e retorna lista de (nome_exibicao, bytes_jpeg).
     Para imagens: retorna lista com um único item.
     Para PDF: usa pdf2image para extrair cada página como JPEG.
-    Retorna lista de tuplas (nome_exibicao, image_bytes).
     """
     fname_lower = (filename or "").lower()
     if fname_lower.endswith(".pdf"):
         try:
             from pdf2image import convert_from_bytes
+            import io as _io
             paginas = convert_from_bytes(file_bytes, dpi=200, fmt="jpeg")
             resultado = []
             for i, pil_img in enumerate(paginas, start=1):
-                import io
-                buf = io.BytesIO()
+                buf = _io.BytesIO()
                 pil_img.save(buf, format="JPEG", quality=90)
-                nome_pag = f"{filename} — pág. {i}"
-                resultado.append((nome_pag, buf.getvalue()))
+                resultado.append((f"{filename} — pág. {i}", buf.getvalue()))
             return resultado
         except ImportError:
-            # pdf2image não instalado — retorna erro sinalizado
             return [(filename, None)]
-        except Exception as e:
+        except Exception:
             return [(filename, None)]
     else:
         return [(filename, file_bytes)]
@@ -6838,7 +7008,7 @@ def _extrair_imagens_de_arquivo(file_bytes: bytes, filename: str) -> list:
 
 @app.post("/aplicacoes/{aplicacao_id}/escanear-lote", response_class=HTMLResponse)
 async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile] = File(...)):
-    """Recebe N fotos ou 1 PDF multipágina, processa cada uma, mostra tela de revisão com grid de cards.
+    """Recebe N fotos ou PDF multipágina, processa cada uma, mostra tela de revisão com grid de cards.
     O salvamento é feito num único submit do form de confirmação."""
     if not fotos:
         return HTMLResponse(render_page("Erro", '<div class="empty"><p>Nenhum arquivo enviado.</p></div>', active="aplicacoes"))
@@ -6861,26 +7031,24 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
     questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
 
     # Expandir arquivos: imagens ficam como estão, PDFs viram N imagens (uma por página)
-    arquivos_expandidos = []  # lista de (nome_exibicao, image_bytes)
+    arquivos_expandidos = []
     for foto in fotos:
         raw = await foto.read()
         if not raw:
             arquivos_expandidos.append((foto.filename or "sem nome", None))
             continue
-        expandidos = _extrair_imagens_de_arquivo(raw, foto.filename or "")
-        arquivos_expandidos.extend(expandidos)
+        arquivos_expandidos.extend(_extrair_imagens_de_arquivo(raw, foto.filename or ""))
 
     # Processar cada imagem expandida
     cards_html_parts = []
     n_ok = 0
     n_warn = 0
     n_erro = 0
-    alunos_ja_no_lote = set()  # detectar duplicatas dentro do mesmo lote
+    alunos_ja_no_lote = set()
 
     for idx, (nome_exib, image_bytes) in enumerate(arquivos_expandidos):
         if not image_bytes:
             n_erro += 1
-            # Verificar se foi falha de PDF sem pdf2image instalado
             if (nome_exib or "").lower().endswith(".pdf"):
                 cards_html_parts.append(_render_card_erro(idx, nome_exib,
                     "PDF recebido mas 'pdf2image' não está instalado no servidor. "
