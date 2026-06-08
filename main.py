@@ -651,7 +651,12 @@ THEME_BOOT_SCRIPT = """<script>
   try {
     var saved = localStorage.getItem('walmir-theme') || 'light';
     document.documentElement.setAttribute('data-theme', saved);
-  } catch(e) { document.documentElement.setAttribute('data-theme', 'light'); }
+    var sb = localStorage.getItem('walmir-sidebar') || 'expanded';
+    document.documentElement.setAttribute('data-sidebar', sb);
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme', 'light');
+    document.documentElement.setAttribute('data-sidebar', 'expanded');
+  }
 })();
 function _walmirToggleTheme() {
   var html = document.documentElement;
@@ -659,10 +664,16 @@ function _walmirToggleTheme() {
   var next = cur === 'light' ? 'dark' : 'light';
   html.setAttribute('data-theme', next);
   try { localStorage.setItem('walmir-theme', next); } catch(e) {}
-  // Atualiza ícone e texto do botão (se presente)
   document.querySelectorAll('[data-theme-toggle]').forEach(function(btn){
     btn.innerHTML = next === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
   });
+}
+function _walmirToggleSidebar() {
+  var html = document.documentElement;
+  var cur = html.getAttribute('data-sidebar') || 'expanded';
+  var next = cur === 'expanded' ? 'collapsed' : 'expanded';
+  html.setAttribute('data-sidebar', next);
+  try { localStorage.setItem('walmir-sidebar', next); } catch(e) {}
 }
 </script>"""
 
@@ -701,19 +712,30 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     if professor:
         admin_badge = ' <span style="background:var(--purple); color:white; font-size:9px; padding:1px 5px; border-radius:3px; vertical-align:middle;">ADMIN</span>' if professor.get("is_admin") else ""
         user_block = f"""
-            <div style="margin-top:auto; padding:12px; border-top:1px solid var(--border); font-size:12px;">
-                <div style="font-weight:600;">{professor.get("nome", "")}{admin_badge}</div>
-                <div style="color:var(--text-muted); font-size:11px; margin-top:2px; word-break:break-all;">{professor.get("email", "")}</div>
-                <button data-theme-toggle class="theme-toggle" onclick="_walmirToggleTheme()">🌙 Tema escuro</button>
+            <div class="sidebar-user-footer" style="margin-top:auto; padding:12px; border-top:1px solid var(--border); font-size:12px;">
+                <div class="sidebar-user-info">
+                    <div style="font-weight:600;">{professor.get("nome", "")}{admin_badge}</div>
+                    <div style="color:var(--text-muted); font-size:11px; margin-top:2px; word-break:break-all;">{professor.get("email", "")}</div>
+                </div>
+                <button data-theme-toggle data-icon="🌙" class="theme-toggle" onclick="_walmirToggleTheme()">🌙 Tema escuro</button>
                 <a href="/logout" style="display:inline-block; margin-top:8px; font-size:11px; color:var(--text-muted);">Sair</a>
             </div>
         """
 
     # Sidebar dinâmico: itens de admin escondidos para professores comuns
     is_admin_view = bool(professor and professor.get("is_admin"))
-    link_disciplinas = f'<a href="/disciplinas"{nav_class("disciplinas")}>Disciplinas</a>' if is_admin_view else ''
-    link_habilidades = f'<a href="/habilidades"{nav_class("habilidades")}>Habilidades BNCC</a>' if is_admin_view else ''
-    link_turmas = f'<a href="/turmas"{nav_class("turmas")}>Turmas</a>' if is_admin_view else ''
+    # Helper pra montar item da nav: ícone emoji + label (escondida quando collapsed) + data-name (tooltip)
+    def nav_item(href, key, icon, label):
+        return (
+            f'<a href="{href}" data-name="{label}"{nav_class(key)}>'
+            f'<span class="nav-icon">{icon}</span>'
+            f'<span class="nav-label">{label}</span>'
+            f'</a>'
+        )
+
+    link_disciplinas = nav_item("/disciplinas", "disciplinas", "📚", "Disciplinas") if is_admin_view else ''
+    link_habilidades = nav_item("/habilidades", "habilidades", "🎯", "Habilidades BNCC") if is_admin_view else ''
+    link_turmas = nav_item("/turmas", "turmas", "👥", "Turmas") if is_admin_view else ''
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -730,20 +752,24 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
 <body>
     <div class="app">
         <aside class="sidebar" style="display:flex; flex-direction:column;">
+            <button class="sidebar-toggle" onclick="_walmirToggleSidebar()" type="button" title="Recolher/expandir menu" aria-label="Recolher menu">
+                <span class="sidebar-toggle-icon">≡</span>
+            </button>
             <div class="sidebar-brand" style="text-align:center; padding:8px 6px 4px;">
-                <img src="/static/imagens/logo_walmir.png" alt="E.M. Walmir de Freitas Monteiro" style="max-width:100%; height:auto; max-height:80px; display:block; margin:0 auto;">
-                <div style="font-size:11px; color:var(--text-muted); margin-top:6px; font-weight:600; letter-spacing:0.3px;">Sistema Pedagógico</div>
+                <img src="/static/imagens/logo_walmir.png" class="sidebar-logo-full" alt="Walmir" style="max-width:100%; height:auto; max-height:80px; display:block; margin:0 auto;">
+                <div class="sidebar-logo-mini" aria-hidden="true">W</div>
+                <div class="sidebar-brand-text" style="font-size:11px; color:var(--text-muted); margin-top:6px; font-weight:600; letter-spacing:0.3px;">Sistema Pedagógico</div>
             </div>
             <nav>
-                <a href="/"{nav_class('home')}>Início</a>
+                {nav_item("/", "home", "🏠", "Início")}
                 <div class="sidebar-section">Banco</div>
                 {link_disciplinas}
                 {link_habilidades}
-                <a href="/questoes"{nav_class('questoes')}>Cadastrar questão</a>
+                {nav_item("/questoes", "questoes", "✏️", "Cadastrar questão")}
                 <div class="sidebar-section">Avaliações</div>
-                <a href="/provas"{nav_class('provas')}>Cadastrar atividade</a>
+                {nav_item("/provas", "provas", "📝", "Cadastrar atividade")}
                 {link_turmas}
-                <a href="/aplicacoes"{nav_class('aplicacoes')}>Aplicar atividade</a>
+                {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
             </nav>
             {user_block}
         </aside>

@@ -99,24 +99,39 @@ h3 { font-size: 15px; font-weight: 700; color: var(--text); }
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  transition: width 0.2s ease, padding 0.2s ease;
 }
 .sidebar-brand { margin-bottom: 14px; }
 .sidebar nav { display: flex; flex-direction: column; gap: 1px; }
 .sidebar a {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 7px 12px;
   text-decoration: none;
   color: var(--text-muted);
   border-radius: 7px;
   font-size: 13px;
   font-weight: 500;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  position: relative;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .sidebar a:hover { background: var(--bg-subtle); color: var(--text); text-decoration: none; }
 .sidebar a.active {
   background: var(--accent-gradient);
   color: white;
   font-weight: 600;
+}
+.sidebar .nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  flex-shrink: 0;
+  font-size: 15px;
+  line-height: 1;
 }
 .sidebar-section {
   font-size: 10px;
@@ -125,7 +140,101 @@ h3 { font-size: 15px; font-weight: 700; color: var(--text); }
   margin: 14px 0 4px 12px;
   letter-spacing: 0.08em;
   font-weight: 700;
+  transition: opacity 0.15s ease, margin 0.2s ease, height 0.2s ease;
 }
+
+/* ═══ Botão de toggle (recolher/expandir sidebar) ═══ */
+.sidebar-toggle {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 0;
+  width: 100%;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 10px;
+  transition: all 0.15s ease;
+}
+.sidebar-toggle:hover { background: var(--border); color: var(--text); }
+
+/* ═══ SIDEBAR COLLAPSED (modo ícones-only) ═══ */
+[data-sidebar="collapsed"] .sidebar {
+  width: 64px;
+  padding: 14px 8px;
+}
+
+/* Avatar "W" mini — visível só no modo retraído */
+.sidebar-logo-mini { display: none; }
+[data-sidebar="collapsed"] .sidebar-logo-full { display: none !important; }
+[data-sidebar="collapsed"] .sidebar-logo-mini {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: 0 auto;
+  background: var(--accent-gradient);
+  color: white;
+  font-weight: 800;
+  font-size: 22px;
+  border-radius: 10px;
+  font-family: 'Sora', sans-serif;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.25);
+}
+[data-sidebar="collapsed"] .sidebar-brand-text { display: none; }
+[data-sidebar="collapsed"] .sidebar-section {
+  font-size: 0;
+  height: 1px;
+  background: var(--border);
+  margin: 10px 6px;
+  opacity: 0.6;
+  overflow: hidden;
+  padding: 0;
+  letter-spacing: 0;
+}
+[data-sidebar="collapsed"] .sidebar a {
+  justify-content: center;
+  padding: 9px 0;
+  gap: 0;
+}
+[data-sidebar="collapsed"] .sidebar a .nav-label { display: none; }
+[data-sidebar="collapsed"] .sidebar a .nav-icon { font-size: 18px; width: auto; }
+
+/* Tooltip quando hover num item colapsado */
+[data-sidebar="collapsed"] .sidebar a::after {
+  content: attr(data-name);
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--text);
+  color: var(--card);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 1000;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+}
+[data-sidebar="collapsed"] .sidebar a:hover::after { opacity: 1; }
+
+/* Rodapé do sidebar (info do prof) — esconde textos no modo collapsed */
+[data-sidebar="collapsed"] .sidebar [data-theme-toggle] { font-size: 0 !important; padding: 7px 0 !important; }
+[data-sidebar="collapsed"] .sidebar [data-theme-toggle]::before { content: attr(data-icon); font-size: 14px; }
+[data-sidebar="collapsed"] .sidebar-user-info { display: none; }
+[data-sidebar="collapsed"] .sidebar-user-footer { padding: 8px 0 0 0 !important; text-align: center; }
+[data-sidebar="collapsed"] .sidebar-user-footer a { font-size: 0 !important; display: inline-block; }
+[data-sidebar="collapsed"] .sidebar-user-footer a::before { content: "🚪"; font-size: 14px; }
 .main { flex: 1; padding: 24px 32px; min-width: 0; overflow-x: auto; }
 .subtitle { color: var(--text-muted); margin: 0; font-size: 13px; }
 .page-header { margin-bottom: 18px; }
