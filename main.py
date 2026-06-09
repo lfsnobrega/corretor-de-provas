@@ -7680,6 +7680,4 @@ async def confirmar_lote(aplicacao_id: int, request: Request):
             <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">📷 Escanear mais</a>
         </div>
     """
-    return render_page("Lote salvo", content, active="aplicacoes")git add main.py
-git commit -m "Fix: MathJax config + botão fração — delimitadores \\( \\) e escape correto"
-git push
+    return render_page("Lote salvo", content, active="aplicacoes")
