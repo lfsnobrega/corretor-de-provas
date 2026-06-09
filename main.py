@@ -228,7 +228,7 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         if (num === null) return;
                         const den = prompt('Denominador da fração:');
                         if (den === null) return;
-                        document.execCommand('insertHTML', false, '\\(' + '\\frac{' + num + '}{' + den + '}' + '\\)');
+                        document.execCommand('insertHTML', false, '$\\frac{' + num + '}{' + den + '}$');
                         sync();
                         if (window.MathJax) MathJax.typesetPromise([editor]);
                     }});
@@ -680,7 +680,7 @@ def logout():
 
 MATHJAX = """
 <script>
-window.MathJax = { tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] }, svg: { fontCache: 'global' }, options: { skipHtmlTags: ['script','noscript','style','textarea','pre'] } };
+window.MathJax = { tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true }, svg: { fontCache: 'global' }, options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'], ignoreHtmlClass: 'editor-content|ed-wrap|editor-toolbar' } };
 </script>
 <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 """
@@ -1906,13 +1906,13 @@ def form_nova_questao_passo2(
             <input type="hidden" name="tipo" value="{h_tipo}">
 
             <style>
-                .coll-sec{{border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;}}
-                .coll-hdr{{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg-subtle);cursor:pointer;user-select:none;font-size:13px;font-weight:600;color:var(--text-muted);letter-spacing:0.04em;text-transform:uppercase;}}
-                .coll-hdr:hover{{background:var(--border);}}
-                .coll-arrow{{font-size:11px;transition:transform 0.2s;}}
-                .coll-body{{padding:14px;display:none;}}
-                .coll-sec.open .coll-body{{display:block;}}
-                .coll-sec.open .coll-arrow{{transform:rotate(180deg);}}
+                .coll-sec{border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;font-style:normal;}
+                .coll-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg-subtle);cursor:pointer;user-select:none;font-size:12px;font-weight:600;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;font-style:normal;}
+                .coll-hdr:hover{background:var(--border);}
+                .coll-arrow{font-size:11px;transition:transform 0.2s;font-style:normal;}
+                .coll-body{padding:14px;display:none;font-style:normal;}
+                .coll-sec.open .coll-body{display:block;}
+                .coll-sec.open .coll-arrow{transform:rotate(180deg);}
             </style>
             <script>function toggleColl(el){{el.closest('.coll-sec').classList.toggle('open');}}</script>
 
