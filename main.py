@@ -68,6 +68,23 @@ def _pode_editar_questao(prof: Optional[dict], questao_criador_id: Optional[int]
     return prof["id"] == questao_criador_id
 
 
+def _redimensionar_imagem(data: bytes, max_width: int = 800) -> bytes:
+    """Redimensiona imagem para no máximo max_width px de largura, convertendo para JPEG."""
+    try:
+        from PIL import Image as _PilImage
+        import io as _io
+        img = _PilImage.open(_io.BytesIO(data))
+        if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+        w, h = img.size
+        if w > max_width:
+            img = img.resize((max_width, int(h * max_width / w)), _PilImage.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return data
+
+
 def _sanitizar_html_enunciado(html: str) -> str:
     """Permite apenas tags básicas de formatação no enunciado. Remove scripts, iframes, handlers JS.
     Tags permitidas: strong/b, em/i, u, br, p, div (só com style text-align), span (só com style text-align), ul, ol, li, blockquote.
@@ -137,8 +154,9 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
         f'{sep}'
     )
     bot_limpar = f'<button type="button" data-cmd="removeFormat" title="Limpar formatação" style="{btn_style} color:var(--text-muted);">⌫ limpar</button>'
+    bot_fracao = f'<button type="button" class="btn-insert-frac" title="Inserir fração" style="{btn_style}">½ fração</button>'
 
-    toolbar_buttons = bot_basicos + sep + bot_limpar if compact else bot_basicos + sep + bot_extra + bot_limpar
+    toolbar_buttons = bot_basicos + sep + bot_fracao + sep + bot_limpar if compact else bot_basicos + sep + bot_extra + bot_fracao + sep + bot_limpar
 
     placeholder_attr = f' data-placeholder="{_html.escape(placeholder, quote=True)}"' if placeholder else ""
 
@@ -201,6 +219,20 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         refreshPlaceholder();
                     }});
                 }});
+                const btnFrac = toolbar.querySelector('.btn-insert-frac');
+                if (btnFrac) {{
+                    btnFrac.addEventListener('click', e => {{
+                        e.preventDefault();
+                        editor.focus();
+                        const num = prompt('Numerador da fração:');
+                        if (num === null) return;
+                        const den = prompt('Denominador da fração:');
+                        if (den === null) return;
+                        document.execCommand('insertHTML', false, '\\(\\frac{{' + num + '}}{{' + den + '}}\\)');
+                        sync();
+                        if (window.MathJax) MathJax.typesetPromise([editor]);
+                    }});
+                }}
             }}
 
             {"" if not detectar_alternativas else """
@@ -378,7 +410,7 @@ def init_db():
         texto TEXT NOT NULL,
         FOREIGN KEY (questao_id) REFERENCES questoes(id) ON DELETE CASCADE
     )""")
-    # Migrations multi-prof: criada_por_professor_id em provas e aplicacoes
+    # Migrations multi-prof + gestão
     cols_p = {row[1] for row in conn.execute("PRAGMA table_info(provas)").fetchall()}
     if "criada_por_professor_id" not in cols_p:
         conn.execute("ALTER TABLE provas ADD COLUMN criada_por_professor_id INTEGER")
@@ -393,13 +425,11 @@ def init_db():
     cols_a = {row[1] for row in conn.execute("PRAGMA table_info(aplicacoes)").fetchall()}
     if "criada_por_professor_id" not in cols_a:
         conn.execute("ALTER TABLE aplicacoes ADD COLUMN criada_por_professor_id INTEGER")
-    # Perfil gestor e status em professores
     cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
     if "is_gestor" not in cols_prof:
         conn.execute("ALTER TABLE professores ADD COLUMN is_gestor INTEGER NOT NULL DEFAULT 0")
     if "status" not in cols_prof:
         conn.execute("ALTER TABLE professores ADD COLUMN status TEXT NOT NULL DEFAULT 'ativo'")
-        # Todos os professores já existentes ficam ativos
         conn.execute("UPDATE professores SET status = 'ativo' WHERE status IS NULL OR status = ''")
     conn.commit()
     conn.close()
@@ -456,7 +486,6 @@ async def auth_middleware(request: Request, call_next):
     if not prof:
         from_url = path + ("?" + request.url.query if request.url.query else "")
         return RedirectResponse(f"/login?next={urllib.parse.quote(from_url)}", status_code=303)
-    # Verificar status do professor
     status_prof = prof.get("status", "ativo")
     if status_prof == "pendente" and path != "/acesso-pendente":
         return RedirectResponse("/acesso-pendente", status_code=303)
@@ -471,11 +500,7 @@ async def auth_middleware(request: Request, call_next):
 
 
 def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> dict:
-    """Cria ou atualiza professor.
-    - Primeiro professor vira admin ativo automaticamente.
-    - Novos professores entram como 'pendente' aguardando aprovação do admin.
-    - Retorna dict com campo 'status' para o middleware verificar acesso.
-    """
+    """Cria ou atualiza professor. Primeiro = admin ativo. Demais = pendente até aprovação."""
     conn = get_db()
     existing = conn.execute("SELECT * FROM professores WHERE email = ?", (email,)).fetchone()
     if existing:
@@ -488,7 +513,6 @@ def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> 
     else:
         total = conn.execute("SELECT COUNT(*) AS c FROM professores").fetchone()["c"]
         is_admin_val = 1 if total == 0 else 0
-        # Primeiro professor = admin ativo; demais = pendente
         status_val = "ativo" if is_admin_val == 1 else "pendente"
         c = conn.execute(
             "INSERT INTO professores (email, nome, foto_url, is_admin, is_gestor, status, ultimo_acesso) VALUES (?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)",
@@ -498,7 +522,6 @@ def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> 
         is_admin = bool(is_admin_val)
         is_gestor = False
         status = status_val
-        # Se é o primeiro professor (admin), herda dados legados sem dono
         if is_admin_val == 1:
             conn.execute("UPDATE provas SET criada_por_professor_id = ? WHERE criada_por_professor_id IS NULL", (prof_id,))
             conn.execute("UPDATE aplicacoes SET criada_por_professor_id = ? WHERE criada_por_professor_id IS NULL", (prof_id,))
@@ -803,8 +826,8 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {link_turmas}
                 {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
                 {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
-                {nav_item("/painel-gestao", "painel-gestao", "\U0001f3db\ufe0f", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
-                {nav_item("/admin/usuarios", "admin-usuarios", "\U0001f465", "Usuários") if (professor and professor.get("is_admin")) else ""}
+                {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
             {user_block}
         </aside>
@@ -1673,86 +1696,7 @@ def form_nova_questao_passo1():
         f'</p>'
     ) if total_habs > 0 else '<p class="muted-line" style="font-size:11px;">Nenhuma habilidade cadastrada ainda. <a href="/habilidades/importar" target="_blank">Importar BNCC oficial</a>.</p>'
 
-    js_preview = """
-    <script>
-    (function() {
-        const ta = document.querySelector('textarea[name="habilidades_codigos"]');
-        const discSel = document.querySelector('select[name="disciplina_id"]');
-        if (!ta) return;
-
-        // === Painel de validação dos códigos digitados ===
-        const preview = document.createElement('div');
-        preview.id = 'bncc-preview';
-        preview.style.cssText = 'margin-top:6px; font-size:12px; line-height:1.5;';
-        ta.parentNode.appendChild(preview);
-
-        async function validar() {
-            const codigos = ta.value.split(/[,\\n]/).map(c => c.trim().toUpperCase()).filter(c => c);
-            if (codigos.length === 0) { preview.innerHTML = ''; return; }
-            try {
-                const resp = await fetch('/habilidades/buscar?codigos=' + encodeURIComponent(codigos.join(',')));
-                const data = await resp.json();
-                let html = '';
-                for (const c of codigos) {
-                    if (data[c]) {
-                        html += '<div style="padding:4px 8px; background:var(--green-bg); border-left:3px solid var(--green); margin-bottom:3px; color:var(--text);"><strong style="color:var(--green);">' + c + '</strong>: ' + data[c].replace(/</g, '&lt;') + '</div>';
-                    } else {
-                        html += '<div style="padding:4px 8px; background:var(--red-bg); border-left:3px solid var(--red); margin-bottom:3px; color:var(--red);"><strong style="color:var(--red);">' + c + '</strong>: ⚠ código não encontrado no catálogo (será criado sem descrição)</div>';
-                    }
-                }
-                preview.innerHTML = html;
-            } catch (e) { preview.innerHTML = ''; }
-        }
-        ta.addEventListener('blur', validar);
-        ta.addEventListener('input', () => { if (ta._t) clearTimeout(ta._t); ta._t = setTimeout(validar, 600); });
-
-        // === Busca por palavra/conceito ===
-        const buscaWrap = document.createElement('div');
-        buscaWrap.style.cssText = 'margin-top:14px; padding:12px; background:var(--bg-subtle); border-radius:6px;';
-        buscaWrap.innerHTML = '<label style="margin:0; font-size:12px;">🔍 Não sabe o código? Busque por palavra ou conceito<input type="search" id="bncc-busca" placeholder="ex: fração, Constituição, fotossíntese" style="margin-top:4px;"></label><div id="bncc-resultados" style="margin-top:8px; font-size:12px;"></div>';
-        ta.parentNode.appendChild(buscaWrap);
-
-        const inputBusca = buscaWrap.querySelector('#bncc-busca');
-        const divRes = buscaWrap.querySelector('#bncc-resultados');
-
-        async function buscarPorPalavra() {
-            const q = inputBusca.value.trim();
-            if (q.length < 2) { divRes.innerHTML = ''; return; }
-            const disc = discSel ? discSel.value : '';
-            const url = '/habilidades/buscar?q=' + encodeURIComponent(q) + (disc ? '&disciplina_id=' + disc : '');
-            try {
-                const resp = await fetch(url);
-                const data = await resp.json();
-                const results = data.results || [];
-                if (results.length === 0) {
-                    divRes.innerHTML = '<div style="color:var(--text-muted); padding:8px 0;">Nenhum resultado para "' + q.replace(/</g, '&lt;') + '"' + (disc ? ' na disciplina selecionada' : '') + '.</div>';
-                    return;
-                }
-                const escopo = disc ? ' (filtrado pela disciplina)' : ' (todas as disciplinas)';
-                let html = '<div style="color:var(--text-muted); padding:4px 0;">' + results.length + ' habilidade(s) encontrada(s)' + escopo + ' — clique para adicionar:</div>';
-                for (const r of results) {
-                    html += '<div data-codigo="' + r.codigo + '" style="padding:6px 8px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:pointer; background:var(--bg); color:var(--text);" onmouseover="this.style.background=\\'var(--accent-bg)\\'" onmouseout="this.style.background=\\'var(--bg)\\'"><strong style="color:var(--accent);">' + r.codigo + '</strong> · ' + r.descricao.replace(/</g, '&lt;') + '</div>';
-                }
-                divRes.innerHTML = html;
-            } catch (e) { divRes.innerHTML = ''; }
-        }
-        inputBusca.addEventListener('input', () => { if (inputBusca._t) clearTimeout(inputBusca._t); inputBusca._t = setTimeout(buscarPorPalavra, 400); });
-        if (discSel) discSel.addEventListener('change', buscarPorPalavra);
-
-        divRes.addEventListener('click', (e) => {
-            const item = e.target.closest('[data-codigo]');
-            if (!item) return;
-            const codigo = item.dataset.codigo;
-            const cur = ta.value.trim();
-            const codigos = cur ? cur.split(/[,\\n]/).map(c => c.trim().toUpperCase()).filter(c => c) : [];
-            if (codigos.includes(codigo)) return;
-            codigos.push(codigo);
-            ta.value = codigos.join(', ');
-            validar();
-        });
-    })();
-    </script>
-    """
+    js_preview = '\n    <script>\n    (function() {\n        var container = document.getElementById(\'bncc-container\');\n        var hiddenInput = document.getElementById(\'bncc-hidden\');\n        var searchInput = document.getElementById(\'bncc-search\');\n        var chipsDiv = document.getElementById(\'bncc-chips\');\n        var resultsDiv = document.getElementById(\'bncc-results\');\n        var discSel = document.querySelector(\'select[name="disciplina_id"]\');\n        if (!container || !hiddenInput || !searchInput) return;\n        var selecionados = [];\n        function renderChips() {\n            chipsDiv.innerHTML = \'\';\n            selecionados.forEach(function(cod) {\n                var chip = document.createElement(\'span\');\n                chip.style.cssText = \'display:inline-flex;align-items:center;gap:4px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;\';\n                chip.innerHTML = cod + \' <button type="button" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:14px;padding:0;line-height:1;" title="Remover">\\xd7</button>\';\n                chip.querySelector(\'button\').addEventListener(\'click\', function() {\n                    selecionados = selecionados.filter(function(c){return c!==cod;});\n                    renderChips();\n                });\n                chipsDiv.appendChild(chip);\n            });\n            hiddenInput.value = selecionados.join(\', \');\n        }\n        function adicionar(cod) {\n            cod = cod.trim().toUpperCase();\n            if (!cod || selecionados.indexOf(cod) >= 0) return;\n            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = \'\'; searchInput.value = \'\';\n        }\n        function buscar() {\n            var q = searchInput.value.trim();\n            if (q.length < 2) { resultsDiv.innerHTML = \'\'; return; }\n            var disc = discSel ? discSel.value : \'\';\n            var pareceCode = /^[A-Za-z]{2}\\d{2}[A-Za-z]{2}\\d{2}/.test(q);\n            var url = pareceCode ? \'/habilidades/buscar?codigos=\' + encodeURIComponent(q.toUpperCase())\n                : \'/habilidades/buscar?q=\' + encodeURIComponent(q) + (disc ? \'&disciplina_id=\' + disc : \'\');\n            fetch(url).then(function(r){return r.json();}).then(function(data) {\n                var results = [];\n                if (pareceCode) { Object.keys(data).forEach(function(k){if(k!==\'results\') results.push({codigo:k,descricao:data[k]});}); }\n                else { results = data.results || []; }\n                if (results.length === 0) {\n                    if (pareceCode) {\n                        resultsDiv.innerHTML = \'<div style="padding:6px 8px;font-size:12px;color:var(--text-muted);">Código não encontrado. <button type="button" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0;text-decoration:underline;">Adicionar mesmo assim</button></div>\';\n                        resultsDiv.querySelector(\'button\').addEventListener(\'click\', function(){adicionar(q);});\n                    } else {\n                        resultsDiv.innerHTML = \'<div style="padding:6px 8px;font-size:12px;color:var(--text-muted);">Nenhum resultado.</div>\';\n                    }\n                    return;\n                }\n                var html = \'<div style="color:var(--text-muted);font-size:11px;padding:4px 2px;">\' + results.length + \' habilidade(s) \\u2014 clique para adicionar:</div>\';\n                results.forEach(function(r) {\n                    html += \'<div data-cod="\' + r.codigo + \'" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;margin-bottom:3px;cursor:pointer;background:var(--card);font-size:12px;" onmouseover="this.style.background=\\\'var(--accent-bg)\\\'" onmouseout="this.style.background=\\\'var(--card)\\\'"><strong style="color:var(--accent);">\' + r.codigo + \'</strong> \\xb7 \' + (r.descricao||\'\').replace(/</g,\'&lt;\') + \'</div>\';\n                });\n                resultsDiv.innerHTML = html;\n            }).catch(function(){resultsDiv.innerHTML=\'\';});\n        }\n        var _t;\n        searchInput.addEventListener(\'input\', function(){clearTimeout(_t); _t=setTimeout(buscar,350);});\n        searchInput.addEventListener(\'keydown\', function(e){if(e.key===\'Enter\'){e.preventDefault();buscar();}});\n        if (discSel) discSel.addEventListener(\'change\', buscar);\n        resultsDiv.addEventListener(\'click\', function(e){\n            var item = e.target.closest(\'[data-cod]\');\n            if (item) adicionar(item.dataset.cod);\n        });\n        var init = hiddenInput.value.trim();\n        if (init) {\n            init.split(/[,\\n]/).map(function(x){return x.trim().toUpperCase();}).filter(Boolean).forEach(function(c){\n                if(selecionados.indexOf(c)<0) selecionados.push(c);\n            });\n            renderChips();\n        }\n    })();\n    </script>\n'
 
     tipo_options = "".join(
         f'<option value="{k}">{v["icone"]} {v["label"]}</option>'
@@ -1770,7 +1714,13 @@ def form_nova_questao_passo1():
                 <label>Disciplina<select name="disciplina_id" required>{options}</select></label>
                 <label>Ano de escolaridade<select name="ano">{anos_options}</select></label>
             </div>
-            <label>Habilidades BNCC (opcional, separadas por vírgula ou uma por linha)<textarea name="habilidades_codigos" rows="2" placeholder="EF09MA09, EF09MA10"></textarea></label>
+            <div id="bncc-container" style="margin:10px 0;">
+                <label style="margin-bottom:6px;">Habilidades BNCC <span style="font-weight:400; color:var(--text-muted); font-size:12px;">(opcional)</span></label>
+                <input type="hidden" name="habilidades_codigos" id="bncc-hidden">
+                <div id="bncc-chips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:24px; margin-bottom:8px;"></div>
+                <input type="search" id="bncc-search" placeholder="Digite o código (EF09MA09) ou palavra-chave (fração, célula...)" style="margin:0;">
+                <div id="bncc-results" style="margin-top:6px;"></div>
+            </div>
             {link_catalogo}
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Próximo: cadastrar conteúdo →</button>
@@ -1939,23 +1889,42 @@ def form_nova_questao_passo2(
             <input type="hidden" name="habilidades_codigos" value="{h_habs}">
             <input type="hidden" name="tipo" value="{h_tipo}">
 
-            <fieldset>
-                <legend>Textos de apoio (opcionais)</legend>
-                {_editor_enunciado_html(name="texto1_conteudo", valor_inicial="", required=False, label="Texto 1 — conteúdo", min_height=80, placeholder="Cole ou digite aqui o texto de apoio (opcional)")}
-                <label>Texto 1 — fonte<input type="text" name="texto1_fonte" placeholder="Autor, obra, ano"></label>
-                {_editor_enunciado_html(name="texto2_conteudo", valor_inicial="", required=False, label="Texto 2 — conteúdo", min_height=80, placeholder="Segundo texto de apoio (opcional)")}
-                <label>Texto 2 — fonte<input type="text" name="texto2_fonte" placeholder="Autor, obra, ano"></label>
-            </fieldset>
+            <style>
+                .coll-sec{{border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;}}
+                .coll-hdr{{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg-subtle);cursor:pointer;user-select:none;font-size:13px;font-weight:600;color:var(--text-muted);letter-spacing:0.04em;text-transform:uppercase;}}
+                .coll-hdr:hover{{background:var(--border);}}
+                .coll-arrow{{font-size:11px;transition:transform 0.2s;}}
+                .coll-body{{padding:14px;display:none;}}
+                .coll-sec.open .coll-body{{display:block;}}
+                .coll-sec.open .coll-arrow{{transform:rotate(180deg);}}
+            </style>
+            <script>function toggleColl(el){{el.closest('.coll-sec').classList.toggle('open');}}</script>
 
-            <fieldset>
-                <legend>Imagens (opcionais)</legend>
-                <label>Imagem 1<input type="file" name="imagem1" accept="image/*"></label>
-                <label>Legenda da imagem 1<input type="text" name="imagem1_legenda"></label>
-                <label>Fonte da imagem 1<input type="text" name="imagem1_fonte"></label>
-                <label>Imagem 2<input type="file" name="imagem2" accept="image/*"></label>
-                <label>Legenda da imagem 2<input type="text" name="imagem2_legenda"></label>
-                <label>Fonte da imagem 2<input type="text" name="imagem2_fonte"></label>
-            </fieldset>
+            <div class="coll-sec">
+                <div class="coll-hdr" onclick="toggleColl(this)">
+                    <span>📝 Textos de apoio (opcionais)</span><span class="coll-arrow">▼</span>
+                </div>
+                <div class="coll-body">
+                    {_editor_enunciado_html(name="texto1_conteudo", valor_inicial="", required=False, label="Texto 1 — conteúdo", min_height=80, placeholder="Cole ou digite aqui o texto de apoio (opcional)")}
+                    <label>Texto 1 — fonte<input type="text" name="texto1_fonte" placeholder="Autor, obra, ano"></label>
+                    {_editor_enunciado_html(name="texto2_conteudo", valor_inicial="", required=False, label="Texto 2 — conteúdo", min_height=80, placeholder="Segundo texto de apoio (opcional)")}
+                    <label>Texto 2 — fonte<input type="text" name="texto2_fonte" placeholder="Autor, obra, ano"></label>
+                </div>
+            </div>
+
+            <div class="coll-sec">
+                <div class="coll-hdr" onclick="toggleColl(this)">
+                    <span>🖼️ Imagens (opcionais)</span><span class="coll-arrow">▼</span>
+                </div>
+                <div class="coll-body">
+                    <label>Imagem 1<input type="file" name="imagem1" accept="image/*"></label>
+                    <label>Legenda da imagem 1<input type="text" name="imagem1_legenda"></label>
+                    <label>Fonte da imagem 1<input type="text" name="imagem1_fonte"></label>
+                    <label>Imagem 2<input type="file" name="imagem2" accept="image/*"></label>
+                    <label>Legenda da imagem 2<input type="text" name="imagem2_legenda"></label>
+                    <label>Fonte da imagem 2<input type="text" name="imagem2_fonte"></label>
+                </div>
+            </div>
 
             {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar.", detectar_alternativas=enunciado_detecta_alts)}
 
@@ -2003,10 +1972,10 @@ async def criar_questao(
 
     for ordem, (img, legenda, fonte) in enumerate([(imagem1, imagem1_legenda, imagem1_fonte), (imagem2, imagem2_legenda, imagem2_fonte)]):
         if img and img.filename:
-            ext = os.path.splitext(img.filename)[1].lower()
-            unique_name = f"{uuid.uuid4().hex}{ext}"
-            file_path = os.path.join(UPLOAD_DIR, unique_name)
             content_bytes = await img.read()
+            content_bytes = _redimensionar_imagem(content_bytes, max_width=800)
+            unique_name = f"{uuid.uuid4().hex}.jpg"
+            file_path = os.path.join(UPLOAD_DIR, unique_name)
             with open(file_path, "wb") as f:
                 f.write(content_bytes)
             conn.execute("INSERT INTO imagens (questao_id, caminho, legenda, fonte, ordem) VALUES (?, ?, ?, ?, ?)", (questao_id, f"static/imagens/{unique_name}", legenda.strip() or None, fonte.strip() or None, ordem))
@@ -2446,19 +2415,14 @@ def ver_prova(prova_id: int):
     status_rev = prova["status_revisao"] if "status_revisao" in prova.keys() else "rascunho"
     eh_dono = prof_ctx and (prova["criada_por_professor_id"] == prof_ctx["id"] or prof_ctx.get("is_admin"))
     eh_gestor_ou_admin = prof_ctx and (prof_ctx.get("is_admin") or prof_ctx.get("is_gestor"))
-    bloqueada = status_rev in ("submetida", "aprovada")
-
     status_badge_html = _status_badge_html(status_rev)
     obs_html = ""
-    if prova["obs_gestao"] if "obs_gestao" in prova.keys() else None:
-        obs_html = f'<div style="background:var(--orange-bg); border-left:3px solid var(--orange); padding:8px 12px; border-radius:6px; margin-top:8px; font-size:13px;"><strong>Observação da gestão:</strong> {prova["obs_gestao"]}</div>'
-
+    if "obs_gestao" in prova.keys() and prova["obs_gestao"]:
+        obs_html = f'<div style="background:var(--orange-bg); border-left:3px solid var(--orange); padding:8px 12px; border-radius:6px; margin-top:8px; font-size:13px;"><strong>Obs. da gestão:</strong> {prova["obs_gestao"]}</div>'
     submeter_btn = ""
     if eh_dono and status_rev in ("rascunho", "devolvida"):
-        submeter_btn = f'<form method="post" action="/provas/{prova_id}/submeter" style="margin:0;" onsubmit="return confirm(\'Submeter esta prova para revisão da gestão?\')"><button type="submit" class="btn btn-primary" style="background:var(--orange); border-color:var(--orange);">📤 Submeter para revisão</button></form>'
-
+        submeter_btn = f'<form method="post" action="/provas/{prova_id}/submeter" style="margin:0;" onsubmit="return confirm(\'Submeter para revisão da gestão?\')"><button type="submit" class="btn btn-primary" style="background:var(--orange); border-color:var(--orange);">📤 Submeter para revisão</button></form>'
     imprimir_btn = f'<a href="/provas/{prova_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Imprimir prova</a>' if (status_rev == "aprovada" or eh_gestor_ou_admin) else ""
-
     acoes_html = f'<div class="page-actions" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">{imprimir_btn}{comparativo_btn}{submeter_btn}{status_badge_html}{obs_html}</div>'
     content = f'<div class="page-header"><h1>{prova["titulo"]}</h1><p class="subtitle">{len(questoes)} questões</p>{desc_html}{acoes_html}</div><hr>{questoes_html}'
     return render_page(prova["titulo"], content, active="provas", head_extra=MATHJAX)
@@ -2918,15 +2882,48 @@ def adicionar_aluno(request: Request,
 
 
 # ==========================================
-#  GESTÃO DE PROVAS — SUBMISSÃO E REVISÃO
+#  ACESSO PENDENTE / BLOQUEADO
 # ==========================================
 
-# Status possíveis: rascunho | submetida | aprovada | devolvida
+@app.get("/acesso-pendente", response_class=HTMLResponse)
+def acesso_pendente(request: Request):
+    prof = get_current_professor(request)
+    nome = prof["nome"] if prof else "Professor"
+    body = f"""
+        <div style="max-width:480px; margin:80px auto; text-align:center; padding:0 20px;">
+            <div style="font-size:56px; margin-bottom:16px;">⏳</div>
+            <h1 style="font-size:22px; margin-bottom:8px;">Acesso aguardando aprovação</h1>
+            <p style="color:var(--text-muted); margin-bottom:24px;">
+                Olá, <strong>{nome}</strong>! Seu cadastro foi recebido e está aguardando aprovação da gestão escolar.
+            </p>
+            <a href="/logout" class="btn" style="margin-top:24px;">Sair</a>
+        </div>"""
+    return HTMLResponse(render_page("Acesso pendente", body, active=""))
+
+
+@app.get("/acesso-bloqueado", response_class=HTMLResponse)
+def acesso_bloqueado(request: Request):
+    prof = get_current_professor(request)
+    nome = prof["nome"] if prof else "Professor"
+    body = f"""
+        <div style="max-width:480px; margin:80px auto; text-align:center; padding:0 20px;">
+            <div style="font-size:56px; margin-bottom:16px;">🚫</div>
+            <h1 style="font-size:22px; margin-bottom:8px;">Acesso bloqueado</h1>
+            <p style="color:var(--text-muted);">Olá, <strong>{nome}</strong>. Seu acesso foi bloqueado. Entre em contato com o administrador.</p>
+            <a href="/logout" class="btn" style="margin-top:24px;">Sair</a>
+        </div>"""
+    return HTMLResponse(render_page("Acesso bloqueado", body, active=""))
+
+
+# ==========================================
+#  PAINEL DE GESTÃO DE PROVAS
+# ==========================================
+
 STATUS_REVISAO_LABEL = {
-    "rascunho":   ("✏️", "Rascunho",   "var(--text-muted)",  "var(--bg-subtle)"),
-    "submetida":  ("📤", "Submetida",  "var(--orange)",      "var(--orange-bg)"),
-    "aprovada":   ("✅", "Aprovada",   "var(--green)",       "var(--green-bg)"),
-    "devolvida":  ("↩️", "Devolvida",  "var(--red)",         "var(--red-bg)"),
+    "rascunho":   ("✏️", "Rascunho",  "var(--text-muted)", "var(--bg-subtle)"),
+    "submetida":  ("📤", "Submetida", "var(--orange)",     "var(--orange-bg)"),
+    "aprovada":   ("✅", "Aprovada",  "var(--green)",      "var(--green-bg)"),
+    "devolvida":  ("↩️", "Devolvida", "var(--red)",        "var(--red-bg)"),
 }
 
 def _status_badge_html(status: str) -> str:
@@ -2942,8 +2939,9 @@ def submeter_prova(prova_id: int):
     conn = get_db()
     prova = conn.execute("SELECT * FROM provas WHERE id = ?", (prova_id,)).fetchone()
     if prova and (prova["criada_por_professor_id"] == prof["id"] or prof.get("is_admin")):
-        if prova["status_revisao"] in ("rascunho", "devolvida"):
-            conn.execute("UPDATE provas SET status_revisao = \'submetida\', obs_gestao = NULL WHERE id = ?", (prova_id,))
+        status_rev = prova["status_revisao"] if "status_revisao" in prova.keys() else "rascunho"
+        if status_rev in ("rascunho", "devolvida"):
+            conn.execute("UPDATE provas SET status_revisao = 'submetida', obs_gestao = NULL WHERE id = ?", (prova_id,))
             conn.commit()
     conn.close()
     return RedirectResponse(f"/provas/{prova_id}", status_code=303)
@@ -2955,12 +2953,9 @@ def aprovar_prova(prova_id: int, obs: str = Form("")):
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
-    conn.execute(
-        "UPDATE provas SET status_revisao = \'aprovada\', obs_gestao = ?, revisado_por_id = ?, revisado_em = CURRENT_TIMESTAMP WHERE id = ?",
-        (obs.strip() or None, prof["id"], prova_id)
-    )
-    conn.commit()
-    conn.close()
+    conn.execute("UPDATE provas SET status_revisao = 'aprovada', obs_gestao = ?, revisado_por_id = ?, revisado_em = CURRENT_TIMESTAMP WHERE id = ?",
+        (obs.strip() or None, prof["id"], prova_id))
+    conn.commit(); conn.close()
     return RedirectResponse("/painel-gestao", status_code=303)
 
 
@@ -2970,433 +2965,244 @@ def devolver_prova(prova_id: int, obs: str = Form(...)):
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
-    conn.execute(
-        "UPDATE provas SET status_revisao = \'devolvida\', obs_gestao = ?, revisado_por_id = ?, revisado_em = CURRENT_TIMESTAMP WHERE id = ?",
-        (obs.strip(), prof["id"], prova_id)
-    )
-    conn.commit()
-    conn.close()
+    conn.execute("UPDATE provas SET status_revisao = 'devolvida', obs_gestao = ?, revisado_por_id = ?, revisado_em = CURRENT_TIMESTAMP WHERE id = ?",
+        (obs.strip(), prof["id"], prova_id))
+    conn.commit(); conn.close()
     return RedirectResponse("/painel-gestao", status_code=303)
 
 
 @app.get("/painel-gestao", response_class=HTMLResponse)
-def painel_gestao(
-    request: Request,
-    status: Optional[str] = "submetida",
-    turma_id: Optional[int] = None,
-    prof_id: Optional[int] = None,
-):
+def painel_gestao(request: Request, status: Optional[str] = "submetida", prof_id: Optional[int] = None):
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return HTMLResponse(render_page("Acesso negado",
-            '<div class="empty">Você não tem permissão para acessar esta área.</div>',
-            active="painel-gestao"), status_code=403)
-
+        return HTMLResponse(render_page("Acesso negado", '<div class="empty">Sem permissão.</div>', active="painel-gestao"), status_code=403)
     conn = get_db()
-    where = []
-    params = []
-    if status and status != "todas":
-        where.append("p.status_revisao = ?")
-        params.append(status)
+    where = []; params = []
+    status_atual = status or "submetida"
+    if status_atual != "todas":
+        where.append("p.status_revisao = ?"); params.append(status_atual)
     if prof_id:
-        where.append("p.criada_por_professor_id = ?")
-        params.append(prof_id)
-
-    where_clause = ("WHERE " + " AND ".join(where)) if where else ""
-
+        where.append("p.criada_por_professor_id = ?"); params.append(prof_id)
+    wc = ("WHERE " + " AND ".join(where)) if where else ""
     provas = conn.execute(f"""
         SELECT p.id, p.titulo, p.status_revisao, p.obs_gestao, p.criada_em, p.revisado_em,
-               pr.nome AS criador_nome,
-               rv.nome AS revisor_nome,
+               pr.nome AS criador_nome, rv.nome AS revisor_nome,
                (SELECT COUNT(*) FROM prova_questoes WHERE prova_id = p.id) AS n_questoes
         FROM provas p
         LEFT JOIN professores pr ON pr.id = p.criada_por_professor_id
         LEFT JOIN professores rv ON rv.id = p.revisado_por_id
-        {where_clause}
-        ORDER BY
-            CASE p.status_revisao WHEN \'submetida\' THEN 0 WHEN \'devolvida\' THEN 1 WHEN \'aprovada\' THEN 2 ELSE 3 END,
-            p.id DESC
+        {wc} ORDER BY CASE p.status_revisao WHEN 'submetida' THEN 0 WHEN 'devolvida' THEN 1 WHEN 'aprovada' THEN 2 ELSE 3 END, p.id DESC
     """, params).fetchall()
-
     professores_lista = conn.execute("SELECT id, nome FROM professores ORDER BY nome").fetchall()
+    contadores = {r["status_revisao"]: r["c"] for r in conn.execute("SELECT status_revisao, COUNT(*) AS c FROM provas GROUP BY status_revisao").fetchall()}
     conn.close()
 
-    # Contadores por status
-    conn2 = get_db()
-    contadores = {r["status_revisao"]: r["c"] for r in conn2.execute(
-        "SELECT status_revisao, COUNT(*) AS c FROM provas GROUP BY status_revisao"
-    ).fetchall()}
-    conn2.close()
-
     def _cnt(s): return contadores.get(s, 0)
-
-    # Tabs de status
-    tabs = [
-        ("submetida", "📤 Aguardando revisão (" + str(_cnt("submetida")) + ")", "var(--orange)"),
-        ("devolvida", "↩️ Devolvidas (" + str(_cnt("devolvida")) + ")", "var(--red)"),
-        ("aprovada",  "✅ Aprovadas (" + str(_cnt("aprovada")) + ")", "var(--green)"),
-        ("rascunho",  "✏️ Rascunhos (" + str(_cnt("rascunho")) + ")", "var(--text-muted)"),
-        ("todas",     "📋 Todas", "var(--accent)"),
+    tabs_data = [
+        ("submetida", "📤 Aguardando (" + str(_cnt("submetida")) + ")", "var(--orange)"),
+        ("devolvida",  "↩️ Devolvidas (" + str(_cnt("devolvida")) + ")", "var(--red)"),
+        ("aprovada",   "✅ Aprovadas (" + str(_cnt("aprovada")) + ")", "var(--green)"),
+        ("rascunho",   "✏️ Rascunhos (" + str(_cnt("rascunho")) + ")", "var(--text-muted)"),
+        ("todas",      "📋 Todas", "var(--accent)"),
     ]
-    tabs_html = '<div style="display:flex; gap:0; border-bottom:2px solid var(--border); margin-bottom:18px; flex-wrap:wrap;">' 
-    for key, label, color in tabs:
-        ativo = (status == key) or (status is None and key == "submetida")
+    tabs_html = '<div style="display:flex; gap:0; border-bottom:2px solid var(--border); margin-bottom:18px; flex-wrap:wrap;">'
+    for key, label, color in tabs_data:
+        ativo = status_atual == key
         tabs_html += f'<a href="/painel-gestao?status={key}" style="padding:9px 16px; font-size:13px; font-weight:600; text-decoration:none; border-bottom:3px solid {"var(--accent)" if ativo else "transparent"}; color:{"var(--accent)" if ativo else "var(--text-muted)"}; margin-bottom:-2px; white-space:nowrap;">{label}</a>'
     tabs_html += '</div>'
 
-    # Filtro por professor
-    prof_opts = '<option value="">Todos os professores</option>' + "".join(
-        f'<option value="{p["id"]}"{" selected" if prof_id == p["id"] else ""}>{p["nome"]}</option>'
-        for p in professores_lista
-    )
-    status_atual = status or "submetida"
-    filtros_html = f"""
-        <form method="get" action="/painel-gestao" style="background:var(--bg-subtle); padding:10px 16px; border-radius:8px; margin-bottom:18px;">
-            <input type="hidden" name="status" value="{status_atual}">
-            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-                <label style="margin:0;">Professor<select name="prof_id">{prof_opts}</select></label>
-                <button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>
-                <a href="/painel-gestao?status={status_atual}" class="btn" style="margin:0;">Limpar</a>
-            </div>
-        </form>
-    """
+    prof_opts = '<option value="">Todos os professores</option>' + "".join(f'<option value="{p["id"]}"{" selected" if prof_id == p["id"] else ""}>{p["nome"]}</option>' for p in professores_lista)
+    filtros_html = f"""<form method="get" action="/painel-gestao" style="background:var(--bg-subtle); padding:10px 16px; border-radius:8px; margin-bottom:18px;">
+        <input type="hidden" name="status" value="{status_atual}">
+        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+            <label style="margin:0;">Professor<select name="prof_id">{prof_opts}</select></label>
+            <button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>
+            <a href="/painel-gestao?status={status_atual}" class="btn" style="margin:0;">Limpar</a>
+        </div></form>"""
 
-    # Cards de provas
-    if provas:
-        cards_html = ""
-        for p in provas:
-            badge = _status_badge_html(p["status_revisao"])
-            criador = p["criador_nome"] or "—"
-            revisor_info = f'<span style="font-size:11px; color:var(--text-muted);">Revisado por {p["revisor_nome"]} em {(p["revisado_em"] or "")[:10]}</span>' if p["revisor_nome"] else ""
-            obs_html = f'<div style="margin-top:6px; background:var(--orange-bg); border-left:3px solid var(--orange); padding:6px 10px; border-radius:4px; font-size:12px;"><strong>Observação:</strong> {p["obs_gestao"]}</div>' if p["obs_gestao"] else ""
-
-            # Ações conforme status
-            acoes = f'<a href="/provas/{p["id"]}" class="btn" style="padding:5px 10px; font-size:12px;">👁️ Ver prova</a>'
-            acoes += f'<a href="/provas/{p["id"]}/imprimir" class="btn" style="padding:5px 10px; font-size:12px;" target="_blank">🖨️ PDF</a>'
-            if p["status_revisao"] == "submetida":
-                acoes += f'''
-                    <form method="post" action="/provas/{p["id"]}/aprovar" style="margin:0; display:inline-flex; gap:4px; align-items:center;">
-                        <input type="text" name="obs" placeholder="Obs. opcional..." style="width:180px; padding:4px 8px; font-size:12px; margin:0;">
-                        <button type="submit" class="btn" style="padding:5px 10px; font-size:12px; color:var(--green); border-color:var(--green);">✅ Aprovar</button>
-                    </form>
-                    <form method="post" action="/provas/{p["id"]}/devolver" style="margin:0; display:inline-flex; gap:4px; align-items:center;">
-                        <input type="text" name="obs" placeholder="Motivo da devolução..." required style="width:200px; padding:4px 8px; font-size:12px; margin:0;">
-                        <button type="submit" class="btn" style="padding:5px 10px; font-size:12px; color:var(--red); border-color:var(--red);">↩️ Devolver</button>
-                    </form>
-                '''
-            elif p["status_revisao"] == "aprovada":
-                acoes += f'<a href="/provas/{p["id"]}/editar" class="btn" style="padding:5px 10px; font-size:12px;">✏️ Editar</a>'
-
-            cards_html += f"""
-                <div style="border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:12px; background:var(--card);">
-                    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-                        <div style="flex:1; min-width:200px;">
-                            <div style="font-weight:600; font-size:14px;">{p["titulo"]}</div>
-                            <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
-                                {p["n_questoes"]} questões · por {criador} · criada em {(p["criada_em"] or "")[:10]}
-                            </div>
-                            {obs_html}
-                            <div style="margin-top:4px;">{revisor_info}</div>
-                        </div>
-                        <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
-                            {badge}
-                            <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">{acoes}</div>
-                        </div>
-                    </div>
+    cards_html = ""
+    for p in provas:
+        badge = _status_badge_html(p["status_revisao"])
+        obs_html = f'<div style="margin-top:6px; background:var(--orange-bg); border-left:3px solid var(--orange); padding:6px 10px; border-radius:4px; font-size:12px;"><strong>Obs:</strong> {p["obs_gestao"]}</div>' if p["obs_gestao"] else ""
+        revisor = f'<span style="font-size:11px; color:var(--text-muted);">Revisado por {p["revisor_nome"]} em {(p["revisado_em"] or "")[:10]}</span>' if p["revisor_nome"] else ""
+        acoes = f'<a href="/provas/{p["id"]}" class="btn" style="padding:5px 10px; font-size:12px;">👁️ Ver</a><a href="/provas/{p["id"]}/imprimir" class="btn" style="padding:5px 10px; font-size:12px;" target="_blank">🖨️ PDF</a>'
+        if p["status_revisao"] == "submetida":
+            acoes += f'''<form method="post" action="/provas/{p["id"]}/aprovar" style="margin:0; display:inline-flex; gap:4px; align-items:center;">
+                <input type="text" name="obs" placeholder="Obs. opcional..." style="width:160px; padding:4px 8px; font-size:12px; margin:0;">
+                <button type="submit" class="btn" style="padding:5px 10px; font-size:12px; color:var(--green); border-color:var(--green);">✅ Aprovar</button>
+            </form>
+            <form method="post" action="/provas/{p["id"]}/devolver" style="margin:0; display:inline-flex; gap:4px; align-items:center;">
+                <input type="text" name="obs" placeholder="Motivo..." required style="width:160px; padding:4px 8px; font-size:12px; margin:0;">
+                <button type="submit" class="btn" style="padding:5px 10px; font-size:12px; color:var(--red); border-color:var(--red);">↩️ Devolver</button>
+            </form>'''
+        elif p["status_revisao"] == "aprovada":
+            acoes += f'<a href="/provas/{p["id"]}/editar" class="btn" style="padding:5px 10px; font-size:12px;">✏️ Editar</a>'
+        cards_html += f"""<div style="border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:12px; background:var(--card);">
+            <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                <div style="flex:1; min-width:200px;">
+                    <div style="font-weight:600; font-size:14px;">{p["titulo"]}</div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">{p["n_questoes"]} questões · por {p["criador_nome"] or "—"} · {(p["criada_em"] or "")[:10]}</div>
+                    {obs_html}<div style="margin-top:4px;">{revisor}</div>
                 </div>
-            """
-    else:
-        cards_html = '<div class="empty">Nenhuma prova encontrada com os filtros selecionados.</div>'
+                <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
+                    {badge}
+                    <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">{acoes}</div>
+                </div>
+            </div></div>"""
+    if not cards_html:
+        cards_html = '<div class="empty">Nenhuma prova encontrada.</div>'
 
-    content = f"""
-        <div class="page-header">
-            <h1>🏛️ Painel de gestão</h1>
-            <p class="subtitle">Revisão e aprovação de provas para impressão</p>
-        </div>
-        {tabs_html}
-        {filtros_html}
-        {cards_html}
-    """
-    return render_page("Painel de gestão", content, active="painel-gestao")
+    content_html = f"""<div class="page-header"><h1>🏛️ Painel de gestão</h1><p class="subtitle">Revisão e aprovação de provas para impressão</p></div>
+        {tabs_html}{filtros_html}{cards_html}"""
+    return render_page("Painel de gestão", content_html, active="painel-gestao")
 
+
+# ==========================================
+#  MINHAS APLICAÇÕES
+# ==========================================
 
 @app.get("/minhas-aplicacoes", response_class=HTMLResponse)
-def minhas_aplicacoes(
-    request: Request,
-    aba: Optional[str] = "abertas",
-    turma: Optional[str] = None,
-    prof_id: Optional[int] = None,
-):
+def minhas_aplicacoes(request: Request, aba: Optional[str] = "abertas", turma: Optional[str] = None, prof_id: Optional[int] = None):
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
     is_admin = bool(prof.get("is_admin"))
     conn = get_db()
-
     turma_id = int(turma) if turma and turma.isdigit() else None
     aberta_val = 1 if aba == "abertas" else 0
-
-    where = ["a.aberta = ?"]
-    params_q = [aberta_val]
-
+    where = ["a.aberta = ?"]; params_q = [aberta_val]
     if not is_admin:
-        where.append("(a.criada_por_professor_id = ? OR a.criada_por_professor_id IS NULL)")
-        params_q.append(prof["id"])
+        where.append("(a.criada_por_professor_id = ? OR a.criada_por_professor_id IS NULL)"); params_q.append(prof["id"])
     elif prof_id:
-        where.append("a.criada_por_professor_id = ?")
-        params_q.append(prof_id)
-
+        where.append("a.criada_por_professor_id = ?"); params_q.append(prof_id)
     if turma_id:
-        where.append("a.turma_id = ?")
-        params_q.append(turma_id)
-
-    where_clause = "WHERE " + " AND ".join(where)
-
-    aplicacoes = conn.execute(f"""
-        SELECT a.id, a.titulo, a.modo, a.aberta, a.criada_em,
-               p.titulo AS prova_titulo,
-               t.nome AS turma_nome, t.ano_letivo,
-               pr.nome AS criador_nome,
+        where.append("a.turma_id = ?"); params_q.append(turma_id)
+    wc = "WHERE " + " AND ".join(where)
+    aplicacoes = conn.execute(f"""SELECT a.id, a.titulo, a.modo, a.aberta, a.criada_em, p.titulo AS prova_titulo,
+               t.nome AS turma_nome, t.ano_letivo, pr.nome AS criador_nome,
                (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS qtd_entregas,
                (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS qtd_alunos
-        FROM aplicacoes a
-        JOIN provas p ON p.id = a.prova_id
-        JOIN turmas t ON t.id = a.turma_id
-        LEFT JOIN professores pr ON pr.id = a.criada_por_professor_id
-        {where_clause}
-        ORDER BY a.id DESC
-    """, params_q).fetchall()
-
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        LEFT JOIN professores pr ON pr.id = a.criada_por_professor_id {wc} ORDER BY a.id DESC""", params_q).fetchall()
     turmas_lista = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     professores_lista = conn.execute("SELECT id, nome FROM professores ORDER BY nome").fetchall() if is_admin else []
-
-    base_filter = "" if is_admin else f" AND (criada_por_professor_id = {prof['id']} OR criada_por_professor_id IS NULL)"
-    total_abertas = conn.execute(f"SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 1{base_filter}").fetchone()["c"]
-    total_encerradas = conn.execute(f"SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 0{base_filter}").fetchone()["c"]
+    bf = "" if is_admin else f" AND (criada_por_professor_id = {prof['id']} OR criada_por_professor_id IS NULL)"
+    t_ab = conn.execute(f"SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 1{bf}").fetchone()["c"]
+    t_enc = conn.execute(f"SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 0{bf}").fetchone()["c"]
     conn.close()
 
-    tabs_html = f"""
-        <div style="display:flex; gap:0; border-bottom:2px solid var(--border); margin-bottom:18px;">
-            <a href="/minhas-aplicacoes?aba=abertas" style="padding:10px 20px; font-weight:600; font-size:14px; text-decoration:none;
-               border-bottom:3px solid {"var(--accent)" if aba=="abertas" else "transparent"};
-               color:{"var(--accent)" if aba=="abertas" else "var(--text-muted)"}; margin-bottom:-2px;">
-               🟢 Abertas <span style="background:var(--green-bg); color:var(--green); border-radius:10px; padding:1px 7px; font-size:12px; margin-left:4px;">{total_abertas}</span>
-            </a>
-            <a href="/minhas-aplicacoes?aba=encerradas" style="padding:10px 20px; font-weight:600; font-size:14px; text-decoration:none;
-               border-bottom:3px solid {"var(--accent)" if aba=="encerradas" else "transparent"};
-               color:{"var(--accent)" if aba=="encerradas" else "var(--text-muted)"}; margin-bottom:-2px;">
-               🔒 Encerradas <span style="background:var(--bg-subtle); color:var(--text-muted); border-radius:10px; padding:1px 7px; font-size:12px; margin-left:4px;">{total_encerradas}</span>
-            </a>
-        </div>
-    """
+    tabs_html = f"""<div style="display:flex; gap:0; border-bottom:2px solid var(--border); margin-bottom:18px;">
+        <a href="/minhas-aplicacoes?aba=abertas" style="padding:10px 20px; font-weight:600; font-size:14px; text-decoration:none; border-bottom:3px solid {"var(--accent)" if aba=="abertas" else "transparent"}; color:{"var(--accent)" if aba=="abertas" else "var(--text-muted)"}; margin-bottom:-2px;">
+           🟢 Abertas <span style="background:var(--green-bg); color:var(--green); border-radius:10px; padding:1px 7px; font-size:12px; margin-left:4px;">{t_ab}</span></a>
+        <a href="/minhas-aplicacoes?aba=encerradas" style="padding:10px 20px; font-weight:600; font-size:14px; text-decoration:none; border-bottom:3px solid {"var(--accent)" if aba=="encerradas" else "transparent"}; color:{"var(--accent)" if aba=="encerradas" else "var(--text-muted)"}; margin-bottom:-2px;">
+           🔒 Encerradas <span style="background:var(--bg-subtle); color:var(--text-muted); border-radius:10px; padding:1px 7px; font-size:12px; margin-left:4px;">{t_enc}</span></a>
+    </div>"""
 
-    turmas_opts = '<option value="">Todas as turmas</option>' + "".join(
-        f'<option value="{t["id"]}"{" selected" if turma_id == t["id"] else ""}>{t["nome"]} ({t["ano_letivo"]})</option>'
-        for t in turmas_lista
-    )
+    turmas_opts = '<option value="">Todas as turmas</option>' + "".join(f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas_lista)
     filtro_prof = ""
     if is_admin:
-        profs_opts = '<option value="">Todos os professores</option>' + "".join(
-            f'<option value="{p["id"]}"{" selected" if prof_id == p["id"] else ""}>{p["nome"]}</option>'
-            for p in professores_lista
-        )
-        filtro_prof = f'<label style="margin:0;">Professor<select name="prof_id">{profs_opts}</select></label>'
+        po = '<option value="">Todos</option>' + "".join(f'<option value="{p["id"]}"{" selected" if prof_id==p["id"] else ""}>{p["nome"]}</option>' for p in professores_lista)
+        filtro_prof = f'<label style="margin:0;">Professor<select name="prof_id">{po}</select></label>'
+    filtros_html = f"""<form method="get" action="/minhas-aplicacoes" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
+        <input type="hidden" name="aba" value="{aba}">
+        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+            <label style="margin:0;">Turma<select name="turma">{turmas_opts}</select></label>{filtro_prof}
+            <button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>
+            <a href="/minhas-aplicacoes?aba={aba}" class="btn" style="margin:0;">Limpar</a>
+        </div></form>"""
 
-    filtros_html = f"""
-        <form method="get" action="/minhas-aplicacoes" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
-            <input type="hidden" name="aba" value="{aba}">
-            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-                <label style="margin:0;">Turma<select name="turma">{turmas_opts}</select></label>
-                {filtro_prof}
-                <button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>
-                <a href="/minhas-aplicacoes?aba={aba}" class="btn" style="margin:0;">Limpar</a>
-            </div>
-        </form>
-    """
+    cards = ""
+    for a in aplicacoes:
+        titulo_apl = a["titulo"] or a["prova_titulo"]
+        modo_icon = "📱" if a["modo"] == "online" else "📄"
+        sb = ('<span style="background:var(--green-bg); color:var(--green); border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">Aberta</span>' if a["aberta"] else '<span style="background:var(--bg-subtle); color:var(--text-muted); border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">Encerrada</span>')
+        prog = f'{a["qtd_entregas"]}/{a["qtd_alunos"]}' if a["qtd_alunos"] else "—"
+        criador = f'<span style="font-size:11px; color:var(--text-muted);">por {a["criador_nome"]}</span>' if is_admin and a["criador_nome"] else ""
+        cards += f"""<div style="border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:10px; background:var(--card);">
+            <div style="display:flex; align-items:center; gap:10px; justify-content:space-between; flex-wrap:wrap;">
+                <div><div style="font-weight:600; font-size:14px;">{modo_icon} {titulo_apl}</div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">{a["turma_nome"]} ({a["ano_letivo"]}) {criador}</div></div>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">{sb}
+                    <span style="font-size:12px; color:var(--text-muted);">Entregas: {prog}</span>
+                    <a href="/aplicacoes/{a['id']}" class="btn" style="padding:5px 12px; font-size:12px;">Ver →</a>
+                    <a href="/aplicacoes/{a['id']}/analise" class="btn" style="padding:5px 12px; font-size:12px;">📈</a>
+                </div></div></div>"""
+    if not cards:
+        cards = f'<div class="empty">Nenhuma aplicação {"aberta" if aba=="abertas" else "encerrada"} encontrada.</div>'
 
-    if aplicacoes:
-        cards = ""
-        for a in aplicacoes:
-            titulo_apl = a["titulo"] or a["prova_titulo"]
-            modo_icon = "📱" if a["modo"] == "online" else "📄"
-            status_badge = (
-                '<span style="background:var(--green-bg); color:var(--green); border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">Aberta</span>'
-                if a["aberta"] else
-                '<span style="background:var(--bg-subtle); color:var(--text-muted); border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">Encerrada</span>'
-            )
-            progresso = f'{a["qtd_entregas"]}/{a["qtd_alunos"]}' if a["qtd_alunos"] else "—"
-            criador = f'<span style="font-size:11px; color:var(--text-muted);">por {a["criador_nome"]}</span>' if is_admin and a["criador_nome"] else ""
-            cards += f"""
-                <div style="border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:10px; background:var(--card);">
-                    <div style="display:flex; align-items:center; gap:10px; justify-content:space-between; flex-wrap:wrap;">
-                        <div>
-                            <div style="font-weight:600; font-size:14px;">{modo_icon} {titulo_apl}</div>
-                            <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">{a["turma_nome"]} ({a["ano_letivo"]}) {criador}</div>
-                        </div>
-                        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                            {status_badge}
-                            <span style="font-size:12px; color:var(--text-muted);">Entregas: {progresso}</span>
-                            <a href="/aplicacoes/{a['id']}" class="btn" style="padding:5px 12px; font-size:12px;">Ver detalhes →</a>
-                            <a href="/aplicacoes/{a['id']}/analise" class="btn" style="padding:5px 12px; font-size:12px;">📈 Análise</a>
-                        </div>
-                    </div>
-                </div>
-            """
-    else:
-        label_aba = "abertas" if aba == "abertas" else "encerradas"
-        cards = f'<div class="empty">Nenhuma aplicação {label_aba} encontrada.</div>'
-
-    content = f"""
-        <div class="page-header">
-            <h1>📋 Minhas aplicações</h1>
-            <p class="subtitle">{"Visão geral da escola" if is_admin else "Suas atividades aplicadas"}</p>
-        </div>
-        {tabs_html}
-        {filtros_html}
-        {cards}
-    """
-    return render_page("Minhas aplicações", content, active="minhas-aplicacoes")
+    body = f"""<div class="page-header"><h1>📋 Minhas aplicações</h1><p class="subtitle">{"Visão geral da escola" if is_admin else "Suas atividades aplicadas"}</p></div>
+        {tabs_html}{filtros_html}{cards}"""
+    return render_page("Minhas aplicações", body, active="minhas-aplicacoes")
 
 
 # ==========================================
 #  ADMIN: GERENCIAMENTO DE USUÁRIOS
 # ==========================================
 
-
-
-@app.get("/acesso-pendente", response_class=HTMLResponse)
-def acesso_pendente(request: Request):
-    prof = get_current_professor(request)
-    nome = prof["nome"] if prof else "Professor"
-    content = f"""
-        <div style="max-width:480px; margin:80px auto; text-align:center; padding:0 20px;">
-            <div style="font-size:56px; margin-bottom:16px;">⏳</div>
-            <h1 style="font-size:22px; margin-bottom:8px;">Acesso aguardando aprovação</h1>
-            <p style="color:var(--text-muted); margin-bottom:24px;">
-                Olá, <strong>{nome}</strong>! Seu cadastro foi recebido e está aguardando
-                aprovação da gestão escolar. Você receberá acesso em breve.
-            </p>
-            <p style="font-size:13px; color:var(--text-muted);">
-                Se precisar de acesso urgente, entre em contato com o administrador do sistema.
-            </p>
-            <a href="/logout" class="btn" style="margin-top:24px;">Sair</a>
-        </div>
-    """
-    return HTMLResponse(render_page("Acesso pendente", content, active=""))
-
-
-@app.get("/acesso-bloqueado", response_class=HTMLResponse)
-def acesso_bloqueado(request: Request):
-    prof = get_current_professor(request)
-    nome = prof["nome"] if prof else "Professor"
-    content = f"""
-        <div style="max-width:480px; margin:80px auto; text-align:center; padding:0 20px;">
-            <div style="font-size:56px; margin-bottom:16px;">🚫</div>
-            <h1 style="font-size:22px; margin-bottom:8px;">Acesso bloqueado</h1>
-            <p style="color:var(--text-muted); margin-bottom:24px;">
-                Olá, <strong>{nome}</strong>. Seu acesso ao sistema foi bloqueado.
-                Entre em contato com o administrador para mais informações.
-            </p>
-            <a href="/logout" class="btn" style="margin-top:24px;">Sair</a>
-        </div>
-    """
-    return HTMLResponse(render_page("Acesso bloqueado", content, active=""))
-
 @app.get("/admin/usuarios", response_class=HTMLResponse)
 def admin_usuarios(request: Request):
     prof = _current_prof_ctx.get()
     if not prof or not prof.get("is_admin"):
-        return HTMLResponse(render_page("Acesso negado",
-            '<div class="empty">Apenas administradores podem acessar esta página.</div>',
-            active=""), status_code=403)
+        return HTMLResponse(render_page("Acesso negado", '<div class="empty">Apenas administradores.</div>', active=""), status_code=403)
     conn = get_db()
     usuarios = conn.execute(
-        "SELECT id, email, nome, is_admin, is_gestor, status, criado_em, ultimo_acesso FROM professores ORDER BY CASE COALESCE(status,\'ativo\') WHEN \'pendente\' THEN 0 WHEN \'ativo\' THEN 1 ELSE 2 END, nome"
+        "SELECT id, email, nome, is_admin, is_gestor, status, criado_em, ultimo_acesso FROM professores ORDER BY CASE COALESCE(status,'ativo') WHEN 'pendente' THEN 0 WHEN 'ativo' THEN 1 ELSE 2 END, nome"
     ).fetchall()
     conn.close()
-
     pendentes = [u for u in usuarios if (u["status"] if "status" in u.keys() else "ativo") == "pendente"]
-    alerta_pendentes = ""
-    if pendentes:
-        alerta_pendentes = f'''<div style="background:var(--orange-bg); border:1px solid var(--orange); border-radius:8px; padding:12px 16px; margin-bottom:18px; display:flex; align-items:center; gap:10px;">
-            <span style="font-size:20px;">⏳</span>
-            <span><strong>{len(pendentes)} professor{"es" if len(pendentes) > 1 else ""} aguardando aprovação.</strong> Revise abaixo e aprove ou bloqueie o acesso.</span>
-        </div>'''
-
+    alerta = f'''<div style="background:var(--orange-bg); border:1px solid var(--orange); border-radius:8px; padding:12px 16px; margin-bottom:18px; display:flex; align-items:center; gap:10px;">
+        <span style="font-size:20px;">⏳</span><span><strong>{len(pendentes)} professor{"es" if len(pendentes)>1 else ""} aguardando aprovação.</strong></span></div>''' if pendentes else ""
     rows = ""
     for u in usuarios:
-        u_status = u["status"] if "status" in u.keys() else "ativo"
+        us = u["status"] if "status" in u.keys() else "ativo"
         perfil = []
-        if u["is_admin"]: perfil.append('<span style="background:var(--purple,#7c3aed); color:white; font-size:10px; padding:1px 6px; border-radius:3px;">ADMIN</span>')
+        if u["is_admin"]: perfil.append('<span style="background:#7c3aed; color:white; font-size:10px; padding:1px 6px; border-radius:3px;">ADMIN</span>')
         if u["is_gestor"]: perfil.append('<span style="background:var(--accent); color:white; font-size:10px; padding:1px 6px; border-radius:3px;">GESTOR</span>')
-        if u_status == "pendente": perfil.append('<span style="background:var(--orange-bg); color:var(--orange); font-size:10px; padding:1px 6px; border-radius:3px; border:1px solid var(--orange);">PENDENTE</span>')
-        elif u_status == "bloqueado": perfil.append('<span style="background:var(--red-bg); color:var(--red); font-size:10px; padding:1px 6px; border-radius:3px;">BLOQUEADO</span>')
+        if us == "pendente": perfil.append('<span style="background:var(--orange-bg); color:var(--orange); font-size:10px; padding:1px 6px; border-radius:3px; border:1px solid var(--orange);">PENDENTE</span>')
+        elif us == "bloqueado": perfil.append('<span style="background:var(--red-bg); color:var(--red); font-size:10px; padding:1px 6px; border-radius:3px;">BLOQUEADO</span>')
         elif not u["is_admin"] and not u["is_gestor"]: perfil.append('<span style="background:var(--bg-subtle); color:var(--text-muted); font-size:10px; padding:1px 6px; border-radius:3px;">PROFESSOR</span>')
         acesso = (u["ultimo_acesso"] or "")[:16].replace("T", " ")
         is_eu = u["id"] == prof["id"]
         acoes = ""
         if not is_eu:
-            if u_status == "pendente":
+            if us == "pendente":
                 acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Aprovar</button></form>'
                 acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/bloquear" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">🚫 Bloquear</button></form>'
             else:
-                label_gestor = "Remover gestor" if u["is_gestor"] else "Tornar gestor"
-                acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-gestor" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px;">{label_gestor}</button></form>'
+                lg = "Remover gestor" if u["is_gestor"] else "Tornar gestor"
+                acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-gestor" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px;">{lg}</button></form>'
                 if not u["is_admin"]:
-                    acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-admin" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">Tornar admin</button></form>'
-                if u_status == "ativo":
-                    acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/bloquear" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">🚫 Bloquear</button></form>'
-                elif u_status == "bloqueado":
+                    acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-admin" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">Admin</button></form>'
+                if us == "ativo":
+                    acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/bloquear" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">🚫</button></form>'
+                elif us == "bloqueado":
                     acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Desbloquear</button></form>'
-        row_bg = ' style="background:var(--orange-bg);"' if u_status == "pendente" else ""
-        rows += f"""
-            <tr{row_bg}>
-                <td style="padding:10px 8px;">{u["nome"]}{"&nbsp;<em style=\'font-size:11px; color:var(--text-muted);\'>( você)</em>" if is_eu else ""}</td>
-                <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{u["email"]}</td>
-                <td style="padding:10px 8px;">{" ".join(perfil)}</td>
-                <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{acesso}</td>
-                <td style="padding:10px 8px;">{acoes}</td>
-            </tr>
-        """
-
-    content = f"""
-        <div class="page-header">
-            <h1>👤 Gerenciamento de usuários</h1>
-            <p class="subtitle">Gerencie perfis de acesso dos usuários do sistema</p>
-        </div>
-        {alerta_pendentes}
-        <div class="tip" style="margin-bottom:18px;">
-            <strong>Perfis:</strong> <strong>Admin</strong> — acesso total.
-            <strong>Gestor</strong> — aprova/devolve provas.
-            <strong>Professor</strong> — acesso padrão.
-            Novos usuários entram como <strong>Pendente</strong> até você aprovar.
-        </div>
+        rb = ' style="background:var(--orange-bg);"' if us == "pendente" else ""
+        rows += f'''<tr{rb}><td style="padding:10px 8px;">{u["nome"]}{"&nbsp;<em style=\'font-size:11px; color:var(--text-muted);\'>( você)</em>" if is_eu else ""}</td>
+            <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{u["email"]}</td>
+            <td style="padding:10px 8px;">{" ".join(perfil)}</td>
+            <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{acesso}</td>
+            <td style="padding:10px 8px;">{acoes}</td></tr>'''
+    body = f"""<div class="page-header"><h1>👤 Gerenciamento de usuários</h1><p class="subtitle">Gerencie perfis de acesso</p></div>
+        {alerta}
+        <div class="tip" style="margin-bottom:18px;"><strong>Perfis:</strong> Admin — acesso total. Gestor — aprova/devolve provas. Professor — acesso padrão. Novos usuários entram como <strong>Pendente</strong>.</div>
         <table style="width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; border:1px solid var(--border);">
-            <thead>
-                <tr style="background:var(--bg-subtle); font-size:12px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted);">
-                    <th style="padding:10px 8px; text-align:left;">Nome</th>
-                    <th style="padding:10px 8px; text-align:left;">E-mail</th>
-                    <th style="padding:10px 8px; text-align:left;">Perfil / Status</th>
-                    <th style="padding:10px 8px; text-align:left;">Último acesso</th>
-                    <th style="padding:10px 8px; text-align:left;">Ações</th>
-                </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-        </table>
-    """
-    return render_page("Usuários", content, active="")
+            <thead><tr style="background:var(--bg-subtle); font-size:12px; text-transform:uppercase; color:var(--text-muted);">
+                <th style="padding:10px 8px; text-align:left;">Nome</th><th style="padding:10px 8px; text-align:left;">E-mail</th>
+                <th style="padding:10px 8px; text-align:left;">Perfil</th><th style="padding:10px 8px; text-align:left;">Último acesso</th>
+                <th style="padding:10px 8px; text-align:left;">Ações</th></tr></thead>
+            <tbody>{rows}</tbody></table>"""
+    return render_page("Usuários", body, active="")
 
 
 @app.post("/admin/usuarios/{usuario_id}/toggle-gestor")
 def toggle_gestor(usuario_id: int):
     prof = _current_prof_ctx.get()
-    if not prof or not prof.get("is_admin"):
-        return RedirectResponse("/login", status_code=303)
+    if not prof or not prof.get("is_admin"): return RedirectResponse("/login", status_code=303)
     conn = get_db()
     atual = conn.execute("SELECT is_gestor FROM professores WHERE id = ?", (usuario_id,)).fetchone()
     if atual:
-        conn.execute("UPDATE professores SET is_gestor = ? WHERE id = ?", (0 if atual["is_gestor"] else 1, usuario_id))
-        conn.commit()
+        conn.execute("UPDATE professores SET is_gestor = ? WHERE id = ?", (0 if atual["is_gestor"] else 1, usuario_id)); conn.commit()
     conn.close()
     return RedirectResponse("/admin/usuarios", status_code=303)
 
@@ -3404,13 +3210,11 @@ def toggle_gestor(usuario_id: int):
 @app.post("/admin/usuarios/{usuario_id}/toggle-admin")
 def toggle_admin(usuario_id: int):
     prof = _current_prof_ctx.get()
-    if not prof or not prof.get("is_admin"):
-        return RedirectResponse("/login", status_code=303)
+    if not prof or not prof.get("is_admin"): return RedirectResponse("/login", status_code=303)
     conn = get_db()
     atual = conn.execute("SELECT is_admin FROM professores WHERE id = ?", (usuario_id,)).fetchone()
     if atual:
-        conn.execute("UPDATE professores SET is_admin = ? WHERE id = ?", (0 if atual["is_admin"] else 1, usuario_id))
-        conn.commit()
+        conn.execute("UPDATE professores SET is_admin = ? WHERE id = ?", (0 if atual["is_admin"] else 1, usuario_id)); conn.commit()
     conn.close()
     return RedirectResponse("/admin/usuarios", status_code=303)
 
@@ -3418,24 +3222,18 @@ def toggle_admin(usuario_id: int):
 @app.post("/admin/usuarios/{usuario_id}/aprovar")
 def aprovar_usuario(usuario_id: int):
     prof = _current_prof_ctx.get()
-    if not prof or not prof.get("is_admin"):
-        return RedirectResponse("/login", status_code=303)
+    if not prof or not prof.get("is_admin"): return RedirectResponse("/login", status_code=303)
     conn = get_db()
-    conn.execute("UPDATE professores SET status = \'ativo\' WHERE id = ?", (usuario_id,))
-    conn.commit()
-    conn.close()
+    conn.execute("UPDATE professores SET status = 'ativo' WHERE id = ?", (usuario_id,)); conn.commit(); conn.close()
     return RedirectResponse("/admin/usuarios", status_code=303)
 
 
 @app.post("/admin/usuarios/{usuario_id}/bloquear")
 def bloquear_usuario(usuario_id: int):
     prof = _current_prof_ctx.get()
-    if not prof or not prof.get("is_admin"):
-        return RedirectResponse("/login", status_code=303)
+    if not prof or not prof.get("is_admin"): return RedirectResponse("/login", status_code=303)
     conn = get_db()
-    conn.execute("UPDATE professores SET status = \'bloqueado\' WHERE id = ?", (usuario_id,))
-    conn.commit()
-    conn.close()
+    conn.execute("UPDATE professores SET status = 'bloqueado' WHERE id = ?", (usuario_id,)); conn.commit(); conn.close()
     return RedirectResponse("/admin/usuarios", status_code=303)
 
 
@@ -3493,7 +3291,13 @@ def listar_aplicacoes(
     aplicacoes = conn.execute(sql, params).fetchall()
 
     turmas_lista = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
-    total_geral = conn.execute("SELECT COUNT(*) AS c FROM aplicacoes").fetchone()["c"]
+    if is_admin:
+        total_geral = conn.execute("SELECT COUNT(*) AS c FROM aplicacoes").fetchone()["c"]
+    else:
+        total_geral = conn.execute(
+            "SELECT COUNT(*) AS c FROM aplicacoes WHERE (criada_por_professor_id = ? OR criada_por_professor_id IS NULL)",
+            (prof["id"],)
+        ).fetchone()["c"]
     conn.close()
 
     # Filtros
@@ -3732,7 +3536,7 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/analise" class="btn">📈 Análise pedagógica</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/exportar" class="btn">📊 Exportar Planilha Excel</a>'
     if apl["aberta"]:
-        acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/encerrar" style="margin:0;" onsubmit="return confirm(\'Encerrar esta aplicação? Novos envios serão bloqueados.\')"><button type="submit" class="btn" style="color:var(--red); border-color:var(--red);">🔒 Encerrar aplicação</button></form>'
+        acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/encerrar" style="margin:0;" onsubmit="return confirm(\'Encerrar esta aplicação?\')"><button type="submit" class="btn" style="color:var(--red); border-color:var(--red);">🔒 Encerrar aplicação</button></form>'
     else:
         acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/reabrir" style="margin:0;"><button type="submit" class="btn" style="color:var(--green); border-color:var(--green);">🔓 Reabrir aplicação</button></form>'
     acoes_btn += '</div>'
@@ -3791,8 +3595,7 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
 def encerrar_aplicacao(aplicacao_id: int):
     conn = get_db()
     conn.execute("UPDATE aplicacoes SET aberta = 0 WHERE id = ?", (aplicacao_id,))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
     return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
 
 
@@ -3800,8 +3603,7 @@ def encerrar_aplicacao(aplicacao_id: int):
 def reabrir_aplicacao(aplicacao_id: int):
     conn = get_db()
     conn.execute("UPDATE aplicacoes SET aberta = 1 WHERE id = ?", (aplicacao_id,))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
     return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
 
 
@@ -4706,7 +4508,13 @@ def form_editar_questao(id: int, request: Request):
                 <label>Disciplina<select name="disciplina_id" required>{options}</select></label>
                 <label>Ano de escolaridade<select name="ano">{anos_options}</select></label>
             </div>
-            <label>Habilidades BNCC (separadas por vírgula ou uma por linha)<textarea name="habilidades_codigos" rows="2">{habs_preset}</textarea></label>
+            <div id="bncc-container" style="margin:10px 0;">
+                <label style="margin-bottom:6px;">Habilidades BNCC <span style="font-weight:400; color:var(--text-muted); font-size:12px;">(opcional)</span></label>
+                <input type="hidden" name="habilidades_codigos" id="bncc-hidden" value="{habs_preset}">
+                <div id="bncc-chips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:24px; margin-bottom:8px;"></div>
+                <input type="search" id="bncc-search" placeholder="Digite o código (EF09MA09) ou palavra-chave (fração, célula...)" style="margin:0;">
+                <div id="bncc-results" style="margin-top:6px;"></div>
+            </div>
             {link_catalogo}
 
             <fieldset>
@@ -4913,10 +4721,10 @@ async def atualizar_questao(
     proximo_ordem_img = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM imagens WHERE questao_id = ?", (id,)).fetchone()["n"]
     for offset, (img, legenda, fonte) in enumerate([(imagem1, imagem1_legenda, imagem1_fonte), (imagem2, imagem2_legenda, imagem2_fonte)]):
         if img and img.filename:
-            ext = os.path.splitext(img.filename)[1].lower()
-            unique_name = f"{uuid.uuid4().hex}{ext}"
-            file_path = os.path.join(UPLOAD_DIR, unique_name)
             content_bytes = await img.read()
+            content_bytes = _redimensionar_imagem(content_bytes, max_width=800)
+            unique_name = f"{uuid.uuid4().hex}.jpg"
+            file_path = os.path.join(UPLOAD_DIR, unique_name)
             with open(file_path, "wb") as f:
                 f.write(content_bytes)
             conn.execute("INSERT INTO imagens (questao_id, caminho, legenda, fonte, ordem) VALUES (?, ?, ?, ?, ?)",
@@ -7429,8 +7237,7 @@ def _extrair_imagens_de_arquivo(file_bytes: bytes, filename: str) -> list:
 
 @app.post("/aplicacoes/{aplicacao_id}/escanear-lote", response_class=HTMLResponse)
 async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile] = File(...)):
-    """Recebe N fotos ou PDF multipágina, processa cada uma, mostra tela de revisão com grid de cards.
-    O salvamento é feito num único submit do form de confirmação."""
+    """Recebe N fotos ou PDF multipágina, processa cada uma, mostra tela de revisão com grid de cards."""
     if not fotos:
         return HTMLResponse(render_page("Erro", '<div class="empty"><p>Nenhum arquivo enviado.</p></div>', active="aplicacoes"))
 
@@ -7451,7 +7258,6 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
     n_questoes = len(questoes)
     questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
 
-    # Expandir arquivos: imagens ficam como estão, PDFs viram N imagens (uma por página)
     arquivos_expandidos = []
     for foto in fotos:
         raw = await foto.read()
@@ -7471,8 +7277,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
             n_erro += 1
             if (nome_exib or "").lower().endswith(".pdf"):
                 cards_html_parts.append(_render_card_erro(idx, nome_exib,
-                    "PDF recebido mas 'pdf2image' não está instalado no servidor. "
-                    "Execute: pip install pdf2image --break-system-packages"))
+                    "PDF recebido mas 'pdf2image' não está instalado. Execute: pip install pdf2image --break-system-packages"))
             else:
                 cards_html_parts.append(_render_card_erro(idx, nome_exib, "Arquivo vazio."))
             continue
@@ -7508,7 +7313,6 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
             "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
             (aplicacao_id, result["aluno_id"])
         ).fetchone()
-
         duplicata_lote = result["aluno_id"] in alunos_ja_no_lote
         alunos_ja_no_lote.add(result["aluno_id"])
 
