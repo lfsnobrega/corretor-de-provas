@@ -876,6 +876,23 @@ def format_data_br(iso_str):
         return iso_str
 
 
+def _preview_enunciado(enunciado: str, max_chars: int = 160) -> str:
+    """Gera texto limpo para preview: remove tags HTML, entidades e notação MathJax."""
+    import re as _re, html as _html
+    # Remove blocos MathJax: \(...\) e \[...\] e $...$ e $$...$$
+    texto = _re.sub(r'\\\\\([^)]*\\\\\)', '[fórmula]', enunciado)
+    texto = _re.sub(r'\\\\\[[^\]]*\\\\\]', '[fórmula]', texto)
+    texto = _re.sub(r'\$\$[^$]*\$\$', '[fórmula]', texto)
+    texto = _re.sub(r'\$[^$]*\$', '[fórmula]', texto)
+    # Remove tags HTML
+    texto = _re.sub(r'<[^>]+>', '', texto)
+    # Decodifica entidades HTML (&nbsp; → espaço, &amp; → &, etc.)
+    texto = _html.unescape(texto)
+    # Normaliza espaços
+    texto = ' '.join(texto.split())
+    return _html.escape(texto[:max_chars]) + ("..." if len(texto) > max_chars else "")
+
+
 def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False, pode_editar=True, autor_nome=None):
     """
     pode_editar: se False, esconde botões Editar/Excluir mesmo com mostrar_acoes=True.
@@ -980,8 +997,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
     if compact:
         # IMPORTANTE: strip de tags HTML antes do slice. Cortar HTML em 160 chars pode
         # deixar uma tag aberta (ex: <p style="..."> sem </p>), quebrando o layout.
-        preview_text = re.sub(r'<[^>]+>', '', q["enunciado"])
-        preview = html.escape(preview_text[:160]) + ("..." if len(preview_text) > 160 else "")
+        preview = _preview_enunciado(q["enunciado"], max_chars=160)
         habs_inline = ""
         if habilidades:
             habs_inline = " " + "".join(f'<span class="badge" style="font-size:10px;">{h["codigo"]}</span>' for h in habilidades)
@@ -2208,7 +2224,7 @@ def _render_picker_questoes(conn, selected_ids=None):
             "disciplina": q["disciplina_nome"],
             "ano": q["ano"] if q["ano"] else "",
             "enunciado": q["enunciado"],
-            "preview": q["enunciado"][:120] + ("..." if len(q["enunciado"]) > 120 else ""),
+            "preview": _preview_enunciado(q["enunciado"], max_chars=120),
             "bnccs": bncc_map.get(q["id"], []),
         }
         for q in questoes_db
@@ -4959,7 +4975,7 @@ def analise_aplicacao(aplicacao_id: int):
         stats = _estatisticas_questao(conn, aplicacao_id, q["id"], alunos_entregues)
         stats["questao_id"] = q["id"]
         stats["numero"] = idx
-        preview = q["enunciado"][:120]
+        preview = _preview_enunciado(q["enunciado"], max_chars=120)
         if len(q["enunciado"]) > 120:
             preview += "..."
         stats["enunciado_preview"] = preview
@@ -5499,7 +5515,7 @@ def comparativo_prova(prova_id: int):
         col_aplicacoes = "".join(f'<th style="text-align:center; padding:8px; font-size:12px; min-width:110px;">{ad["turma_nome"]}</th>' for ad in aplicacoes_dados)
         rows = ""
         for idx, q in enumerate(questoes, start=1):
-            preview = q["enunciado"][:60]
+            preview = _preview_enunciado(q["enunciado"], max_chars=60)
             if len(q["enunciado"]) > 60:
                 preview += "..."
             cells = ""
