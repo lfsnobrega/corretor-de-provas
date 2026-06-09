@@ -228,7 +228,7 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         if (num === null) return;
                         const den = prompt('Denominador da fração:');
                         if (den === null) return;
-                        document.execCommand('insertHTML', false, '\\(\\frac{{' + num + '}}{{' + den + '}}\\)');
+                        document.execCommand('insertHTML', false, '\\(' + '\\frac{' + num + '}{' + den + '}' + '\\)');
                         sync();
                         if (window.MathJax) MathJax.typesetPromise([editor]);
                     }});
@@ -680,7 +680,7 @@ def logout():
 
 MATHJAX = """
 <script>
-window.MathJax = { tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }, svg: { fontCache: 'global' } };
+window.MathJax = { tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] }, svg: { fontCache: 'global' }, options: { skipHtmlTags: ['script','noscript','style','textarea','pre'] } };
 </script>
 <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 """
@@ -880,10 +880,10 @@ def _preview_enunciado(enunciado: str, max_chars: int = 160) -> str:
     """Gera texto limpo para preview: remove tags HTML, entidades e notação MathJax."""
     import re as _re, html as _html
     # Remove blocos MathJax: \(...\) e \[...\] e $...$ e $$...$$
-    texto = _re.sub(r'\\\\\([^)]*\\\\\)', '[fórmula]', enunciado)
-    texto = _re.sub(r'\\\\\[[^\]]*\\\\\]', '[fórmula]', texto)
-    texto = _re.sub(r'\$\$[^$]*\$\$', '[fórmula]', texto)
-    texto = _re.sub(r'\$[^$]*\$', '[fórmula]', texto)
+    texto = _re.sub(r'\\\(.*?\\\)', '[fórmula]', enunciado, flags=_re.DOTALL)
+    texto = _re.sub(r'\\\[.*?\\\]', '[fórmula]', texto, flags=_re.DOTALL)
+    texto = _re.sub(r'\$\$.*?\$\$', '[fórmula]', texto, flags=_re.DOTALL)
+    texto = _re.sub(r'\$[^$\n]+\$', '[fórmula]', texto)
     # Remove tags HTML
     texto = _re.sub(r'<[^>]+>', '', texto)
     # Decodifica entidades HTML (&nbsp; → espaço, &amp; → &, etc.)
@@ -7680,4 +7680,6 @@ async def confirmar_lote(aplicacao_id: int, request: Request):
             <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">📷 Escanear mais</a>
         </div>
     """
-    return render_page("Lote salvo", content, active="aplicacoes")
+    return render_page("Lote salvo", content, active="aplicacoes")git add main.py
+git commit -m "Fix: MathJax config + botão fração — delimitadores \\( \\) e escape correto"
+git push
