@@ -393,10 +393,14 @@ def init_db():
     cols_a = {row[1] for row in conn.execute("PRAGMA table_info(aplicacoes)").fetchall()}
     if "criada_por_professor_id" not in cols_a:
         conn.execute("ALTER TABLE aplicacoes ADD COLUMN criada_por_professor_id INTEGER")
-    # Perfil gestor em professores
+    # Perfil gestor e status em professores
     cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
     if "is_gestor" not in cols_prof:
         conn.execute("ALTER TABLE professores ADD COLUMN is_gestor INTEGER NOT NULL DEFAULT 0")
+    if "status" not in cols_prof:
+        conn.execute("ALTER TABLE professores ADD COLUMN status TEXT NOT NULL DEFAULT 'ativo'")
+        # Todos os professores já existentes ficam ativos
+        conn.execute("UPDATE professores SET status = 'ativo' WHERE status IS NULL OR status = ''")
     conn.commit()
     conn.close()
 
@@ -434,12 +438,12 @@ def get_current_professor(request: Request) -> Optional[dict]:
         return None
     return {
         "id": prof["id"], "email": prof["email"], "nome": prof["nome"],
-        "foto_url": prof["foto_url"], "is_admin": bool(prof["is_admin"]), "is_gestor": bool(prof["is_gestor"] if "is_gestor" in prof.keys() else 0),
+        "foto_url": prof["foto_url"], "is_admin": bool(prof["is_admin"]), "is_gestor": bool(prof["is_gestor"] if "is_gestor" in prof.keys() else 0), "status": (prof["status"] if "status" in prof.keys() else "ativo"),
     }
 
 
 # Rotas públicas (sem login)
-PUBLIC_PATHS = {"/login", "/auth/google", "/auth/google/callback", "/auth/dev-login", "/logout"}
+PUBLIC_PATHS = {"/login", "/auth/google", "/auth/google/callback", "/auth/dev-login", "/logout", "/acesso-pendente", "/acesso-bloqueado"}
 PUBLIC_PREFIXES = ("/static/", "/responder/")
 
 
@@ -452,6 +456,12 @@ async def auth_middleware(request: Request, call_next):
     if not prof:
         from_url = path + ("?" + request.url.query if request.url.query else "")
         return RedirectResponse(f"/login?next={urllib.parse.quote(from_url)}", status_code=303)
+    # Verificar status do professor
+    status_prof = prof.get("status", "ativo")
+    if status_prof == "pendente" and path != "/acesso-pendente":
+        return RedirectResponse("/acesso-pendente", status_code=303)
+    if status_prof == "bloqueado" and path != "/acesso-bloqueado":
+        return RedirectResponse("/acesso-bloqueado", status_code=303)
     request.state.professor = prof
     token = _current_prof_ctx.set(prof)
     try:
@@ -461,7 +471,11 @@ async def auth_middleware(request: Request, call_next):
 
 
 def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> dict:
-    """Cria ou atualiza professor. O PRIMEIRO professor cadastrado vira admin automaticamente."""
+    """Cria ou atualiza professor.
+    - Primeiro professor vira admin ativo automaticamente.
+    - Novos professores entram como 'pendente' aguardando aprovação do admin.
+    - Retorna dict com campo 'status' para o middleware verificar acesso.
+    """
     conn = get_db()
     existing = conn.execute("SELECT * FROM professores WHERE email = ?", (email,)).fetchone()
     if existing:
@@ -469,15 +483,21 @@ def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> 
                      (nome, foto_url, existing["id"]))
         prof_id = existing["id"]
         is_admin = bool(existing["is_admin"])
+        is_gestor = bool(existing["is_gestor"] if "is_gestor" in existing.keys() else 0)
+        status = existing["status"] if "status" in existing.keys() else "ativo"
     else:
         total = conn.execute("SELECT COUNT(*) AS c FROM professores").fetchone()["c"]
         is_admin_val = 1 if total == 0 else 0
+        # Primeiro professor = admin ativo; demais = pendente
+        status_val = "ativo" if is_admin_val == 1 else "pendente"
         c = conn.execute(
-            "INSERT INTO professores (email, nome, foto_url, is_admin, ultimo_acesso) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            (email, nome, foto_url, is_admin_val)
+            "INSERT INTO professores (email, nome, foto_url, is_admin, is_gestor, status, ultimo_acesso) VALUES (?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)",
+            (email, nome, foto_url, is_admin_val, status_val)
         )
         prof_id = c.lastrowid
         is_admin = bool(is_admin_val)
+        is_gestor = False
+        status = status_val
         # Se é o primeiro professor (admin), herda dados legados sem dono
         if is_admin_val == 1:
             conn.execute("UPDATE provas SET criada_por_professor_id = ? WHERE criada_por_professor_id IS NULL", (prof_id,))
@@ -485,7 +505,7 @@ def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> 
             conn.execute("UPDATE questoes SET criada_por_professor_id = ? WHERE criada_por_professor_id IS NULL", (prof_id,))
     conn.commit()
     conn.close()
-    return {"id": prof_id, "email": email, "nome": nome, "is_admin": is_admin}
+    return {"id": prof_id, "email": email, "nome": nome, "is_admin": is_admin, "is_gestor": is_gestor, "status": status}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -3242,6 +3262,46 @@ def minhas_aplicacoes(
 #  ADMIN: GERENCIAMENTO DE USUÁRIOS
 # ==========================================
 
+
+
+@app.get("/acesso-pendente", response_class=HTMLResponse)
+def acesso_pendente(request: Request):
+    prof = get_current_professor(request)
+    nome = prof["nome"] if prof else "Professor"
+    content = f"""
+        <div style="max-width:480px; margin:80px auto; text-align:center; padding:0 20px;">
+            <div style="font-size:56px; margin-bottom:16px;">⏳</div>
+            <h1 style="font-size:22px; margin-bottom:8px;">Acesso aguardando aprovação</h1>
+            <p style="color:var(--text-muted); margin-bottom:24px;">
+                Olá, <strong>{nome}</strong>! Seu cadastro foi recebido e está aguardando
+                aprovação da gestão escolar. Você receberá acesso em breve.
+            </p>
+            <p style="font-size:13px; color:var(--text-muted);">
+                Se precisar de acesso urgente, entre em contato com o administrador do sistema.
+            </p>
+            <a href="/logout" class="btn" style="margin-top:24px;">Sair</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Acesso pendente", content, active=""))
+
+
+@app.get("/acesso-bloqueado", response_class=HTMLResponse)
+def acesso_bloqueado(request: Request):
+    prof = get_current_professor(request)
+    nome = prof["nome"] if prof else "Professor"
+    content = f"""
+        <div style="max-width:480px; margin:80px auto; text-align:center; padding:0 20px;">
+            <div style="font-size:56px; margin-bottom:16px;">🚫</div>
+            <h1 style="font-size:22px; margin-bottom:8px;">Acesso bloqueado</h1>
+            <p style="color:var(--text-muted); margin-bottom:24px;">
+                Olá, <strong>{nome}</strong>. Seu acesso ao sistema foi bloqueado.
+                Entre em contato com o administrador para mais informações.
+            </p>
+            <a href="/logout" class="btn" style="margin-top:24px;">Sair</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Acesso bloqueado", content, active=""))
+
 @app.get("/admin/usuarios", response_class=HTMLResponse)
 def admin_usuarios(request: Request):
     prof = _current_prof_ctx.get()
@@ -3251,27 +3311,46 @@ def admin_usuarios(request: Request):
             active=""), status_code=403)
     conn = get_db()
     usuarios = conn.execute(
-        "SELECT id, email, nome, is_admin, is_gestor, criado_em, ultimo_acesso FROM professores ORDER BY nome"
+        "SELECT id, email, nome, is_admin, is_gestor, status, criado_em, ultimo_acesso FROM professores ORDER BY CASE COALESCE(status,\'ativo\') WHEN \'pendente\' THEN 0 WHEN \'ativo\' THEN 1 ELSE 2 END, nome"
     ).fetchall()
     conn.close()
 
+    pendentes = [u for u in usuarios if (u["status"] if "status" in u.keys() else "ativo") == "pendente"]
+    alerta_pendentes = ""
+    if pendentes:
+        alerta_pendentes = f'''<div style="background:var(--orange-bg); border:1px solid var(--orange); border-radius:8px; padding:12px 16px; margin-bottom:18px; display:flex; align-items:center; gap:10px;">
+            <span style="font-size:20px;">⏳</span>
+            <span><strong>{len(pendentes)} professor{"es" if len(pendentes) > 1 else ""} aguardando aprovação.</strong> Revise abaixo e aprove ou bloqueie o acesso.</span>
+        </div>'''
+
     rows = ""
     for u in usuarios:
+        u_status = u["status"] if "status" in u.keys() else "ativo"
         perfil = []
         if u["is_admin"]: perfil.append('<span style="background:var(--purple,#7c3aed); color:white; font-size:10px; padding:1px 6px; border-radius:3px;">ADMIN</span>')
         if u["is_gestor"]: perfil.append('<span style="background:var(--accent); color:white; font-size:10px; padding:1px 6px; border-radius:3px;">GESTOR</span>')
-        if not perfil: perfil.append('<span style="background:var(--bg-subtle); color:var(--text-muted); font-size:10px; padding:1px 6px; border-radius:3px;">PROFESSOR</span>')
+        if u_status == "pendente": perfil.append('<span style="background:var(--orange-bg); color:var(--orange); font-size:10px; padding:1px 6px; border-radius:3px; border:1px solid var(--orange);">PENDENTE</span>')
+        elif u_status == "bloqueado": perfil.append('<span style="background:var(--red-bg); color:var(--red); font-size:10px; padding:1px 6px; border-radius:3px;">BLOQUEADO</span>')
+        elif not u["is_admin"] and not u["is_gestor"]: perfil.append('<span style="background:var(--bg-subtle); color:var(--text-muted); font-size:10px; padding:1px 6px; border-radius:3px;">PROFESSOR</span>')
         acesso = (u["ultimo_acesso"] or "")[:16].replace("T", " ")
         is_eu = u["id"] == prof["id"]
         acoes = ""
         if not is_eu:
-            novo_gestor = 0 if u["is_gestor"] else 1
-            label_gestor = "Remover gestor" if u["is_gestor"] else "Tornar gestor"
-            acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-gestor" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px;">{label_gestor}</button></form>'
-            if not u["is_admin"]:
-                acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-admin" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">Tornar admin</button></form>'
+            if u_status == "pendente":
+                acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Aprovar</button></form>'
+                acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/bloquear" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">🚫 Bloquear</button></form>'
+            else:
+                label_gestor = "Remover gestor" if u["is_gestor"] else "Tornar gestor"
+                acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-gestor" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px;">{label_gestor}</button></form>'
+                if not u["is_admin"]:
+                    acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/toggle-admin" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">Tornar admin</button></form>'
+                if u_status == "ativo":
+                    acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/bloquear" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--red); border-color:var(--red);">🚫 Bloquear</button></form>'
+                elif u_status == "bloqueado":
+                    acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Desbloquear</button></form>'
+        row_bg = ' style="background:var(--orange-bg);"' if u_status == "pendente" else ""
         rows += f"""
-            <tr>
+            <tr{row_bg}>
                 <td style="padding:10px 8px;">{u["nome"]}{"&nbsp;<em style=\'font-size:11px; color:var(--text-muted);\'>( você)</em>" if is_eu else ""}</td>
                 <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{u["email"]}</td>
                 <td style="padding:10px 8px;">{" ".join(perfil)}</td>
@@ -3285,17 +3364,19 @@ def admin_usuarios(request: Request):
             <h1>👤 Gerenciamento de usuários</h1>
             <p class="subtitle">Gerencie perfis de acesso dos usuários do sistema</p>
         </div>
+        {alerta_pendentes}
         <div class="tip" style="margin-bottom:18px;">
-            <strong>Perfis:</strong> <strong>Admin</strong> — acesso total ao sistema.
-            <strong>Gestor</strong> — acessa o painel de gestão, pode aprovar/devolver provas e editar qualquer prova.
+            <strong>Perfis:</strong> <strong>Admin</strong> — acesso total.
+            <strong>Gestor</strong> — aprova/devolve provas.
             <strong>Professor</strong> — acesso padrão.
+            Novos usuários entram como <strong>Pendente</strong> até você aprovar.
         </div>
         <table style="width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; border:1px solid var(--border);">
             <thead>
                 <tr style="background:var(--bg-subtle); font-size:12px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted);">
                     <th style="padding:10px 8px; text-align:left;">Nome</th>
                     <th style="padding:10px 8px; text-align:left;">E-mail</th>
-                    <th style="padding:10px 8px; text-align:left;">Perfil</th>
+                    <th style="padding:10px 8px; text-align:left;">Perfil / Status</th>
                     <th style="padding:10px 8px; text-align:left;">Último acesso</th>
                     <th style="padding:10px 8px; text-align:left;">Ações</th>
                 </tr>
@@ -3330,6 +3411,30 @@ def toggle_admin(usuario_id: int):
     if atual:
         conn.execute("UPDATE professores SET is_admin = ? WHERE id = ?", (0 if atual["is_admin"] else 1, usuario_id))
         conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/usuarios", status_code=303)
+
+
+@app.post("/admin/usuarios/{usuario_id}/aprovar")
+def aprovar_usuario(usuario_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE professores SET status = \'ativo\' WHERE id = ?", (usuario_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/usuarios", status_code=303)
+
+
+@app.post("/admin/usuarios/{usuario_id}/bloquear")
+def bloquear_usuario(usuario_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE professores SET status = \'bloqueado\' WHERE id = ?", (usuario_id,))
+    conn.commit()
     conn.close()
     return RedirectResponse("/admin/usuarios", status_code=303)
 
