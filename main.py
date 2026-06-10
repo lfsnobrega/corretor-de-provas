@@ -2039,7 +2039,76 @@ async def criar_questao(
 
     conn.commit()
     conn.close()
-    return RedirectResponse("/questoes", status_code=303)
+
+    # Buscar provas do professor para o atalho "Adicionar a uma atividade"
+    conn2 = get_db()
+    provas_recentes = conn2.execute(
+        "SELECT id, titulo FROM provas WHERE criada_por_professor_id = ? ORDER BY id DESC LIMIT 8",
+        (prof["id"],)
+    ).fetchall()
+    conn2.close()
+
+    opts_provas = "".join(
+        f'<option value="{p["id"]}">{p["titulo"]}</option>'
+        for p in provas_recentes
+    )
+    form_adicionar = f"""
+        <form method="post" action="/questoes/{questao_id}/adicionar-a-prova" style="margin:0;">
+            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                <label style="margin:0; flex:1; min-width:180px;">
+                    Escolha a atividade
+                    <select name="prova_id" required>
+                        <option value="">— selecione —</option>
+                        {opts_provas}
+                    </select>
+                </label>
+                <button type="submit" class="btn btn-primary" style="margin:0;">Adicionar →</button>
+            </div>
+        </form>
+    """ if provas_recentes else '<p style="color:var(--text-muted); font-size:13px; margin:0;">Você ainda não tem atividades criadas. <a href="/provas/nova">Criar uma agora →</a></p>'
+
+    content_html = f"""
+        <div style="max-width:560px; margin:60px auto; text-align:center; padding:0 20px;">
+            <div style="font-size:52px; margin-bottom:12px;">✅</div>
+            <h1 style="font-size:22px; margin-bottom:6px;">Questão salva!</h1>
+            <p style="color:var(--text-muted); margin-bottom:32px;">O que deseja fazer agora?</p>
+            <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-bottom:32px;">
+                <a href="/questoes/nova" class="btn btn-primary">✏️ Criar outra questão</a>
+                <a href="/questoes" class="btn">📚 Ver banco de questões</a>
+                <a href="/provas/nova" class="btn">📝 Criar nova atividade</a>
+            </div>
+            <div style="background:var(--bg-subtle); border:1px solid var(--border); border-radius:10px; padding:18px; text-align:left;">
+                <p style="font-weight:600; font-size:13px; margin:0 0 10px 0;">➕ Adicionar esta questão a uma atividade existente:</p>
+                {form_adicionar}
+            </div>
+        </div>
+    """
+    return HTMLResponse(render_page("Questão salva", content_html, active="questoes"))
+
+
+@app.post("/questoes/{questao_id}/adicionar-a-prova", response_class=HTMLResponse)
+def adicionar_questao_a_prova(questao_id: int, prova_id: int = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    # Verificar se questão já está na prova
+    ja_existe = conn.execute(
+        "SELECT id FROM prova_questoes WHERE prova_id = ? AND questao_id = ?",
+        (prova_id, questao_id)
+    ).fetchone()
+    if not ja_existe:
+        max_ordem = conn.execute(
+            "SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM prova_questoes WHERE prova_id = ?",
+            (prova_id,)
+        ).fetchone()["n"]
+        conn.execute(
+            "INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?, ?, ?)",
+            (prova_id, questao_id, max_ordem)
+        )
+        conn.commit()
+    conn.close()
+    return RedirectResponse(f"/provas/{prova_id}", status_code=303)
 
 
 # ==========================================
@@ -2408,7 +2477,56 @@ def criar_prova(request: Request, titulo: str = Form(...), descricao: str = Form
         conn.execute("INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?, ?, ?)", (prova_id, qid, ordem))
     conn.commit()
     conn.close()
-    return RedirectResponse(f"/provas/{prova_id}", status_code=303)
+
+    # Buscar turmas para o atalho "Aplicar agora"
+    conn2 = get_db()
+    turmas = conn2.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    conn2.close()
+
+    turmas_opts = "".join(
+        f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>'
+        for t in turmas
+    )
+    form_aplicar = f"""
+        <form method="post" action="/aplicacoes/nova" style="margin:0;">
+            <input type="hidden" name="prova_id" value="{prova_id}">
+            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                <label style="margin:0; flex:1; min-width:180px;">
+                    Turma
+                    <select name="turma_id" required>
+                        <option value="">— selecione —</option>
+                        {turmas_opts}
+                    </select>
+                </label>
+                <label style="margin:0;">
+                    Modo
+                    <select name="modo">
+                        <option value="impressa">📄 Impressa</option>
+                        <option value="online">📱 Online</option>
+                    </select>
+                </label>
+                <button type="submit" class="btn btn-primary" style="margin:0;">Aplicar →</button>
+            </div>
+        </form>
+    """ if turmas else '<p style="color:var(--text-muted); font-size:13px; margin:0;">Nenhuma turma cadastrada ainda. <a href="/turmas/nova">Cadastrar turma →</a></p>'
+
+    content_html = f"""
+        <div style="max-width:560px; margin:60px auto; text-align:center; padding:0 20px;">
+            <div style="font-size:52px; margin-bottom:12px;">🎉</div>
+            <h1 style="font-size:22px; margin-bottom:6px;">Atividade criada!</h1>
+            <p style="color:var(--text-muted); margin-bottom:32px;">O que deseja fazer agora?</p>
+            <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-bottom:32px;">
+                <a href="/provas/{prova_id}" class="btn btn-primary">👁️ Ver atividade</a>
+                <a href="/provas/nova" class="btn">📝 Criar outra atividade</a>
+                <a href="/questoes/nova" class="btn">✏️ Criar questão</a>
+            </div>
+            <div style="background:var(--bg-subtle); border:1px solid var(--border); border-radius:10px; padding:18px; text-align:left;">
+                <p style="font-weight:600; font-size:13px; margin:0 0 10px 0;">🚀 Aplicar agora:</p>
+                {form_aplicar}
+            </div>
+        </div>
+    """
+    return HTMLResponse(render_page("Atividade criada", content_html, active="provas"))
 
 
 @app.get("/provas/{prova_id}", response_class=HTMLResponse)
