@@ -5827,6 +5827,7 @@ def imprimir_prova(prova_id: int):
         * {{ box-sizing: border-box; }}
         body {{
             font-family: 'Sora', -apple-system, sans-serif;
+            font-size: 12px;
             margin: 0 auto;
             padding: 24px;
             background: white;
@@ -5834,26 +5835,26 @@ def imprimir_prova(prova_id: int):
             max-width: 21cm;
         }}
         .actions {{ margin-bottom: 24px; display: flex; gap: 8px; }}
-        .btn {{ display: inline-block; padding: 8px 16px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px; font-size: 14px; border: none; cursor: pointer; font-family: inherit; font-weight: 500; }}
+        .btn {{ display: inline-block; padding: 8px 16px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px; font-size: 13px; border: none; cursor: pointer; font-family: inherit; font-weight: 500; }}
         .btn-secondary {{ background: #6b7280; }}
         .inst-header {{ display: flex; gap: 14px; align-items: center; padding-bottom: 12px; border-bottom: 1px solid #888; margin-bottom: 20px; }}
-        .inst-header img {{ width: 60px; height: auto; flex-shrink: 0; }}
-        .inst-header .inst-text {{ font-size: 11px; color: #333; line-height: 1.5; }}
-        .inst-header .inst-text .escola {{ font-weight: 700; font-size: 13px; color: #000; }}
-        .header {{ border-bottom: 2px solid #000; padding-bottom: 14px; margin-bottom: 22px; }}
-        .header h1 {{ margin: 0; font-size: 22px; }}
-        .student-info {{ display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; margin-top: 16px; font-size: 11px; color:#555; }}
-        .student-info > div {{ border-bottom: 1px solid #555; padding-bottom: 8px; min-height: 28px; }}
-        .q-print {{ margin-bottom: 22px; page-break-inside: avoid; }}
-        .q-head {{ font-size: 11px; color: #555; margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }}
-        blockquote {{ border-left: 3px solid #aaa; padding: 8px 14px; margin: 10px 0; color: #333; font-style: italic; background: #fafafa; }}
-        blockquote footer {{ font-size: 10px; margin-top: 6px; font-style: normal; }}
-        figure {{ margin: 10px 0; }}
-        figure img {{ max-width: 100%; max-height: 250px; }}
-        figcaption {{ font-size: 10px; color: #666; margin-top: 2px; }}
-        .q-enunciado {{ margin: 8px 0 10px; line-height: 1.5; }}
-        .q-alts {{ list-style: none; padding-left: 8px; margin: 8px 0; }}
-        .q-alts li {{ padding: 4px 0; line-height: 1.5; }}
+        .inst-header img {{ width: 56px; height: auto; flex-shrink: 0; }}
+        .inst-header .inst-text {{ font-size: 10px; color: #333; line-height: 1.5; }}
+        .inst-header .inst-text .escola {{ font-weight: 700; font-size: 12px; color: #000; }}
+        .header {{ border-bottom: 2px solid #000; padding-bottom: 12px; margin-bottom: 18px; }}
+        .header h1 {{ margin: 0; font-size: 18px; }}
+        .student-info {{ display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; margin-top: 14px; font-size: 10px; color:#555; }}
+        .student-info > div {{ border-bottom: 1px solid #555; padding-bottom: 6px; min-height: 24px; }}
+        .q-print {{ margin-bottom: 18px; page-break-inside: avoid; }}
+        .q-head {{ font-size: 10px; color: #555; margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }}
+        blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 8px 0; color: #333; font-style: italic; background: #fafafa; font-size: 11px; }}
+        blockquote footer {{ font-size: 9px; margin-top: 4px; font-style: normal; }}
+        figure {{ margin: 8px 0; }}
+        figure img {{ max-width: 100%; max-height: 220px; }}
+        figcaption {{ font-size: 9px; color: #666; margin-top: 2px; }}
+        .q-enunciado {{ margin: 6px 0 8px; line-height: 1.5; }}
+        .q-alts {{ list-style: none; padding-left: 8px; margin: 6px 0; }}
+        .q-alts li {{ padding: 3px 0; line-height: 1.5; }}
         @media print {{
             @page {{ size: A4; margin: 1.5cm; }}
             body {{ padding: 0; max-width: 100%; }}
