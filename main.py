@@ -1906,13 +1906,13 @@ def form_nova_questao_passo2(
             <input type="hidden" name="tipo" value="{h_tipo}">
 
             <style>
-                .coll-sec{border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;font-style:normal;}
-                .coll-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg-subtle);cursor:pointer;user-select:none;font-size:12px;font-weight:600;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;font-style:normal;}
-                .coll-hdr:hover{background:var(--border);}
-                .coll-arrow{font-size:11px;transition:transform 0.2s;font-style:normal;}
-                .coll-body{padding:14px;display:none;font-style:normal;}
-                .coll-sec.open .coll-body{display:block;}
-                .coll-sec.open .coll-arrow{transform:rotate(180deg);}
+                .coll-sec{{border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;font-style:normal;}}
+                .coll-hdr{{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg-subtle);cursor:pointer;user-select:none;font-size:12px;font-weight:600;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;font-style:normal;}}
+                .coll-hdr:hover{{background:var(--border);}}
+                .coll-arrow{{font-size:11px;transition:transform 0.2s;font-style:normal;}}
+                .coll-body{{padding:14px;display:none;font-style:normal;}}
+                .coll-sec.open .coll-body{{display:block;}}
+                .coll-sec.open .coll-arrow{{transform:rotate(180deg);}}
             </style>
             <script>function toggleColl(el){{el.closest('.coll-sec').classList.toggle('open');}}</script>
 
