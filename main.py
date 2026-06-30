@@ -253,9 +253,9 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
             {"" if not detectar_alternativas else """
             // ===== Detector de alternativas ao colar =====
             function detectarAlternativas(texto) {
-                texto = texto.replace(/\\r\\n/g, '\\n').replace(/\\u00A0/g, ' ').trim();
-                // Padrão: início do texto OU quebra de linha, espaços, (opcional, letra A-D, )/./:, espaço
-                const padrao = /(?:^|\\n)[ \\t]*\\(?([A-Da-d])[\\)\\.\\:][ \\t]+/g;
+                texto = texto.replace(/\r\n/g, '\n').replace(/\u00A0/g, ' ').trim();
+                // Padrão expandido: cobre A) A. A: A- A, a) a. a: a- a, (A) (a) com ou sem espaço após separador
+                const padrao = /(?:^|\n)[ \t]*\(?([A-Da-d])\)?[ \t]*[-\)\.\:,][ \t]*/g;
                 const matches = [...texto.matchAll(padrao)];
                 let idxA = -1, idxB = -1, idxC = -1, idxD = -1;
                 for (const m of matches) {
@@ -269,7 +269,8 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                 if (idxA === -1 || idxB === -1 || idxC === -1 || idxD === -1) return null;
                 const enunciado = texto.slice(0, idxA).trim();
                 function extrair(start, end) {
-                    return texto.slice(start, end).replace(/^\\n?[ \\t]*\\(?[A-Da-d][\\)\\.\\:][ \\t]+/, '').trim();
+                    // Remove o prefixo da alternativa (ex: "A) ", "a- ", "(A) ", etc.)
+                    return texto.slice(start, end).replace(/^\n?[ \t]*\(?[A-Da-d]\)?[ \t]*[-\)\.\:,][ \t]*/, '').trim();
                 }
                 return {
                     enunciado,
