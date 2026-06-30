@@ -155,8 +155,9 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
     )
     bot_limpar = f'<button type="button" data-cmd="removeFormat" title="Limpar formatação" style="{btn_style} color:var(--text-muted);">⌫ limpar</button>'
     bot_fracao = f'<button type="button" class="btn-insert-frac" title="Inserir fração" style="{btn_style}">½ fração</button>'
+    bot_potencia = f'<button type="button" class="btn-insert-pot" title="Inserir potência (xⁿ)" style="{btn_style}">x&sup2; potência</button>'
 
-    toolbar_buttons = bot_basicos + sep + bot_fracao + sep + bot_limpar if compact else bot_basicos + sep + bot_extra + bot_fracao + sep + bot_limpar
+    toolbar_buttons = bot_basicos + sep + bot_fracao + bot_potencia + sep + bot_limpar if compact else bot_basicos + sep + bot_extra + bot_fracao + bot_potencia + sep + bot_limpar
 
     placeholder_attr = f' data-placeholder="{_html.escape(placeholder, quote=True)}"' if placeholder else ""
 
@@ -228,7 +229,21 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         if (num === null) return;
                         const den = prompt('Denominador da fração:');
                         if (den === null) return;
-                        document.execCommand('insertHTML', false, '$\\frac{' + num + '}{' + den + '}$');
+                        document.execCommand('insertHTML', false, '$\\\\frac{{' + num + '}}{{' + den + '}}$');
+                        sync();
+                        if (window.MathJax) MathJax.typesetPromise([editor]);
+                    }});
+                }}
+                const btnPot = toolbar.querySelector('.btn-insert-pot');
+                if (btnPot) {{
+                    btnPot.addEventListener('click', e => {{
+                        e.preventDefault();
+                        editor.focus();
+                        const base = prompt('Base (ex: 2, x, 2x):');
+                        if (base === null) return;
+                        const exp = prompt('Expoente (ex: 2, 3, n):');
+                        if (exp === null) return;
+                        document.execCommand('insertHTML', false, '$' + base + '^{{' + exp + '}}$');
                         sync();
                         if (window.MathJax) MathJax.typesetPromise([editor]);
                     }});
