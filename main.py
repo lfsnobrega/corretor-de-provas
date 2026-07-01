@@ -103,12 +103,30 @@ def _sanitizar_html_enunciado(html: str) -> str:
     html = _re.sub(r'\son[a-z]+\s*=\s*[^\s>]+', '', html, flags=_re.IGNORECASE)
     html = _re.sub(r'(href|src)\s*=\s*["\']?\s*javascript:[^"\'>\s]*["\']?', '', html, flags=_re.IGNORECASE)
     # Whitelist de tags - remove qualquer tag que não esteja na lista
-    permitidas = {"strong", "b", "em", "i", "u", "br", "p", "div", "span", "ul", "ol", "li", "blockquote"}
+    permitidas = {"strong", "b", "em", "i", "u", "br", "p", "div", "span", "ul", "ol", "li", "blockquote",
+                   "table", "thead", "tbody", "tr", "th", "td", "img", "figure", "figcaption"}
     def _filtrar_tag(m):
         tag_full = m.group(0)
         tag_name = m.group(1).lower()
         if tag_name not in permitidas:
             return ""
+        # img: mantém src e alt, remove outros atributos perigosos
+        if tag_name == "img":
+            src = _re.search(r'src\s*=\s*["\']([^"\'>]+)["\']', tag_full)
+            if not src: return ""
+            alt = _re.search(r'alt\s*=\s*["\']([^"\'>]*)["\' ]', tag_full)
+            alt_val = alt.group(1) if alt else ""
+            return f'<img src="{src.group(1)}" alt="{alt_val}" style="max-width:100%; height:auto;">'
+        # table/th/td: mantém style de bordas
+        if tag_name in ("table", "th", "td"):
+            style = _re.search(r'style\s*=\s*["\']([^"\'>]+)["\' ]', tag_full)
+            style_attr = f' style="{style.group(1)}"' if style else ""
+            if tag_full.startswith("</"): return f"</{tag_name}>"
+            return f'<{tag_name}{style_attr}>'
+        # thead/tbody/tr/figure/figcaption: sem atributos
+        if tag_name in ("thead", "tbody", "tr", "figure", "figcaption"):
+            if tag_full.startswith("</"): return f"</{tag_name}>"
+            return f"<{tag_name}>"
         # Para div/span/p, mantém só style com text-align
         if tag_name in ("div", "span", "p"):
             ta_match = _re.search(r'style\s*=\s*["\']([^"\']*text-align\s*:\s*(left|center|right|justify)[^"\']*)["\']', tag_full, _re.IGNORECASE)
@@ -170,7 +188,28 @@ _JS_DETECTAR_ALTS = r"""
             }
             editor.addEventListener("paste", function(e) {
                 var cb = e.clipboardData || window.clipboardData;
-                var texto = cb ? (cb.getData("text/plain") || "") : "";
+                if (!cb) return;
+                var items = cb.items ? Array.from(cb.items) : [];
+                var imgItem = items.find(function(it) { return it.type.startsWith("image/"); });
+                if (imgItem) {
+                    e.preventDefault();
+                    var blob = imgItem.getAsFile();
+                    if (!blob) return;
+                    var fd = new FormData();
+                    fd.append("arquivo", blob, "imagem_colada.png");
+                    fetch("/upload-imagem-inline", { method: "POST", body: fd })
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            if (data.url) {
+                                document.execCommand("insertHTML", false,
+                                    "<img src=\"" + data.url + "\" style=\"max-width:100%; height:auto; display:block; margin:4px 0;\" alt=\"\">");
+                                sync();
+                            }
+                        })
+                        .catch(function() { alert("Erro ao fazer upload da imagem."); });
+                    return;
+                }
+                var texto = cb.getData("text/plain") || "";
                 if (!texto) return;
                 e.preventDefault();
                 aplicarAlternativas(texto);
@@ -208,10 +247,11 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
         f'{sep}'
     )
     bot_limpar = f'<button type="button" data-cmd="removeFormat" title="Limpar formatação" style="{btn_style} color:var(--text-muted);">⌫ limpar</button>'
-    bot_fracao = f'<button type="button" class="btn-insert-frac" title="Inserir fração" style="{btn_style}">½ fração</button>'
-    bot_potencia = f'<button type="button" class="btn-insert-pot" title="Inserir potência (xⁿ)" style="{btn_style}">x&sup2; potência</button>'
+    bot_fracao = f'<button type="button" class="btn-insert-frac" title="Inserir fração como $\\frac{{num}}{{den}}$" style="{btn_style}">½ fração</button>'
+    bot_potencia = f'<button type="button" class="btn-insert-pot" title="Inserir potência como $base^{{exp}}$" style="{btn_style}">x² potência</button>'
+    bot_tabela = f'<button type="button" class="btn-insert-tab" title="Inserir tabela" style="{btn_style}">⊞ tabela</button>'
 
-    toolbar_buttons = bot_basicos + sep + bot_fracao + bot_potencia + sep + bot_limpar if compact else bot_basicos + sep + bot_extra + bot_fracao + bot_potencia + sep + bot_limpar
+    toolbar_buttons = bot_basicos + sep + bot_fracao + bot_potencia + bot_tabela + sep + bot_limpar if compact else bot_basicos + sep + bot_extra + bot_fracao + bot_potencia + bot_tabela + sep + bot_limpar
 
     placeholder_attr = f' data-placeholder="{_html.escape(placeholder, quote=True)}"' if placeholder else ""
 
@@ -283,9 +323,8 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         if (num === null) return;
                         const den = prompt('Denominador da fração:');
                         if (den === null) return;
-                        document.execCommand('insertHTML', false, '$\\\\frac{{' + num + '}}{{' + den + '}}$');
+                        document.execCommand('insertText', false, '$\\frac{{' + num + '}}{{' + den + '}}$');
                         sync();
-                        if (window.MathJax) MathJax.typesetPromise([editor]);
                     }});
                 }}
                 const btnPot = toolbar.querySelector('.btn-insert-pot');
@@ -297,14 +336,66 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         if (base === null) return;
                         const exp = prompt('Expoente (ex: 2, 3, n):');
                         if (exp === null) return;
-                        document.execCommand('insertHTML', false, '$' + base + '^{{' + exp + '}}$');
+                        document.execCommand('insertText', false, '$' + base + '^{{' + exp + '}}$');
                         sync();
-                        if (window.MathJax) MathJax.typesetPromise([editor]);
+                    }});
+                }}
+                const btnTab = toolbar.querySelector('.btn-insert-tab');
+                if (btnTab) {{
+                    btnTab.addEventListener('click', e => {{
+                        e.preventDefault();
+                        editor.focus();
+                        const linhas = parseInt(prompt('Número de linhas:', '3'));
+                        if (!linhas || linhas < 1) return;
+                        const cols = parseInt(prompt('Número de colunas:', '3'));
+                        if (!cols || cols < 1) return;
+                        let html = '<table style="border-collapse:collapse; width:100%; margin:8px 0;">';
+                        // Cabeçalho
+                        html += '<thead><tr>';
+                        for (let c = 0; c < cols; c++) {{
+                            html += '<th style="border:1px solid #999; padding:6px 10px; background:#f0f0f0; font-weight:600;">Col ' + (c+1) + '</th>';
+                        }}
+                        html += '</tr></thead><tbody>';
+                        // Linhas de dados
+                        for (let r = 0; r < linhas - 1; r++) {{
+                            html += '<tr>';
+                            for (let c = 0; c < cols; c++) {{
+                                html += '<td style="border:1px solid #999; padding:6px 10px;" contenteditable="true">&nbsp;</td>';
+                            }}
+                            html += '</tr>';
+                        }}
+                        html += '</tbody></table><p></p>';
+                        document.execCommand('insertHTML', false, html);
+                        sync();
                     }});
                 }}
             }}
 
             {_JS_DETECTAR_ALTS if detectar_alternativas else ""}
+
+            // Paste de imagem (todos os campos, incluindo alternativas)
+            editor.addEventListener('paste', function(e) {{
+                var cb = e.clipboardData || window.clipboardData;
+                if (!cb) return;
+                var items = cb.items ? Array.from(cb.items) : [];
+                var imgItem = items.find(function(it) {{ return it.type.startsWith('image/'); }});
+                if (!imgItem) return;  // texto é tratado pelo handler acima (se existir) ou pelo browser
+                e.preventDefault();
+                var blob = imgItem.getAsFile();
+                if (!blob) return;
+                var fd = new FormData();
+                fd.append('arquivo', blob, 'imagem_colada.png');
+                fetch('/upload-imagem-inline', {{ method: 'POST', body: fd }})
+                    .then(function(r) {{ return r.json(); }})
+                    .then(function(data) {{
+                        if (data.url) {{
+                            document.execCommand('insertHTML', false,
+                                '<img src="' + data.url + '" style="max-width:100%; height:auto; display:block; margin:4px 0;" alt="">');
+                            sync();
+                        }}
+                    }})
+                    .catch(function() {{ alert('Erro ao fazer upload da imagem.'); }});
+            }}, true);  // capture=true para rodar antes do handler de texto
         }})();
         </script>
     """
@@ -1569,6 +1660,23 @@ def atualizar_habilidade(id: int, descricao: str = Form("")):
     conn.commit()
     conn.close()
     return RedirectResponse("/habilidades", status_code=303)
+
+
+
+@app.post("/upload-imagem-inline")
+async def upload_imagem_inline(arquivo: UploadFile = File(...)):
+    """Endpoint para upload de imagem colada nas alternativas. Retorna o caminho público."""
+    try:
+        data = await arquivo.read()
+        data = _redimensionar_imagem(data, max_width=600)
+        unique_name = f"{uuid.uuid4().hex}.jpg"
+        file_path = os.path.join(UPLOAD_DIR, unique_name)
+        with open(file_path, "wb") as f:
+            f.write(data)
+        return {"url": f"/static/imagens/{unique_name}"}
+    except Exception as e:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"erro": str(e)}, status_code=500)
 
 
 @app.get("/questoes", response_class=HTMLResponse)
@@ -5812,6 +5920,9 @@ def imprimir_prova(prova_id: int):
         .q-enunciado {{ margin: 6px 0 8px; line-height: 1.5; }}
         .q-alts {{ list-style: none; padding-left: 8px; margin: 6px 0; }}
         .q-alts li {{ padding: 3px 0; line-height: 1.5; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 11px; }}
+        th, td {{ border: 1px solid #999; padding: 5px 8px; text-align: left; }}
+        th {{ background: #f0f0f0; font-weight: 600; }}
         @media print {{
             @page {{ size: A4; margin: 1.5cm; }}
             body {{ padding: 0; max-width: 100%; }}
