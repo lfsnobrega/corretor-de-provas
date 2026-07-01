@@ -323,7 +323,20 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         if (num === null) return;
                         const den = prompt('Denominador da fração:');
                         if (den === null) return;
-                        document.execCommand('insertText', false, '$\\frac{{' + num + '}}{{' + den + '}}$');
+                        var txt = '$\\frac{' + num + '}{' + den + '}$';
+                        var sel = window.getSelection();
+                        if (sel && sel.rangeCount) {{
+                            var range = sel.getRangeAt(0);
+                            range.deleteContents();
+                            var node = document.createTextNode(txt);
+                            range.insertNode(node);
+                            range.setStartAfter(node);
+                            range.collapse(true);
+                            sel.removeAllRanges();
+                            sel.addRange(range);
+                        }} else {{
+                            document.execCommand('insertText', false, txt);
+                        }}
                         sync();
                     }});
                 }}
@@ -336,7 +349,20 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         if (base === null) return;
                         const exp = prompt('Expoente (ex: 2, 3, n):');
                         if (exp === null) return;
-                        document.execCommand('insertText', false, '$' + base + '^{{' + exp + '}}$');
+                        var txt2 = '$' + base + '^{' + exp + '}$';
+                        var sel2 = window.getSelection();
+                        if (sel2 && sel2.rangeCount) {{
+                            var range2 = sel2.getRangeAt(0);
+                            range2.deleteContents();
+                            var node2 = document.createTextNode(txt2);
+                            range2.insertNode(node2);
+                            range2.setStartAfter(node2);
+                            range2.collapse(true);
+                            sel2.removeAllRanges();
+                            sel2.addRange(range2);
+                        }} else {{
+                            document.execCommand('insertText', false, txt2);
+                        }}
                         sync();
                     }});
                 }}
