@@ -283,39 +283,60 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                 };
             }
 
-            editor.addEventListener('paste', (e) => {
-                const cb = e.clipboardData || window.clipboardData;
-                if (!cb) return;
-                const texto = cb.getData('text/plain') || '';
-                if (!texto) return;
+            function aplicarAlternativas(texto) {
                 const r = detectarAlternativas(texto);
-                if (!r) return;  // cola normal
-                e.preventDefault();
-                const trunc = s => (s.length > 50 ? s.slice(0, 50) + '...' : s);
-                const msg = 'Detectei 4 alternativas no que você colou. Aplicar automaticamente?\\n\\n'
-                          + 'Enunciado: ' + trunc(r.enunciado) + '\\n'
-                          + 'A) ' + trunc(r.alternativas[0]) + '\\n'
-                          + 'B) ' + trunc(r.alternativas[1]) + '\\n'
-                          + 'C) ' + trunc(r.alternativas[2]) + '\\n'
-                          + 'D) ' + trunc(r.alternativas[3]) + '\\n\\n'
-                          + 'Atenção: substitui o conteúdo atual dos 5 campos.';
+                if (!r) {
+                    // Sem alternativas detectadas — cola o texto normalmente
+                    document.execCommand('insertText', false, texto);
+                    return;
+                }
+                const trunc = s => (s.length > 60 ? s.slice(0, 60) + '...' : s);
+                const msg = 'Detectei 4 alternativas no texto colado. Aplicar automaticamente?\n\n'
+                          + (r.enunciado ? 'Enunciado: ' + trunc(r.enunciado) + '\n' : '(sem enunciado)\n')
+                          + 'A) ' + trunc(r.alternativas[0]) + '\n'
+                          + 'B) ' + trunc(r.alternativas[1]) + '\n'
+                          + 'C) ' + trunc(r.alternativas[2]) + '\n'
+                          + 'D) ' + trunc(r.alternativas[3]) + '\n\n'
+                          + 'Atenção: substitui o conteúdo atual dos campos.';
                 if (!confirm(msg)) {
                     document.execCommand('insertText', false, texto);
                     return;
                 }
-                // Aplica: enunciado limpo + 4 alternativas
-                editor.innerHTML = r.enunciado.replace(/\\n/g, '<br>');
+                // Aplica enunciado
+                editor.innerHTML = r.enunciado ? r.enunciado.replace(/\n/g, '<br>') : '';
                 hidden.value = editor.innerHTML;
                 refreshPlaceholder();
+                // Aplica alternativas
                 ['a','b','c','d'].forEach((letra, i) => {
                     const altEd = document.querySelector('.editor-content[data-target="alt_' + letra + '"]');
                     const altHid = document.getElementById('alt_' + letra + '_hidden');
                     if (altEd && altHid) {
-                        altEd.innerHTML = r.alternativas[i].replace(/\\n/g, '<br>');
+                        altEd.innerHTML = r.alternativas[i].replace(/\n/g, '<br>');
                         altHid.value = altEd.innerHTML;
                         altEd.removeAttribute('data-ph-shown');
                     }
                 });
+            }
+
+            editor.addEventListener('paste', (e) => {
+                // Sempre previne o comportamento padrão para controlar o que é colado
+                e.preventDefault();
+                // Tenta ler o texto do clipboard event (funciona com Ctrl+V e botão direito)
+                const cb = e.clipboardData || window.clipboardData;
+                const textoEvento = cb ? (cb.getData('text/plain') || '') : '';
+                if (textoEvento) {
+                    aplicarAlternativas(textoEvento);
+                    return;
+                }
+                // Fallback: API assíncrona (necessária em alguns browsers com Ctrl+V)
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    navigator.clipboard.readText().then(texto => {
+                        if (texto) aplicarAlternativas(texto);
+                    }).catch(() => {
+                        // Permissão negada — cola sem processar via execCommand
+                        document.execCommand('paste');
+                    });
+                }
             });
             """}
         }})();
