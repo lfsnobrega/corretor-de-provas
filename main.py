@@ -123,6 +123,60 @@ def _sanitizar_html_enunciado(html: str) -> str:
     return html.strip()
 
 
+
+_JS_DETECTAR_ALTS = r"""
+            function detectarAlternativas(texto) {
+                texto = texto.replace(/\r\n/g, '\n').replace(/\u00A0/g, ' ').trim();
+                var padrao = /(?:^|\n)[ \t]*[(]?([A-Da-d])[)]?[ \t]*[-).,:][ \t]*/g;
+                var matches = Array.from(texto.matchAll(padrao));
+                var idxA=-1, idxB=-1, idxC=-1, idxD=-1;
+                for (var mi=0; mi<matches.length; mi++) {
+                    var letra = matches[mi][1].toUpperCase();
+                    var pos = matches[mi].index;
+                    if (letra==='A' && idxA===-1) idxA=pos;
+                    else if (letra==='B' && idxB===-1 && idxA!==-1 && pos>idxA) idxB=pos;
+                    else if (letra==='C' && idxC===-1 && idxB!==-1 && pos>idxB) idxC=pos;
+                    else if (letra==='D' && idxD===-1 && idxC!==-1 && pos>idxC) idxD=pos;
+                }
+                if (idxA===-1 || idxB===-1 || idxC===-1 || idxD===-1) return null;
+                var enunciado = texto.slice(0, idxA).trim();
+                function ext(s,e) { return texto.slice(s,e).replace(/^\n?[ \t]*[(]?[A-Da-d][)]?[ \t]*[-).,:][ \t]*/, "").trim(); }
+                return { enunciado:enunciado, alternativas:[ext(idxA,idxB),ext(idxB,idxC),ext(idxC,idxD),ext(idxD,texto.length)] };
+            }
+            function aplicarAlternativas(texto) {
+                var r = detectarAlternativas(texto);
+                if (!r) { document.execCommand("insertText", false, texto); return; }
+                var trunc = function(s) { return s.length > 60 ? s.slice(0,60)+"..." : s; };
+                var nl = "\n";
+                var msg = "Detectei 4 alternativas. Aplicar automaticamente?" + nl + nl
+                        + (r.enunciado ? "Enunciado: " + trunc(r.enunciado) + nl : "")
+                        + "A) " + trunc(r.alternativas[0]) + nl
+                        + "B) " + trunc(r.alternativas[1]) + nl
+                        + "C) " + trunc(r.alternativas[2]) + nl
+                        + "D) " + trunc(r.alternativas[3]);
+                if (!confirm(msg)) { document.execCommand("insertText", false, texto); return; }
+                editor.innerHTML = r.enunciado ? r.enunciado.replace(/\n/g, "<br>") : "";
+                hidden.value = editor.innerHTML;
+                refreshPlaceholder();
+                ["a","b","c","d"].forEach(function(letra, idx) {
+                    var altEd = document.querySelector(".editor-content[data-target=\"alt_"+letra+"\"]");
+                    var altHid = document.getElementById("alt_"+letra+"_hidden");
+                    if (altEd && altHid) {
+                        altEd.innerHTML = r.alternativas[idx].replace(/\n/g, "<br>");
+                        altHid.value = altEd.innerHTML;
+                        altEd.removeAttribute("data-ph-shown");
+                    }
+                });
+            }
+            editor.addEventListener("paste", function(e) {
+                var cb = e.clipboardData || window.clipboardData;
+                var texto = cb ? (cb.getData("text/plain") || "") : "";
+                if (!texto) return;
+                e.preventDefault();
+                aplicarAlternativas(texto);
+            });
+"""
+
 def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", required: bool = True,
                             label: str = "Enunciado", compact: bool = False, min_height: int = 120,
                             placeholder: str = "", detectar_alternativas: bool = False) -> str:
@@ -250,98 +304,7 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                 }}
             }}
 
-            {"" if not detectar_alternativas else """
-            // ===== Detector de alternativas ao colar =====
-            function detectarAlternativas(texto) {
-                texto = texto.replace(/\r\n/g, '\n').replace(/\u00A0/g, ' ').trim();
-                var padrao = /(?:^|\n)[ \t]*[(]?([A-Da-d])[)]?[ \t]*[-).,:][\t ]*/g;
-                var matches = Array.from(texto.matchAll(padrao));
-                var idxA = -1, idxB = -1, idxC = -1, idxD = -1;
-                for (var mi = 0; mi < matches.length; mi++) {
-                    var letra = matches[mi][1].toUpperCase();
-                    var pos = matches[mi].index;
-                    if (letra === 'A' && idxA === -1) idxA = pos;
-                    else if (letra === 'B' && idxB === -1 && idxA !== -1 && pos > idxA) idxB = pos;
-                    else if (letra === 'C' && idxC === -1 && idxB !== -1 && pos > idxB) idxC = pos;
-                    else if (letra === 'D' && idxD === -1 && idxC !== -1 && pos > idxC) idxD = pos;
-                }
-                if (idxA === -1 || idxB === -1 || idxC === -1 || idxD === -1) return null;
-                var enunciado = texto.slice(0, idxA).trim();
-                function extrair(start, end) {
-                    return texto.slice(start, end).replace(/^\n?[ \t]*[(]?[A-Da-d][)]?[ \t]*[-).,:][\t ]*/, '').trim();
-                }
-                return {
-                    enunciado: enunciado,
-                    alternativas: [
-                        extrair(idxA, idxB),
-                        extrair(idxB, idxC),
-                        extrair(idxC, idxD),
-                        extrair(idxD, texto.length)
-                    ]
-                };
-            }
-                if (idxA === -1 || idxB === -1 || idxC === -1 || idxD === -1) return null;
-                const enunciado = texto.slice(0, idxA).trim();
-                function extrair(start, end) {
-                    // Remove o prefixo da alternativa (ex: "A) ", "a- ", "(A) ", etc.)
-                    return texto.slice(start, end).replace(/^\n?[ \t]*\(?[A-Da-d]\)?[ \t]*[-\)\.\:,][ \t]*/, '').trim();
-                }
-                return {
-                    enunciado,
-                    alternativas: [
-                        extrair(idxA, idxB),
-                        extrair(idxB, idxC),
-                        extrair(idxC, idxD),
-                        extrair(idxD, texto.length),
-                    ]
-                };
-            }
-
-            function aplicarAlternativas(texto) {
-                const r = detectarAlternativas(texto);
-                if (!r) {
-                    // Sem alternativas detectadas — cola o texto normalmente
-                    document.execCommand('insertText', false, texto);
-                    return;
-                }
-                const trunc = s => (s.length > 60 ? s.slice(0, 60) + '...' : s);
-                const msg = 'Detectei 4 alternativas no texto colado. Aplicar automaticamente?\n\n'
-                          + (r.enunciado ? 'Enunciado: ' + trunc(r.enunciado) + '\n' : '(sem enunciado)\n')
-                          + 'A) ' + trunc(r.alternativas[0]) + '\n'
-                          + 'B) ' + trunc(r.alternativas[1]) + '\n'
-                          + 'C) ' + trunc(r.alternativas[2]) + '\n'
-                          + 'D) ' + trunc(r.alternativas[3]) + '\n\n'
-                          + 'Atenção: substitui o conteúdo atual dos campos.';
-                if (!confirm(msg)) {
-                    document.execCommand('insertText', false, texto);
-                    return;
-                }
-                // Aplica enunciado
-                editor.innerHTML = r.enunciado ? r.enunciado.replace(/\n/g, '<br>') : '';
-                hidden.value = editor.innerHTML;
-                refreshPlaceholder();
-                // Aplica alternativas
-                ['a','b','c','d'].forEach((letra, i) => {
-                    const altEd = document.querySelector('.editor-content[data-target="alt_' + letra + '"]');
-                    const altHid = document.getElementById('alt_' + letra + '_hidden');
-                    if (altEd && altHid) {
-                        altEd.innerHTML = r.alternativas[i].replace(/\n/g, '<br>');
-                        altHid.value = altEd.innerHTML;
-                        altEd.removeAttribute('data-ph-shown');
-                    }
-                });
-            }
-
-            editor.addEventListener('paste', (e) => {
-                // Lê o texto do clipboard ANTES de preventDefault
-                const cb = e.clipboardData || window.clipboardData;
-                const texto = cb ? (cb.getData('text/plain') || '') : '';
-                // Só intercepta se tiver texto para processar
-                if (!texto) return;
-                e.preventDefault();
-                aplicarAlternativas(texto);
-            });
-            """}
+            {_JS_DETECTAR_ALTS if detectar_alternativas else ""}
         }})();
         </script>
     """
