@@ -779,6 +779,15 @@ window.MathJax = {
   svg: { fontCache: 'global' },
   options: {
     skipHtmlTags: ['script','noscript','style','textarea','pre','code']
+  },
+  startup: {
+    ready: function() {
+      MathJax.startup.defaultReady();
+      // Após carregar, re-processa elementos visíveis (ignora display:none)
+      var visíveis = Array.from(document.querySelectorAll('.questao-card-preview'))
+                         .filter(function(el) { return el.offsetParent !== null; });
+      if (visíveis.length) MathJax.typesetPromise(visíveis);
+    }
   }
 };
 </script>
@@ -1815,8 +1824,10 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
         if (detalhes.style.display === 'none' || !detalhes.style.display) {
             detalhes.style.display = 'block';
             btn.textContent = 'Recolher ▴';
-            if (window.MathJax && MathJax.typesetPromise) {
-                MathJax.typesetPromise([detalhes]);
+            if (window.MathJax) {
+                // Limpa o estado anterior para forçar re-renderização
+                if (MathJax.typesetClear) MathJax.typesetClear([detalhes]);
+                if (MathJax.typesetPromise) MathJax.typesetPromise([detalhes]);
             }
         } else {
             detalhes.style.display = 'none';
