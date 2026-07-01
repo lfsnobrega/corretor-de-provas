@@ -319,24 +319,13 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
             }
 
             editor.addEventListener('paste', (e) => {
-                // Sempre previne o comportamento padrão para controlar o que é colado
-                e.preventDefault();
-                // Tenta ler o texto do clipboard event (funciona com Ctrl+V e botão direito)
+                // Lê o texto do clipboard ANTES de preventDefault
                 const cb = e.clipboardData || window.clipboardData;
-                const textoEvento = cb ? (cb.getData('text/plain') || '') : '';
-                if (textoEvento) {
-                    aplicarAlternativas(textoEvento);
-                    return;
-                }
-                // Fallback: API assíncrona (necessária em alguns browsers com Ctrl+V)
-                if (navigator.clipboard && navigator.clipboard.readText) {
-                    navigator.clipboard.readText().then(texto => {
-                        if (texto) aplicarAlternativas(texto);
-                    }).catch(() => {
-                        // Permissão negada — cola sem processar via execCommand
-                        document.execCommand('paste');
-                    });
-                }
+                const texto = cb ? (cb.getData('text/plain') || '') : '';
+                // Só intercepta se tiver texto para processar
+                if (!texto) return;
+                e.preventDefault();
+                aplicarAlternativas(texto);
             });
             """}
         }})();
@@ -717,9 +706,28 @@ def logout():
 
 MATHJAX = """
 <script>
-window.MathJax = { tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true }, svg: { fontCache: 'global' }, options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'], ignoreHtmlClass: 'editor-content|ed-wrap|editor-toolbar' } };
+window.MathJax = {
+  tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true },
+  svg: { fontCache: 'global' },
+  options: {
+    skipHtmlTags: ['script','noscript','style','textarea','pre','code','input','select'],
+    ignoreHtmlClass: 'editor-content',
+    processHtmlClass: 'mathjax-render'
+  },
+  startup: { typeset: false }
+};
 </script>
 <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<script>
+// Roda MathJax somente após carregar, apenas nos elementos que não são editáveis
+window.addEventListener('load', function() {
+  if (window.MathJax && MathJax.typesetPromise) {
+    // Tipografa apenas elementos fora do editor
+    const targets = document.querySelectorAll('.mathjax-render, .q-enunciado, .q-alt-text, .questao-preview');
+    if (targets.length) MathJax.typesetPromise(Array.from(targets));
+  }
+});
+</script>
 """
 
 INTER_FONT = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">'
