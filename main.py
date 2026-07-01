@@ -142,6 +142,80 @@ def _sanitizar_html_enunciado(html: str) -> str:
 
 
 
+
+_JS_MATH_BUTTONS = r"""
+            function _inserirTexto(editor, sync, txt) {
+                editor.focus();
+                var sel = window.getSelection();
+                if (sel && sel.rangeCount) {
+                    var rng = sel.getRangeAt(0);
+                    if (!editor.contains(rng.commonAncestorContainer)) {
+                        rng = document.createRange();
+                        rng.selectNodeContents(editor);
+                        rng.collapse(false);
+                    }
+                    rng.deleteContents();
+                    var node = document.createTextNode(txt);
+                    rng.insertNode(node);
+                    rng.setStartAfter(node);
+                    rng.collapse(true);
+                    sel.removeAllRanges();
+                    sel.addRange(rng);
+                } else {
+                    document.execCommand("insertText", false, txt);
+                }
+                sync();
+            }
+            var btnFrac = toolbar.querySelector(".btn-insert-frac");
+            if (btnFrac) {
+                btnFrac.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    var num = prompt("Numerador da fração:");
+                    if (num === null) return;
+                    var den = prompt("Denominador da fração:");
+                    if (den === null) return;
+                    _inserirTexto(editor, sync, "$\\frac{" + num + "}{" + den + "}$");
+                });
+            }
+            var btnPot = toolbar.querySelector(".btn-insert-pot");
+            if (btnPot) {
+                btnPot.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    var base = prompt("Base (ex: 2, x, 2x):");
+                    if (base === null) return;
+                    var expoente = prompt("Expoente (ex: 2, 3, n):");
+                    if (expoente === null) return;
+                    _inserirTexto(editor, sync, "$" + base + "^{" + expoente + "}$");
+                });
+            }
+            var btnTab = toolbar.querySelector(".btn-insert-tab");
+            if (btnTab) {
+                btnTab.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    var nlin = parseInt(prompt("Número de linhas:", "3"));
+                    if (!nlin || nlin < 1) return;
+                    var ncol = parseInt(prompt("Número de colunas:", "3"));
+                    if (!ncol || ncol < 1) return;
+                    var tbl = '<table style="border-collapse:collapse;width:100%;margin:8px 0;">';
+                    tbl += "<thead><tr>";
+                    for (var c = 0; c < ncol; c++) {
+                        tbl += '<th style="border:1px solid #999;padding:6px 10px;background:#f0f0f0;font-weight:600;">Col ' + (c+1) + "</th>";
+                    }
+                    tbl += "</tr></thead><tbody>";
+                    for (var r = 0; r < nlin - 1; r++) {
+                        tbl += "<tr>";
+                        for (var c2 = 0; c2 < ncol; c2++) {
+                            tbl += '<td style="border:1px solid #999;padding:6px 10px;">&nbsp;</td>';
+                        }
+                        tbl += "</tr>";
+                    }
+                    tbl += "</tbody></table><p></p>";
+                    document.execCommand("insertHTML", false, tbl);
+                    sync();
+                });
+            }
+"""
+
 _JS_DETECTAR_ALTS = r"""
             function detectarAlternativas(texto) {
                 texto = texto.replace(/\r\n/g, '\n').replace(/\u00A0/g, ' ').trim();
@@ -314,88 +388,8 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
                         refreshPlaceholder();
                     }});
                 }});
-                const btnFrac = toolbar.querySelector('.btn-insert-frac');
-                if (btnFrac) {{
-                    btnFrac.addEventListener('click', e => {{
-                        e.preventDefault();
-                        editor.focus();
-                        const num = prompt('Numerador da fração:');
-                        if (num === null) return;
-                        const den = prompt('Denominador da fração:');
-                        if (den === null) return;
-                        var txt = '$\\frac{' + num + '}{' + den + '}$';
-                        var sel = window.getSelection();
-                        if (sel && sel.rangeCount) {{
-                            var range = sel.getRangeAt(0);
-                            range.deleteContents();
-                            var node = document.createTextNode(txt);
-                            range.insertNode(node);
-                            range.setStartAfter(node);
-                            range.collapse(true);
-                            sel.removeAllRanges();
-                            sel.addRange(range);
-                        }} else {{
-                            document.execCommand('insertText', false, txt);
-                        }}
-                        sync();
-                    }});
-                }}
-                const btnPot = toolbar.querySelector('.btn-insert-pot');
-                if (btnPot) {{
-                    btnPot.addEventListener('click', e => {{
-                        e.preventDefault();
-                        editor.focus();
-                        const base = prompt('Base (ex: 2, x, 2x):');
-                        if (base === null) return;
-                        const exp = prompt('Expoente (ex: 2, 3, n):');
-                        if (exp === null) return;
-                        var txt2 = '$' + base + '^{' + exp + '}$';
-                        var sel2 = window.getSelection();
-                        if (sel2 && sel2.rangeCount) {{
-                            var range2 = sel2.getRangeAt(0);
-                            range2.deleteContents();
-                            var node2 = document.createTextNode(txt2);
-                            range2.insertNode(node2);
-                            range2.setStartAfter(node2);
-                            range2.collapse(true);
-                            sel2.removeAllRanges();
-                            sel2.addRange(range2);
-                        }} else {{
-                            document.execCommand('insertText', false, txt2);
-                        }}
-                        sync();
-                    }});
-                }}
-                const btnTab = toolbar.querySelector('.btn-insert-tab');
-                if (btnTab) {{
-                    btnTab.addEventListener('click', e => {{
-                        e.preventDefault();
-                        editor.focus();
-                        const linhas = parseInt(prompt('Número de linhas:', '3'));
-                        if (!linhas || linhas < 1) return;
-                        const cols = parseInt(prompt('Número de colunas:', '3'));
-                        if (!cols || cols < 1) return;
-                        let html = '<table style="border-collapse:collapse; width:100%; margin:8px 0;">';
-                        // Cabeçalho
-                        html += '<thead><tr>';
-                        for (let c = 0; c < cols; c++) {{
-                            html += '<th style="border:1px solid #999; padding:6px 10px; background:#f0f0f0; font-weight:600;">Col ' + (c+1) + '</th>';
-                        }}
-                        html += '</tr></thead><tbody>';
-                        // Linhas de dados
-                        for (let r = 0; r < linhas - 1; r++) {{
-                            html += '<tr>';
-                            for (let c = 0; c < cols; c++) {{
-                                html += '<td style="border:1px solid #999; padding:6px 10px;" contenteditable="true">&nbsp;</td>';
-                            }}
-                            html += '</tr>';
-                        }}
-                        html += '</tbody></table><p></p>';
-                        document.execCommand('insertHTML', false, html);
-                        sync();
-                    }});
-                }}
             }}
+            {_JS_MATH_BUTTONS}
 
             {_JS_DETECTAR_ALTS if detectar_alternativas else ""}
 
