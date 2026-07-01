@@ -1011,16 +1011,26 @@ def format_data_br(iso_str):
 
 
 def _preview_enunciado(enunciado: str, max_chars: int = 160) -> str:
-    """Gera texto limpo para preview: remove tags HTML, entidades e notação MathJax."""
+    """Gera texto limpo para preview: remove tags HTML e simplifica notação MathJax."""
     import re as _re, html as _html
-    # Remove blocos MathJax: \(...\) e \[...\] e $...$ e $$...$$
-    texto = _re.sub(r'\\\(.*?\\\)', '[fórmula]', enunciado, flags=_re.DOTALL)
-    texto = _re.sub(r'\\\[.*?\\\]', '[fórmula]', texto, flags=_re.DOTALL)
-    texto = _re.sub(r'\$\$.*?\$\$', '[fórmula]', texto, flags=_re.DOTALL)
-    texto = _re.sub(r'\$[^$\n]+\$', '[fórmula]', texto)
+    # Simplifica fórmulas: remove delimitadores $ mas mantém o conteúdo LaTeX legível
+    # ex: $\frac{1}{2}$ → [1/2]   $x^{2}$ → [x^2]
+    def _simplificar_formula(m):
+        inner = m.group(1).strip()
+        # Frações: \frac{a}{b} → (a/b)
+        inner = _re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1/\2)', inner)
+        # Potências: a^{b} → a^b
+        inner = _re.sub(r'\^\{([^}]+)\}', r'^\1', inner)
+        # Remove outras barras LaTeX
+        inner = _re.sub(r'\\[a-zA-Z]+', '', inner)
+        inner = inner.strip()
+        return f'[{inner}]' if inner else '[fórmula]'
+    texto = _re.sub(r'\$\$(.+?)\$\$', _simplificar_formula, enunciado, flags=_re.DOTALL)
+    texto = _re.sub(r'\$([^$\n]+)\$', _simplificar_formula, texto)
+    texto = _re.sub(r'\\\((.+?)\\\)', _simplificar_formula, texto, flags=_re.DOTALL)
     # Remove tags HTML
-    texto = _re.sub(r'<[^>]+>', '', texto)
-    # Decodifica entidades HTML (&nbsp; → espaço, &amp; → &, etc.)
+    texto = _re.sub(r'<[^>]+>', ' ', texto)
+    # Decodifica entidades HTML
     texto = _html.unescape(texto)
     # Normaliza espaços
     texto = ' '.join(texto.split())
