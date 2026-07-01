@@ -710,24 +710,27 @@ window.MathJax = {
   tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true },
   svg: { fontCache: 'global' },
   options: {
-    skipHtmlTags: ['script','noscript','style','textarea','pre','code','input','select'],
-    ignoreHtmlClass: 'editor-content',
-    processHtmlClass: 'mathjax-render'
+    skipHtmlTags: ['script','noscript','style','textarea','pre','code']
+  }
+};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+"""
+
+# Versão para páginas de EDIÇÃO: não auto-renderiza para não interferir no contenteditable
+MATHJAX_EDIT = """
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true },
+  svg: { fontCache: 'global' },
+  options: {
+    skipHtmlTags: ['script','noscript','style','textarea','pre','code'],
+    ignoreHtmlClass: 'ed-wrap'
   },
   startup: { typeset: false }
 };
 </script>
-<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-<script>
-// Roda MathJax somente após carregar, apenas nos elementos que não são editáveis
-window.addEventListener('load', function() {
-  if (window.MathJax && MathJax.typesetPromise) {
-    // Tipografa apenas elementos fora do editor
-    const targets = document.querySelectorAll('.mathjax-render, .q-enunciado, .q-alt-text, .questao-preview');
-    if (targets.length) MathJax.typesetPromise(Array.from(targets));
-  }
-});
-</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 """
 
 INTER_FONT = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">'
@@ -1997,7 +2000,7 @@ def form_nova_questao_passo2(
             </div>
         </form>
     """
-    return render_page("Nova questão · Passo 2", content, active="questoes", head_extra=MATHJAX)
+    return render_page("Nova questão · Passo 2", content, active="questoes", head_extra=MATHJAX_EDIT)
 
 
 @app.post("/questoes/criar")
@@ -2497,7 +2500,7 @@ def form_nova_prova():
         '<div class="page-actions"><button type="submit" class="btn btn-primary">Criar prova</button><a href="/provas" class="btn">Cancelar</a></div>'
         '</form>'
     )
-    return render_page("Nova prova", content, active="provas", head_extra=MATHJAX)
+    return render_page("Nova prova", content, active="provas", head_extra=MATHJAX_EDIT)
 
 
 @app.post("/provas/nova")
@@ -4724,7 +4727,7 @@ def form_editar_questao(id: int, request: Request):
             </div>
         </form>
     """
-    return render_page("Editar questão", content, active="questoes", head_extra=MATHJAX)
+    return render_page("Editar questão", content, active="questoes", head_extra=MATHJAX_EDIT)
 
 
 @app.post("/questoes/{id}/editar", response_class=HTMLResponse)
