@@ -254,18 +254,32 @@ def _editor_enunciado_html(name: str = "enunciado", valor_inicial: str = "", req
             // ===== Detector de alternativas ao colar =====
             function detectarAlternativas(texto) {
                 texto = texto.replace(/\r\n/g, '\n').replace(/\u00A0/g, ' ').trim();
-                // Padrão expandido: cobre A) A. A: A- A, a) a. a: a- a, (A) (a) com ou sem espaço após separador
-                const padrao = /(?:^|\n)[ \t]*\(?([A-Da-d])\)?[ \t]*[-\)\.\:,][ \t]*/g;
-                const matches = [...texto.matchAll(padrao)];
-                let idxA = -1, idxB = -1, idxC = -1, idxD = -1;
-                for (const m of matches) {
-                    const letra = m[1].toUpperCase();
-                    const pos = m.index;
+                var padrao = /(?:^|\n)[ \t]*[(]?([A-Da-d])[)]?[ \t]*[-).,:][\t ]*/g;
+                var matches = Array.from(texto.matchAll(padrao));
+                var idxA = -1, idxB = -1, idxC = -1, idxD = -1;
+                for (var mi = 0; mi < matches.length; mi++) {
+                    var letra = matches[mi][1].toUpperCase();
+                    var pos = matches[mi].index;
                     if (letra === 'A' && idxA === -1) idxA = pos;
                     else if (letra === 'B' && idxB === -1 && idxA !== -1 && pos > idxA) idxB = pos;
                     else if (letra === 'C' && idxC === -1 && idxB !== -1 && pos > idxB) idxC = pos;
                     else if (letra === 'D' && idxD === -1 && idxC !== -1 && pos > idxC) idxD = pos;
                 }
+                if (idxA === -1 || idxB === -1 || idxC === -1 || idxD === -1) return null;
+                var enunciado = texto.slice(0, idxA).trim();
+                function extrair(start, end) {
+                    return texto.slice(start, end).replace(/^\n?[ \t]*[(]?[A-Da-d][)]?[ \t]*[-).,:][\t ]*/, '').trim();
+                }
+                return {
+                    enunciado: enunciado,
+                    alternativas: [
+                        extrair(idxA, idxB),
+                        extrair(idxB, idxC),
+                        extrair(idxC, idxD),
+                        extrair(idxD, texto.length)
+                    ]
+                };
+            }
                 if (idxA === -1 || idxB === -1 || idxC === -1 || idxD === -1) return null;
                 const enunciado = texto.slice(0, idxA).trim();
                 function extrair(start, end) {
