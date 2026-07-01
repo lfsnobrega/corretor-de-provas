@@ -694,7 +694,8 @@ window.MathJax = {
 <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 """
 
-# Versão para páginas de EDIÇÃO: não auto-renderiza para não interferir no contenteditable
+# Versão para páginas de EDIÇÃO: não auto-renderiza nos campos editáveis,
+# mas processa os cards de questão da listagem (preview do banco)
 MATHJAX_EDIT = """
 <script>
 window.MathJax = {
@@ -704,7 +705,15 @@ window.MathJax = {
     skipHtmlTags: ['script','noscript','style','textarea','pre','code'],
     ignoreHtmlClass: 'ed-wrap'
   },
-  startup: { typeset: false }
+  startup: {
+    typeset: false,
+    ready: function() {
+      MathJax.startup.defaultReady();
+      // Renderiza cards de questão mas não os campos editáveis (.ed-wrap)
+      var targets = document.querySelectorAll('.questao-card-preview');
+      if (targets.length) MathJax.typesetPromise(Array.from(targets));
+    }
+  }
 };
 </script>
 <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
@@ -1027,7 +1036,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         if habilidades:
             habs_inline = " " + "".join(f'<span class="badge" style="font-size:10px;">{h["codigo"]}</span>' for h in habilidades)
         return (
-            f'<div class="question" style="margin-bottom:8px; padding:12px 16px;">'
+            f'<div class="question questao-card-preview" style="margin-bottom:8px; padding:12px 16px;">'
             f'<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">'
             f'<div style="flex:1; min-width:0;">'
             f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{tipo_badge}{autor_badge_inline}{habs_inline}</div>'
@@ -1046,7 +1055,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'</div>'
         )
 
-    return f'<div class="question"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
+    return f'<div class="question questao-card-preview"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1698,7 +1707,9 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
         if (detalhes.style.display === 'none' || !detalhes.style.display) {
             detalhes.style.display = 'block';
             btn.textContent = 'Recolher ▴';
-            if (window.MathJax && MathJax.typesetPromise) { MathJax.typesetPromise([detalhes]); }
+            if (window.MathJax && MathJax.typesetPromise) {
+                MathJax.typesetPromise([detalhes]);
+            }
         } else {
             detalhes.style.display = 'none';
             btn.textContent = 'Ver completa ▾';
