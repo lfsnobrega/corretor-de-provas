@@ -8749,7 +8749,11 @@ def imprimir_simulado(sim_id: int):
             """, (q["id"],)).fetchall()
             habs_html_print = ""
             if habs_print:
-                habs_html_print = f'<div style="font-size:9px;color:#888;margin-top:4px;">{" · ".join(h["codigo"] for h in habs_print)}</div>'
+                badges = "".join(
+                    f'<span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:9px;font-weight:600;padding:1px 6px;border-radius:3px;margin:1px 2px 1px 0;">{h["codigo"]}</span>'
+                    for h in habs_print
+                )
+                habs_html_print = f'<div style="margin-top:4px;">{badges}</div>'
             questoes_html += f"""
             <div class="q-sim">
                 <div class="q-num">{num_global}.</div>
@@ -9122,8 +9126,11 @@ def preview_simulado(sim_id: int):
             """, (q["id"],)).fetchall()
             habs_html = ""
             if habs:
-                codigos = " · ".join(h["codigo"] for h in habs)
-                habs_html = f'<div style="font-size:10px;color:#888;margin-top:6px;">📚 {codigos}</div>'
+                badges = "".join(
+                    f'<span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;margin:1px 2px 1px 0;">{h["codigo"]}</span>'
+                    for h in habs
+                )
+                habs_html = f'<div style="margin-top:6px;">{badges}</div>'
             questoes_html += f"""
             <div style="margin-bottom:16px; padding:12px; border:1px solid #eee; border-radius:6px; page-break-inside:avoid;">
                 <div style="font-weight:700; color:#2563eb; margin-bottom:6px;">Q{num_global}.</div>
