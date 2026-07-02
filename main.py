@@ -8741,6 +8741,15 @@ def imprimir_simulado(sim_id: int):
                 f'<figure><img src="/{img["caminho"]}" alt=""><figcaption>{img["legenda"] or ""}</figcaption></figure>'
                 for img in imgs
             )
+            # Habilidades BNCC
+            habs_print = conn.execute("""
+                SELECT h.codigo FROM questao_habilidades qh
+                JOIN habilidades h ON h.id = qh.habilidade_id
+                WHERE qh.questao_id = ? ORDER BY h.codigo
+            """, (q["id"],)).fetchall()
+            habs_html_print = ""
+            if habs_print:
+                habs_html_print = f'<div style="font-size:9px;color:#888;margin-top:4px;">{" · ".join(h["codigo"] for h in habs_print)}</div>'
             questoes_html += f"""
             <div class="q-sim">
                 <div class="q-num">{num_global}.</div>
@@ -8748,6 +8757,7 @@ def imprimir_simulado(sim_id: int):
                     {textos_html}{imgs_html}
                     <div class="q-enunciado">{q['enunciado']}</div>
                     <div class="q-alts">{alts_html}</div>
+                    {habs_html_print}
                 </div>
             </div>"""
 
@@ -9084,11 +9094,43 @@ def preview_simulado(sim_id: int):
                 f'<div style="padding:2px 0;{"font-weight:700;color:green;" if a["correta"] else ""}"><strong>{a["letra"]})</strong> {a["texto"]}</div>'
                 for a in alts
             )
+            # Textos de apoio
+            textos = conn.execute(
+                "SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            textos_html = ""
+            for t in textos:
+                textos_html += f'<blockquote style="border-left:3px solid #aaa;padding:6px 12px;margin:0 0 8px;color:#333;font-style:italic;font-size:12px;background:#fafafa;">{t["conteudo"]}'
+                if t["fonte"]:
+                    textos_html += f'<footer style="font-size:10px;font-style:normal;margin-top:3px;">{t["fonte"]}</footer>'
+                textos_html += "</blockquote>"
+            # Imagens
+            imgs = conn.execute(
+                "SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            imgs_html = "".join(
+                f'<figure style="margin:8px 0;"><img src="/{img["caminho"]}" style="max-width:100%;max-height:180px;" alt=""><figcaption style="font-size:10px;color:#666;">{img["legenda"] or ""}</figcaption></figure>'
+                for img in imgs
+            )
+            # Habilidades BNCC
+            habs = conn.execute("""
+                SELECT h.codigo FROM questao_habilidades qh
+                JOIN habilidades h ON h.id = qh.habilidade_id
+                WHERE qh.questao_id = ? ORDER BY h.codigo
+            """, (q["id"],)).fetchall()
+            habs_html = ""
+            if habs:
+                codigos = " · ".join(h["codigo"] for h in habs)
+                habs_html = f'<div style="font-size:10px;color:#888;margin-top:6px;">📚 {codigos}</div>'
             questoes_html += f"""
             <div style="margin-bottom:16px; padding:12px; border:1px solid #eee; border-radius:6px; page-break-inside:avoid;">
                 <div style="font-weight:700; color:#2563eb; margin-bottom:6px;">Q{num_global}.</div>
+                {textos_html}{imgs_html}
                 <div style="margin-bottom:8px; line-height:1.5;">{q['enunciado']}</div>
                 <div style="padding-left:12px;">{alts_html}</div>
+                {habs_html}
             </div>"""
 
         n_q = len(questoes)
