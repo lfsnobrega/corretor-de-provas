@@ -8744,7 +8744,7 @@ def imprimir_simulado(sim_id: int):
             # Habilidades BNCC
             habs_print = conn.execute("""
                 SELECT h.codigo FROM questao_habilidades qh
-                JOIN habilidades h ON h.id = qh.habilidade_id
+                JOIN habilidades_bncc h ON h.id = qh.habilidade_id
                 WHERE qh.questao_id = ? ORDER BY h.codigo
             """, (q["id"],)).fetchall()
             habs_html_print = ""
@@ -9117,7 +9117,7 @@ def preview_simulado(sim_id: int):
             # Habilidades BNCC
             habs = conn.execute("""
                 SELECT h.codigo FROM questao_habilidades qh
-                JOIN habilidades h ON h.id = qh.habilidade_id
+                JOIN habilidades_bncc h ON h.id = qh.habilidade_id
                 WHERE qh.questao_id = ? ORDER BY h.codigo
             """, (q["id"],)).fetchall()
             habs_html = ""
