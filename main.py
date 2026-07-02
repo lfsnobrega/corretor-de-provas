@@ -7973,15 +7973,16 @@ def listar_simulados(request: Request):
             ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
         """).fetchall()
     else:
+        # Professores veem simulados abertos (podem contribuir) + os que criaram
         simulados = conn.execute("""
             SELECT s.*,
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
             FROM simulados s
-            WHERE s.id IN (SELECT simulado_id FROM simulado_blocos WHERE professor_id = ?)
+            WHERE s.status IN ('aberto', 'publicado')
                OR s.criado_por_professor_id = ?
             ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
-        """, (prof["id"], prof["id"])).fetchall()
+        """, (prof["id"],)).fetchall()
     conn.close()
 
     btn_novo = '<a href="/simulados/novo" class="btn btn-primary">+ Novo simulado</a>' if is_admin else ""
@@ -8037,31 +8038,24 @@ def form_novo_simulado(request: Request):
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/simulados", status_code=303)
     conn = get_db()
-    turmas = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
-    professores = conn.execute("SELECT id, nome FROM professores WHERE status = 'ativo' ORDER BY nome").fetchall()
     conn.close()
 
-    turmas_opts = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+
     disc_opts = "".join(f'<option value="{d["id"]}">{d["nome"]}</option>' for d in disciplinas)
-    prof_opts = '<option value="">— nenhum —</option>' + "".join(f'<option value="{p["id"]}">{p["nome"]}</option>' for p in professores)
 
     blocos_html = ""
     for i in range(1, 5):
         blocos_html += f"""
         <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--bg-subtle);">
             <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">Bloco {i}</div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-                <label style="margin:0;">Disciplina
-                    <select name="bloco_{i}_disciplina_id" required>
-                        <option value="">— selecione —</option>
-                        {disc_opts}
-                    </select>
-                </label>
-                <label style="margin:0;">Professor responsável
-                    <select name="bloco_{i}_professor_id">{prof_opts}</select>
-                </label>
-            </div>
+            <div style="color:var(--text-muted); font-size:12px; margin-bottom:8px;">Aberto para todos os professores desta disciplina</div>
+            <label style="margin:0;">Disciplina
+                <select name="bloco_{i}_disciplina_id" required>
+                    <option value="">— selecione —</option>
+                    {disc_opts}
+                </select>
+            </label>
         </div>"""
 
     import datetime
@@ -8111,10 +8105,10 @@ def form_novo_simulado(request: Request):
 def criar_simulado(
     nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
     ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
-    bloco_1_disciplina_id: int = Form(...), bloco_1_professor_id: str = Form(""),
-    bloco_2_disciplina_id: int = Form(...), bloco_2_professor_id: str = Form(""),
-    bloco_3_disciplina_id: int = Form(...), bloco_3_professor_id: str = Form(""),
-    bloco_4_disciplina_id: int = Form(...), bloco_4_professor_id: str = Form(""),
+    bloco_1_disciplina_id: int = Form(...),
+    bloco_2_disciplina_id: int = Form(...),
+    bloco_3_disciplina_id: int = Form(...),
+    bloco_4_disciplina_id: int = Form(...),
 ):
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
@@ -8127,17 +8121,15 @@ def criar_simulado(
     )
     sim_id = cur.lastrowid
     blocos = [
-        (bloco_1_disciplina_id, bloco_1_professor_id),
-        (bloco_2_disciplina_id, bloco_2_professor_id),
-        (bloco_3_disciplina_id, bloco_3_professor_id),
-        (bloco_4_disciplina_id, bloco_4_professor_id),
+        bloco_1_disciplina_id,
+        bloco_2_disciplina_id,
+        bloco_3_disciplina_id,
+        bloco_4_disciplina_id,
     ]
-    for i, (disc_id, p_id) in enumerate(blocos, start=1):
-        pid = int(p_id) if p_id else None
-        status_b = "em_contribuicao" if pid else "aguardando"
+    for i, disc_id in enumerate(blocos, start=1):
         conn.execute(
             "INSERT INTO simulado_blocos (simulado_id, numero, disciplina_id, professor_id, status) VALUES (?,?,?,?,?)",
-            (sim_id, i, disc_id, pid, status_b)
+            (sim_id, i, disc_id, None, "em_contribuicao")
         )
     conn.commit()
     conn.close()
@@ -8191,8 +8183,9 @@ def ver_simulado(sim_id: int):
 
         # Botão de ação por perfil
         btn_bloco = ""
-        eh_responsavel = b["professor_id"] == prof["id"]
-        if eh_responsavel and b["status"] == "em_contribuicao":
+        # Qualquer professor pode contribuir para o bloco da sua disciplina
+        pode_contribuir = sim["status"] == "aberto" and b["status"] in ("em_contribuicao", "completo")
+        if pode_contribuir and not is_admin:
             btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">✏️ Contribuir</a>'
         elif is_admin:
             btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn" style="font-size:12px; padding:5px 12px;">⚙️ Gerenciar</a>'
@@ -8205,7 +8198,7 @@ def ver_simulado(sim_id: int):
                 <div>
                     <div style="font-weight:700; font-size:14px;">Bloco {b['numero']} — {b['disciplina_nome']}</div>
                     <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
-                        Prof: {b['professor_nome'] or '— não atribuído —'} · {n_add}/{n_tot} questões
+                        Aberto para professores de {b['disciplina_nome']} · {n_add}/{n_tot} questões
                     </div>
                 </div>
                 <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -8309,9 +8302,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     # Banco de questões disponíveis (filtrado por disciplina do bloco)
     where_q = ["q.disciplina_id = ?", "q.tipo = 'multipla_escolha'"]
     params_q = [bloco["disciplina_id"]]
-    if not is_admin:
-        where_q.append("(q.criada_por_professor_id = ? OR q.criada_por_professor_id IS NULL)")
-        params_q.append(prof["id"])
+    # Qualquer professor vê todas as questões da disciplina do bloco
     if q:
         where_q.append("q.enunciado LIKE ?")
         params_q.append(f"%{q}%")
@@ -8676,31 +8667,17 @@ def form_editar_simulado(sim_id: int):
             for d in disciplinas
         )
 
-    def prof_opts(sel_id):
-        opts = f'<option value="">— nenhum —</option>'
-        opts += "".join(
-            f'<option value="{p["id"]}"{" selected" if sel_id == p["id"] else ""}>{p["nome"]}</option>'
-            for p in professores
-        )
-        return opts
-
     blocos_html = ""
     for b in blocos:
         blocos_html += f"""
         <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--bg-subtle);">
             <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">Bloco {b['numero']}</div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-                <label style="margin:0;">Disciplina
-                    <select name="bloco_{b['numero']}_disciplina_id" required>
-                        {disc_opts(b['disciplina_id'])}
-                    </select>
-                </label>
-                <label style="margin:0;">Professor responsável
-                    <select name="bloco_{b['numero']}_professor_id">
-                        {prof_opts(b['professor_id'])}
-                    </select>
-                </label>
-            </div>
+            <div style="color:var(--text-muted); font-size:12px; margin-bottom:8px;">Aberto para todos os professores desta disciplina</div>
+            <label style="margin:0;">Disciplina
+                <select name="bloco_{b['numero']}_disciplina_id" required>
+                    {disc_opts(b['disciplina_id'])}
+                </select>
+            </label>
         </div>"""
 
     content = f"""
@@ -8752,10 +8729,10 @@ def salvar_edicao_simulado(
     sim_id: int,
     nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
     ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
-    bloco_1_disciplina_id: int = Form(...), bloco_1_professor_id: str = Form(""),
-    bloco_2_disciplina_id: int = Form(...), bloco_2_professor_id: str = Form(""),
-    bloco_3_disciplina_id: int = Form(...), bloco_3_professor_id: str = Form(""),
-    bloco_4_disciplina_id: int = Form(...), bloco_4_professor_id: str = Form(""),
+    bloco_1_disciplina_id: int = Form(...),
+    bloco_2_disciplina_id: int = Form(...),
+    bloco_3_disciplina_id: int = Form(...),
+    bloco_4_disciplina_id: int = Form(...),
 ):
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
@@ -8767,27 +8744,20 @@ def salvar_edicao_simulado(
         (nome.strip(), trimestre, ano, aesc, pontuacao_total, sim_id)
     )
     blocos_cfg = [
-        (1, bloco_1_disciplina_id, bloco_1_professor_id),
-        (2, bloco_2_disciplina_id, bloco_2_professor_id),
-        (3, bloco_3_disciplina_id, bloco_3_professor_id),
-        (4, bloco_4_disciplina_id, bloco_4_professor_id),
+        (1, bloco_1_disciplina_id),
+        (2, bloco_2_disciplina_id),
+        (3, bloco_3_disciplina_id),
+        (4, bloco_4_disciplina_id),
     ]
-    for numero, disc_id, p_id in blocos_cfg:
-        pid = int(p_id) if p_id else None
+    for numero, disc_id in blocos_cfg:
         bloco = conn.execute(
-            "SELECT id, status FROM simulado_blocos WHERE simulado_id=? AND numero=?",
+            "SELECT id FROM simulado_blocos WHERE simulado_id=? AND numero=?",
             (sim_id, numero)
         ).fetchone()
         if bloco:
-            # Atualizar disciplina e professor; recalcular status se mudou professor
-            novo_status = bloco["status"]
-            if pid and bloco["status"] == "aguardando":
-                novo_status = "em_contribuicao"
-            elif not pid and bloco["status"] == "em_contribuicao":
-                novo_status = "aguardando"
             conn.execute(
-                "UPDATE simulado_blocos SET disciplina_id=?, professor_id=?, status=? WHERE id=?",
-                (disc_id, pid, novo_status, bloco["id"])
+                "UPDATE simulado_blocos SET disciplina_id=? WHERE id=?",
+                (disc_id, bloco["id"])
             )
     conn.commit()
     conn.close()
