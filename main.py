@@ -551,14 +551,19 @@ def init_db():
         nome TEXT NOT NULL,
         trimestre INTEGER NOT NULL,
         ano INTEGER NOT NULL,
-        turma_id INTEGER,
+        ano_escolaridade INTEGER,
         pontuacao_total REAL NOT NULL DEFAULT 10.0,
         status TEXT NOT NULL DEFAULT 'montagem',
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         criado_por_professor_id INTEGER,
-        FOREIGN KEY (turma_id) REFERENCES turmas(id),
         FOREIGN KEY (criado_por_professor_id) REFERENCES professores(id)
     )""")
+    # Migration para bancos existentes
+    cols_sim = {row[1] for row in conn.execute("PRAGMA table_info(simulados)").fetchall()}
+    if "ano_escolaridade" not in cols_sim:
+        conn.execute("ALTER TABLE simulados ADD COLUMN ano_escolaridade INTEGER")
+    if "turma_id" in cols_sim:
+        pass  # mantém coluna legada sem remover
     conn.execute("""CREATE TABLE IF NOT EXISTS simulado_blocos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         simulado_id INTEGER NOT NULL,
@@ -2703,33 +2708,6 @@ def criar_prova(request: Request, titulo: str = Form(...), descricao: str = Form
     conn2 = get_db()
     turmas = conn2.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     conn2.close()
-
-    turmas_opts = "".join(
-        f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>'
-        for t in turmas
-    )
-    form_aplicar = f"""
-        <form method="post" action="/aplicacoes/nova" style="margin:0;">
-            <input type="hidden" name="prova_id" value="{prova_id}">
-            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
-                <label style="margin:0; flex:1; min-width:180px;">
-                    Turma
-                    <select name="turma_id" required>
-                        <option value="">— selecione —</option>
-                        {turmas_opts}
-                    </select>
-                </label>
-                <label style="margin:0;">
-                    Modo
-                    <select name="modo">
-                        <option value="impressa">📄 Impressa</option>
-                        <option value="online">📱 Online</option>
-                    </select>
-                </label>
-                <button type="submit" class="btn btn-primary" style="margin:0;">Aplicar →</button>
-            </div>
-        </form>
-    """ if turmas else '<p style="color:var(--text-muted); font-size:13px; margin:0;">Nenhuma turma cadastrada ainda. <a href="/turmas/nova">Cadastrar turma →</a></p>'
 
     content_html = f"""
         <div style="max-width:560px; margin:60px auto; text-align:center; padding:0 20px;">
@@ -7969,6 +7947,16 @@ def _status_bloco_badge(status: str) -> str:
     return f'<span style="background:{bg};color:{color};border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600;">{icon} {label}</span>'
 
 
+
+def _ano_esc_label(ano: int) -> str:
+    labels = {6: "6º ano", 7: "7º ano", 8: "8º ano", 9: "9º ano"}
+    return labels.get(ano, "—")
+
+def _turmas_do_ano(conn, ano_escolaridade: int):
+    """Retorna todas as turmas cujo nome começa com o dígito do ano de escolaridade."""
+    todas = conn.execute("SELECT * FROM turmas ORDER BY nome").fetchall()
+    return [t for t in todas if str(t["nome"]).startswith(str(ano_escolaridade))]
+
 @app.get("/simulados", response_class=HTMLResponse)
 def listar_simulados(request: Request):
     prof = _current_prof_ctx.get()
@@ -7978,18 +7966,18 @@ def listar_simulados(request: Request):
     conn = get_db()
     if is_admin:
         simulados = conn.execute("""
-            SELECT s.*, t.nome AS turma_nome,
+            SELECT s.*,
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
-            FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
+            FROM simulados s
             ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
         """).fetchall()
     else:
         simulados = conn.execute("""
-            SELECT s.*, t.nome AS turma_nome,
+            SELECT s.*,
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
-            FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
+            FROM simulados s
             WHERE s.id IN (SELECT simulado_id FROM simulado_blocos WHERE professor_id = ?)
                OR s.criado_por_professor_id = ?
             ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
@@ -8015,7 +8003,7 @@ def listar_simulados(request: Request):
                 <div>
                     <div style="font-weight:700; font-size:15px; color:var(--text);">{s['nome']}</div>
                     <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
-                        {s['trimestre']}º trimestre · {s['ano']} · {s['turma_nome'] or '—'}
+                        {s['trimestre']}º trimestre · {s['ano']} · {_ano_esc_label(s['ano_escolaridade'] or 0)}
                     </div>
                 </div>
                 <span style="color:{sc}; font-size:12px; font-weight:600;">{sl}</span>
@@ -8094,10 +8082,18 @@ def form_novo_simulado(request: Request):
                 <label>Ano<input type="number" name="ano" value="{ano_atual}" min="2024" max="2030" required></label>
             </div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
-                <label>Turma<select name="turma_id"><option value="">— todas as turmas —</option>{turmas_opts}</select></label>
+                <label>Ano de escolaridade
+                    <select name="ano_escolaridade" required>
+                        <option value="">— selecione —</option>
+                        <option value="6">6º ano (601 a 605)</option>
+                        <option value="7">7º ano (701 a 706)</option>
+                        <option value="8">8º ano (801 a 806)</option>
+                        <option value="9">9º ano (901 a 906)</option>
+                    </select>
+                </label>
                 <label>Pontuação total
                     <input type="number" name="pontuacao_total" value="10" step="0.5" min="1" max="100" required>
-                    <small style="color:var(--text-muted);">Valor dividido igualmente pelas 40 questões</small>
+                    <small style="color:var(--text-muted);">Valor dividido pelas 40 questões</small>
                 </label>
             </div>
             <h3 style="margin:20px 0 12px;">Configuração dos blocos</h3>
@@ -8114,7 +8110,7 @@ def form_novo_simulado(request: Request):
 @app.post("/simulados/novo")
 def criar_simulado(
     nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
-    turma_id: str = Form(""), pontuacao_total: float = Form(10.0),
+    ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
     bloco_1_disciplina_id: int = Form(...), bloco_1_professor_id: str = Form(""),
     bloco_2_disciplina_id: int = Form(...), bloco_2_professor_id: str = Form(""),
     bloco_3_disciplina_id: int = Form(...), bloco_3_professor_id: str = Form(""),
@@ -8124,10 +8120,10 @@ def criar_simulado(
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/simulados", status_code=303)
     conn = get_db()
-    tid = int(turma_id) if turma_id else None
+    aesc = int(ano_escolaridade) if ano_escolaridade else None
     cur = conn.execute(
-        "INSERT INTO simulados (nome, trimestre, ano, turma_id, pontuacao_total, criado_por_professor_id) VALUES (?,?,?,?,?,?)",
-        (nome.strip(), trimestre, ano, tid, pontuacao_total, prof["id"])
+        "INSERT INTO simulados (nome, trimestre, ano, ano_escolaridade, pontuacao_total, criado_por_professor_id) VALUES (?,?,?,?,?,?)",
+        (nome.strip(), trimestre, ano, aesc, pontuacao_total, prof["id"])
     )
     sim_id = cur.lastrowid
     blocos = [
@@ -8155,11 +8151,7 @@ def ver_simulado(sim_id: int):
         return RedirectResponse("/login", status_code=303)
     is_admin = prof.get("is_admin") or prof.get("is_gestor")
     conn = get_db()
-    sim = conn.execute("""
-        SELECT s.*, t.nome AS turma_nome
-        FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
-        WHERE s.id = ?
-    """, (sim_id,)).fetchone()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
     if not sim:
         conn.close()
         return RedirectResponse("/simulados", status_code=303)
@@ -8233,7 +8225,7 @@ def ver_simulado(sim_id: int):
         <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
             <div>
                 <h1>📊 {sim['nome']}</h1>
-                <p class="subtitle">{sim['trimestre']}º Trimestre · {sim['ano']} · {sim['turma_nome'] or 'Todas as turmas'}
+                <p class="subtitle">{sim['trimestre']}º Trimestre · {sim['ano']} · {_ano_esc_label(sim['ano_escolaridade'] or 0)}
                     · <span style="color:{status_cores.get(sim['status'],'var(--text-muted)')}; font-weight:600;">{status_labels.get(sim['status'], sim['status'])}</span>
                 </p>
             </div>
@@ -8460,11 +8452,7 @@ def imprimir_simulado(sim_id: int):
     if not prof:
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
-    sim = conn.execute("""
-        SELECT s.*, t.nome AS turma_nome
-        FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
-        WHERE s.id = ?
-    """, (sim_id,)).fetchone()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
     if not sim:
         conn.close()
         return RedirectResponse("/simulados", status_code=303)
@@ -8642,7 +8630,7 @@ def imprimir_simulado(sim_id: int):
 <div class="capa">
   <div class="capa-logo">{logo_html}</div>
   <div class="capa-titulo">{sim['nome']}</div>
-  <div class="capa-sub">{sim['turma_nome'] or ''}</div>
+  <div class="capa-sub">{_ano_esc_label(sim['ano_escolaridade'] or 0)}</div>
   <div class="capa-sub">{sim['trimestre']}º Trimestre · {sim['ano']}</div>
   <div class="capa-valor">Valor por questão: {vpq} ponto{'s' if vpq != 1 else ''} · Total: {sim['pontuacao_total']} pontos</div>
   <div class="capa-info">Este caderno contém 4 blocos com 10 questões cada · Total: 40 questões</div>
@@ -8653,7 +8641,7 @@ def imprimir_simulado(sim_id: int):
 
 <!-- GABARITO -->
 <div class="gabarito-page page-break">
-  <div class="gabarito-titulo">GABARITO — {sim['nome']}</div>
+  <div class="gabarito-titulo">GABARITO — {sim['nome']} · {_ano_esc_label(sim['ano_escolaridade'] or 0)}</div>
   {gab_html}
 </div>
 
@@ -8678,15 +8666,9 @@ def form_editar_simulado(sim_id: int):
         FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
         WHERE b.simulado_id = ? ORDER BY b.numero
     """, (sim_id,)).fetchall()
-    turmas = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
     professores = conn.execute("SELECT id, nome FROM professores WHERE status = 'ativo' ORDER BY nome").fetchall()
     conn.close()
-
-    turmas_opts = "".join(
-        f'<option value="{t["id"]}"{" selected" if sim["turma_id"] == t["id"] else ""}>{t["nome"]} ({t["ano_letivo"]})</option>'
-        for t in turmas
-    )
 
     def disc_opts(sel_id):
         return "".join(
@@ -8740,10 +8722,13 @@ def form_editar_simulado(sim_id: int):
                 </label>
             </div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
-                <label>Turma
-                    <select name="turma_id">
-                        <option value="">— todas as turmas —</option>
-                        {turmas_opts}
+                <label>Ano de escolaridade
+                    <select name="ano_escolaridade" required>
+                        <option value="">— selecione —</option>
+                        <option value="6"{' selected' if sim['ano_escolaridade']==6 else ''}>6º ano (601 a 605)</option>
+                        <option value="7"{' selected' if sim['ano_escolaridade']==7 else ''}>7º ano (701 a 706)</option>
+                        <option value="8"{' selected' if sim['ano_escolaridade']==8 else ''}>8º ano (801 a 806)</option>
+                        <option value="9"{' selected' if sim['ano_escolaridade']==9 else ''}>9º ano (901 a 906)</option>
                     </select>
                 </label>
                 <label>Pontuação total
@@ -8766,7 +8751,7 @@ def form_editar_simulado(sim_id: int):
 def salvar_edicao_simulado(
     sim_id: int,
     nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
-    turma_id: str = Form(""), pontuacao_total: float = Form(10.0),
+    ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
     bloco_1_disciplina_id: int = Form(...), bloco_1_professor_id: str = Form(""),
     bloco_2_disciplina_id: int = Form(...), bloco_2_professor_id: str = Form(""),
     bloco_3_disciplina_id: int = Form(...), bloco_3_professor_id: str = Form(""),
@@ -8776,10 +8761,10 @@ def salvar_edicao_simulado(
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
     conn = get_db()
-    tid = int(turma_id) if turma_id else None
+    aesc = int(ano_escolaridade) if ano_escolaridade else None
     conn.execute(
-        "UPDATE simulados SET nome=?, trimestre=?, ano=?, turma_id=?, pontuacao_total=? WHERE id=?",
-        (nome.strip(), trimestre, ano, tid, pontuacao_total, sim_id)
+        "UPDATE simulados SET nome=?, trimestre=?, ano=?, ano_escolaridade=?, pontuacao_total=? WHERE id=?",
+        (nome.strip(), trimestre, ano, aesc, pontuacao_total, sim_id)
     )
     blocos_cfg = [
         (1, bloco_1_disciplina_id, bloco_1_professor_id),
