@@ -545,6 +545,41 @@ def init_db():
     if "status" not in cols_prof:
         conn.execute("ALTER TABLE professores ADD COLUMN status TEXT NOT NULL DEFAULT 'ativo'")
         conn.execute("UPDATE professores SET status = 'ativo' WHERE status IS NULL OR status = ''")
+    # Simulado
+    conn.execute("""CREATE TABLE IF NOT EXISTS simulados (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        trimestre INTEGER NOT NULL,
+        ano INTEGER NOT NULL,
+        turma_id INTEGER,
+        pontuacao_total REAL NOT NULL DEFAULT 10.0,
+        status TEXT NOT NULL DEFAULT 'montagem',
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        criado_por_professor_id INTEGER,
+        FOREIGN KEY (turma_id) REFERENCES turmas(id),
+        FOREIGN KEY (criado_por_professor_id) REFERENCES professores(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS simulado_blocos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        simulado_id INTEGER NOT NULL,
+        numero INTEGER NOT NULL,
+        disciplina_id INTEGER NOT NULL,
+        n_questoes INTEGER NOT NULL DEFAULT 10,
+        tempo_minutos INTEGER NOT NULL DEFAULT 25,
+        status TEXT NOT NULL DEFAULT 'aguardando',
+        professor_id INTEGER,
+        FOREIGN KEY (simulado_id) REFERENCES simulados(id) ON DELETE CASCADE,
+        FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id),
+        FOREIGN KEY (professor_id) REFERENCES professores(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS simulado_questoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bloco_id INTEGER NOT NULL,
+        questao_id INTEGER NOT NULL,
+        ordem INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (bloco_id) REFERENCES simulado_blocos(id) ON DELETE CASCADE,
+        FOREIGN KEY (questao_id) REFERENCES questoes(id)
+    )""")
     conn.commit()
     conn.close()
 
@@ -981,6 +1016,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
                 {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
                 {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {nav_item("/simulados", "simulados", "📊", "Simulados")}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
             {user_block}
@@ -7909,3 +7945,865 @@ async def confirmar_lote(aplicacao_id: int, request: Request):
         </div>
     """
     return render_page("Lote salvo", content, active="aplicacoes")
+
+# ==========================================
+#  SIMULADOS
+# ==========================================
+
+def _valor_por_questao(pontuacao_total: float, n_blocos: int = 4, n_questoes: int = 10) -> float:
+    total_q = n_blocos * n_questoes
+    return round(pontuacao_total / total_q, 4) if total_q else 0
+
+
+def _status_bloco_badge(status: str) -> str:
+    cores = {
+        "aguardando":    ("var(--text-muted)",  "var(--bg-subtle)",  "⏳"),
+        "em_contribuicao":("var(--orange)",     "var(--orange-bg)", "✏️"),
+        "completo":      ("var(--green)",       "var(--green-bg)",  "✅"),
+        "aprovado":      ("var(--accent)",      "var(--accent-bg)", "🔒"),
+    }
+    color, bg, icon = cores.get(status, ("var(--text-muted)", "var(--bg-subtle)", "❓"))
+    labels = {"aguardando": "Aguardando", "em_contribuicao": "Em contribuição",
+              "completo": "Completo", "aprovado": "Aprovado"}
+    label = labels.get(status, status)
+    return f'<span style="background:{bg};color:{color};border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600;">{icon} {label}</span>'
+
+
+@app.get("/simulados", response_class=HTMLResponse)
+def listar_simulados(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    is_admin = prof.get("is_admin") or prof.get("is_gestor")
+    conn = get_db()
+    if is_admin:
+        simulados = conn.execute("""
+            SELECT s.*, t.nome AS turma_nome,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
+            FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
+            ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
+        """).fetchall()
+    else:
+        simulados = conn.execute("""
+            SELECT s.*, t.nome AS turma_nome,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
+            FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
+            WHERE s.id IN (SELECT simulado_id FROM simulado_blocos WHERE professor_id = ?)
+               OR s.criado_por_professor_id = ?
+            ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
+        """, (prof["id"], prof["id"])).fetchall()
+    conn.close()
+
+    btn_novo = '<a href="/simulados/novo" class="btn btn-primary">+ Novo simulado</a>' if is_admin else ""
+
+    cards = ""
+    for s in simulados:
+        n_b = s["n_blocos"] or 0
+        n_c = s["n_completos"] or 0
+        pct = int(n_c / n_b * 100) if n_b else 0
+        cor_barra = "var(--green)" if pct == 100 else ("var(--orange)" if pct > 0 else "var(--border)")
+        status_cores = {"montagem": ("var(--text-muted)", "Montagem"),
+                        "aberto": ("var(--orange)", "Aberto para contribuição"),
+                        "fechado": ("var(--red)", "Fechado"),
+                        "publicado": ("var(--green)", "Publicado")}
+        sc, sl = status_cores.get(s["status"], ("var(--text-muted)", s["status"]))
+        cards += f"""
+        <a href="/simulados/{s['id']}" style="display:block; text-decoration:none; border:1px solid var(--border); border-radius:10px; padding:16px 20px; margin-bottom:12px; background:var(--card);">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <div style="font-weight:700; font-size:15px; color:var(--text);">{s['nome']}</div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
+                        {s['trimestre']}º trimestre · {s['ano']} · {s['turma_nome'] or '—'}
+                    </div>
+                </div>
+                <span style="color:{sc}; font-size:12px; font-weight:600;">{sl}</span>
+            </div>
+            <div style="margin-top:12px;">
+                <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-muted); margin-bottom:4px;">
+                    <span>Blocos entregues</span><span>{n_c}/{n_b}</span>
+                </div>
+                <div style="height:6px; background:var(--border); border-radius:3px;">
+                    <div style="height:6px; width:{pct}%; background:{cor_barra}; border-radius:3px; transition:width 0.3s;"></div>
+                </div>
+            </div>
+        </a>"""
+
+    if not cards:
+        cards = '<div class="empty">Nenhum simulado encontrado.</div>'
+
+    content = f"""
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center;">
+            <div><h1>📊 Simulados</h1><p class="subtitle">Provas multidisciplinares trimestrais</p></div>
+            {btn_novo}
+        </div>
+        {cards}
+    """
+    return render_page("Simulados", content, active="simulados")
+
+
+@app.get("/simulados/novo", response_class=HTMLResponse)
+def form_novo_simulado(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    turmas = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    professores = conn.execute("SELECT id, nome FROM professores WHERE status = 'ativo' ORDER BY nome").fetchall()
+    conn.close()
+
+    turmas_opts = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+    disc_opts = "".join(f'<option value="{d["id"]}">{d["nome"]}</option>' for d in disciplinas)
+    prof_opts = '<option value="">— nenhum —</option>' + "".join(f'<option value="{p["id"]}">{p["nome"]}</option>' for p in professores)
+
+    blocos_html = ""
+    for i in range(1, 5):
+        blocos_html += f"""
+        <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--bg-subtle);">
+            <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">Bloco {i}</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <label style="margin:0;">Disciplina
+                    <select name="bloco_{i}_disciplina_id" required>
+                        <option value="">— selecione —</option>
+                        {disc_opts}
+                    </select>
+                </label>
+                <label style="margin:0;">Professor responsável
+                    <select name="bloco_{i}_professor_id">{prof_opts}</select>
+                </label>
+            </div>
+        </div>"""
+
+    import datetime
+    ano_atual = datetime.date.today().year
+
+    content = f"""
+        <div class="page-header"><h1>+ Novo simulado</h1></div>
+        <form method="post" action="/simulados/novo">
+            <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:12px; margin-bottom:16px;">
+                <label>Nome do simulado<input type="text" name="nome" placeholder="Ex: Simulado 1 — 2026" required></label>
+                <label>Trimestre
+                    <select name="trimestre" required>
+                        <option value="1">1º Trimestre</option>
+                        <option value="2">2º Trimestre</option>
+                        <option value="3">3º Trimestre</option>
+                    </select>
+                </label>
+                <label>Ano<input type="number" name="ano" value="{ano_atual}" min="2024" max="2030" required></label>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+                <label>Turma<select name="turma_id"><option value="">— todas as turmas —</option>{turmas_opts}</select></label>
+                <label>Pontuação total
+                    <input type="number" name="pontuacao_total" value="10" step="0.5" min="1" max="100" required>
+                    <small style="color:var(--text-muted);">Valor dividido igualmente pelas 40 questões</small>
+                </label>
+            </div>
+            <h3 style="margin:20px 0 12px;">Configuração dos blocos</h3>
+            {blocos_html}
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button type="submit" class="btn btn-primary">Criar simulado</button>
+                <a href="/simulados" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Novo simulado", content, active="simulados")
+
+
+@app.post("/simulados/novo")
+def criar_simulado(
+    nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
+    turma_id: str = Form(""), pontuacao_total: float = Form(10.0),
+    bloco_1_disciplina_id: int = Form(...), bloco_1_professor_id: str = Form(""),
+    bloco_2_disciplina_id: int = Form(...), bloco_2_professor_id: str = Form(""),
+    bloco_3_disciplina_id: int = Form(...), bloco_3_professor_id: str = Form(""),
+    bloco_4_disciplina_id: int = Form(...), bloco_4_professor_id: str = Form(""),
+):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    tid = int(turma_id) if turma_id else None
+    cur = conn.execute(
+        "INSERT INTO simulados (nome, trimestre, ano, turma_id, pontuacao_total, criado_por_professor_id) VALUES (?,?,?,?,?,?)",
+        (nome.strip(), trimestre, ano, tid, pontuacao_total, prof["id"])
+    )
+    sim_id = cur.lastrowid
+    blocos = [
+        (bloco_1_disciplina_id, bloco_1_professor_id),
+        (bloco_2_disciplina_id, bloco_2_professor_id),
+        (bloco_3_disciplina_id, bloco_3_professor_id),
+        (bloco_4_disciplina_id, bloco_4_professor_id),
+    ]
+    for i, (disc_id, p_id) in enumerate(blocos, start=1):
+        pid = int(p_id) if p_id else None
+        status_b = "em_contribuicao" if pid else "aguardando"
+        conn.execute(
+            "INSERT INTO simulado_blocos (simulado_id, numero, disciplina_id, professor_id, status) VALUES (?,?,?,?,?)",
+            (sim_id, i, disc_id, pid, status_b)
+        )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.get("/simulados/{sim_id}", response_class=HTMLResponse)
+def ver_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    is_admin = prof.get("is_admin") or prof.get("is_gestor")
+    conn = get_db()
+    sim = conn.execute("""
+        SELECT s.*, t.nome AS turma_nome
+        FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
+        WHERE s.id = ?
+    """, (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome, p.nome AS professor_nome,
+               (SELECT COUNT(*) FROM simulado_questoes WHERE bloco_id = b.id) AS n_questoes_adicionadas
+        FROM simulado_blocos b
+        JOIN disciplinas d ON d.id = b.disciplina_id
+        LEFT JOIN professores p ON p.id = b.professor_id
+        WHERE b.simulado_id = ?
+        ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+    conn.close()
+
+    vpq = _valor_por_questao(sim["pontuacao_total"])
+    todos_completos = all(b["status"] in ("completo", "aprovado") for b in blocos)
+
+    # Ações admin
+    acoes_admin = ""
+    if is_admin:
+        acoes_admin += f'<a href="/simulados/{sim_id}/editar" class="btn">✏️ Editar</a>'
+        if sim["status"] == "montagem":
+            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/abrir" style="margin:0;"><button type="submit" class="btn btn-primary">📤 Abrir para contribuição</button></form>'
+        elif sim["status"] == "aberto" and todos_completos:
+            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/fechar" style="margin:0;"><button type="submit" class="btn" style="color:var(--green);border-color:var(--green);">✅ Fechar e publicar</button></form>'
+        if sim["status"] in ("fechado", "publicado"):
+            acoes_admin += f'<a href="/simulados/{sim_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Gerar PDF</a>'
+
+    # Cards dos blocos
+    blocos_html = ""
+    for b in blocos:
+        badge = _status_bloco_badge(b["status"])
+        n_add = b["n_questoes_adicionadas"] or 0
+        n_tot = b["n_questoes"]
+        progresso_cor = "var(--green)" if n_add >= n_tot else ("var(--orange)" if n_add > 0 else "var(--border)")
+
+        # Botão de ação por perfil
+        btn_bloco = ""
+        eh_responsavel = b["professor_id"] == prof["id"]
+        if eh_responsavel and b["status"] == "em_contribuicao":
+            btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">✏️ Contribuir</a>'
+        elif is_admin:
+            btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn" style="font-size:12px; padding:5px 12px;">⚙️ Gerenciar</a>'
+            if b["status"] == "completo":
+                btn_bloco += f' <form method="post" action="/simulados/{sim_id}/blocos/{b["id"]}/aprovar" style="margin:0;display:inline;"><button type="submit" class="btn" style="font-size:12px;padding:5px 12px;color:var(--accent);border-color:var(--accent);">🔒 Aprovar bloco</button></form>'
+
+        blocos_html += f"""
+        <div style="border:1px solid var(--border); border-radius:10px; padding:16px; background:var(--card); margin-bottom:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <div style="font-weight:700; font-size:14px;">Bloco {b['numero']} — {b['disciplina_nome']}</div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+                        Prof: {b['professor_nome'] or '— não atribuído —'} · {n_add}/{n_tot} questões
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    {badge}
+                    {btn_bloco}
+                </div>
+            </div>
+            <div style="margin-top:10px; height:5px; background:var(--border); border-radius:3px;">
+                <div style="height:5px; width:{min(100, int(n_add/n_tot*100)) if n_tot else 0}%; background:{progresso_cor}; border-radius:3px;"></div>
+            </div>
+        </div>"""
+
+    status_cores = {"montagem": "var(--text-muted)", "aberto": "var(--orange)", "fechado": "var(--red)", "publicado": "var(--green)"}
+    status_labels = {"montagem": "Em montagem", "aberto": "Aberto", "fechado": "Fechado", "publicado": "Publicado"}
+
+    content = f"""
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h1>📊 {sim['nome']}</h1>
+                <p class="subtitle">{sim['trimestre']}º Trimestre · {sim['ano']} · {sim['turma_nome'] or 'Todas as turmas'}
+                    · <span style="color:{status_cores.get(sim['status'],'var(--text-muted)')}; font-weight:600;">{status_labels.get(sim['status'], sim['status'])}</span>
+                </p>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">{acoes_admin}</div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:20px;">
+            <div class="metric"><div class="metric-label">Pontuação total</div><div class="metric-value">{sim['pontuacao_total']}</div></div>
+            <div class="metric"><div class="metric-label">Valor por questão</div><div class="metric-value">{vpq}</div></div>
+            <div class="metric"><div class="metric-label">Total de questões</div><div class="metric-value">40</div></div>
+        </div>
+        <h3 style="margin-bottom:12px;">Blocos</h3>
+        {blocos_html}
+        <div style="margin-top:16px;">
+            <a href="/simulados" class="btn">← Voltar</a>
+        </div>
+    """
+    return render_page(sim["nome"], content, active="simulados")
+
+
+@app.post("/simulados/{sim_id}/abrir")
+def abrir_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulados SET status = 'aberto' WHERE id = ?", (sim_id,))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/fechar")
+def fechar_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulados SET status = 'publicado' WHERE id = ?", (sim_id,))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/aprovar")
+def aprovar_bloco(sim_id: int, bloco_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulado_blocos SET status = 'aprovado' WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.get("/simulados/{sim_id}/blocos/{bloco_id}/contribuir", response_class=HTMLResponse)
+def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = None, q: Optional[str] = None):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    is_admin = prof.get("is_admin") or prof.get("is_gestor")
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    bloco = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.id = ? AND b.simulado_id = ?
+    """, (bloco_id, sim_id)).fetchone()
+    if not sim or not bloco:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+    # Questões já no bloco
+    questoes_bloco = conn.execute("""
+        SELECT sq.id AS sq_id, sq.ordem, q.id, q.enunciado, q.tipo, d.nome AS disc_nome
+        FROM simulado_questoes sq
+        JOIN questoes q ON q.id = sq.questao_id
+        JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE sq.bloco_id = ?
+        ORDER BY sq.ordem
+    """, (bloco_id,)).fetchall()
+    ids_no_bloco = {q["id"] for q in questoes_bloco}
+
+    # Banco de questões disponíveis (filtrado por disciplina do bloco)
+    where_q = ["q.disciplina_id = ?", "q.tipo = 'multipla_escolha'"]
+    params_q = [bloco["disciplina_id"]]
+    if not is_admin:
+        where_q.append("(q.criada_por_professor_id = ? OR q.criada_por_professor_id IS NULL)")
+        params_q.append(prof["id"])
+    if q:
+        where_q.append("q.enunciado LIKE ?")
+        params_q.append(f"%{q}%")
+    wc = " AND ".join(where_q)
+    questoes_banco = conn.execute(f"""
+        SELECT q.id, q.enunciado, q.ano, d.nome AS disc_nome
+        FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE {wc}
+        ORDER BY q.id DESC LIMIT 50
+    """, params_q).fetchall()
+    conn.close()
+
+    n_add = len(questoes_bloco)
+    n_tot = bloco["n_questoes"]
+    completo = n_add >= n_tot
+
+    # Lista das questões já no bloco
+    bloco_items = ""
+    for idx, bq in enumerate(questoes_bloco):
+        preview = _preview_enunciado(bq["enunciado"], max_chars=80)
+        bloco_items += f"""
+        <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; background:var(--card);">
+            <span style="font-weight:700; color:var(--accent); min-width:24px;">{idx+1}.</span>
+            <span style="flex:1; font-size:13px;">{preview}</span>
+            <form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/remover/{bq['sq_id']}" style="margin:0;">
+                <button type="submit" class="btn" style="padding:3px 8px; font-size:11px; color:var(--red); border-color:var(--red);">✕</button>
+            </form>
+        </div>"""
+    if not bloco_items:
+        bloco_items = '<div style="color:var(--text-muted); font-size:13px; padding:8px 0;">Nenhuma questão adicionada ainda.</div>'
+
+    # Lista do banco
+    banco_items = ""
+    for bq in questoes_banco:
+        if bq["id"] in ids_no_bloco:
+            continue
+        preview = _preview_enunciado(bq["enunciado"], max_chars=100)
+        banco_items += f"""
+        <form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/adicionar" style="margin:0 0 6px;">
+            <input type="hidden" name="questao_id" value="{bq['id']}">
+            <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card);">
+                <span style="flex:1; font-size:13px;">{preview}</span>
+                <span style="font-size:11px; color:var(--text-muted);">{bq['ano'] or '—'}</span>
+                {'<button type="submit" class="btn btn-primary" style="padding:3px 10px; font-size:11px;">+ Add</button>' if not completo else '<span style="font-size:11px; color:var(--text-muted);">Bloco cheio</span>'}
+            </div>
+        </form>"""
+    if not banco_items:
+        banco_items = '<div class="empty">Nenhuma questão disponível.</div>'
+
+    # Botão finalizar
+    btn_finalizar = ""
+    if completo and bloco["status"] == "em_contribuicao":
+        btn_finalizar = f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/finalizar" style="margin-top:12px;"><button type="submit" class="btn btn-primary" style="background:var(--green);border-color:var(--green);">✅ Finalizar entrega do bloco</button></form>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>✏️ Bloco {bloco['numero']} — {bloco['disciplina_nome']}</h1>
+            <p class="subtitle">{sim['nome']} · {n_add}/{n_tot} questões adicionadas</p>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+            <div>
+                <h3 style="margin-bottom:10px;">Questões do bloco <span style="font-size:13px; font-weight:400; color:var(--text-muted);">({n_add}/{n_tot})</span></h3>
+                {bloco_items}
+                {btn_finalizar}
+            </div>
+            <div>
+                <h3 style="margin-bottom:10px;">Banco de questões</h3>
+                <form method="get" style="margin-bottom:10px;">
+                    <input type="hidden" name="disciplina" value="{bloco['disciplina_id']}">
+                    <div style="display:flex; gap:6px;">
+                        <input type="search" name="q" value="{q or ''}" placeholder="Buscar no banco..." style="margin:0; flex:1;">
+                        <button type="submit" class="btn btn-primary" style="margin:0;">🔍</button>
+                    </div>
+                </form>
+                {banco_items}
+            </div>
+        </div>
+        <div style="margin-top:20px;"><a href="/simulados/{sim_id}" class="btn">← Voltar ao simulado</a></div>
+    """
+    return render_page(f"Bloco {bloco['numero']} — {bloco['disciplina_nome']}", content, active="simulados")
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/adicionar")
+def adicionar_questao_bloco(sim_id: int, bloco_id: int, questao_id: int = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id)).fetchone()
+    if bloco:
+        n_atual = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
+        if n_atual < bloco["n_questoes"]:
+            ja = conn.execute("SELECT id FROM simulado_questoes WHERE bloco_id = ? AND questao_id = ?", (bloco_id, questao_id)).fetchone()
+            if not ja:
+                conn.execute("INSERT INTO simulado_questoes (bloco_id, questao_id, ordem) VALUES (?,?,?)", (bloco_id, questao_id, n_atual))
+                n_novo = n_atual + 1
+                if n_novo >= bloco["n_questoes"] and bloco["status"] == "em_contribuicao":
+                    conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
+                conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/remover/{sq_id}")
+def remover_questao_bloco(sim_id: int, bloco_id: int, sq_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    conn.execute("DELETE FROM simulado_questoes WHERE id = ? AND bloco_id = ?", (sq_id, bloco_id))
+    n_atual = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
+    bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ?", (bloco_id,)).fetchone()
+    if bloco and n_atual < bloco["n_questoes"] and bloco["status"] == "completo":
+        conn.execute("UPDATE simulado_blocos SET status = 'em_contribuicao' WHERE id = ?", (bloco_id,))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/finalizar")
+def finalizar_bloco(sim_id: int, bloco_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id)).fetchone()
+    if bloco:
+        n = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
+        if n >= bloco["n_questoes"]:
+            conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
+            conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.get("/simulados/{sim_id}/imprimir", response_class=HTMLResponse)
+def imprimir_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    sim = conn.execute("""
+        SELECT s.*, t.nome AS turma_nome
+        FROM simulados s LEFT JOIN turmas t ON t.id = s.turma_id
+        WHERE s.id = ?
+    """, (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ?
+        ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    vpq = _valor_por_questao(sim["pontuacao_total"])
+    num_global = 0  # numeração corrida
+    blocos_html = ""
+    gabarito_data = []  # lista de (num, letra_correta, bloco_num)
+
+    for bloco in blocos:
+        questoes_bloco = conn.execute("""
+            SELECT q.id, q.enunciado, q.tipo
+            FROM simulado_questoes sq
+            JOIN questoes q ON q.id = sq.questao_id
+            WHERE sq.bloco_id = ?
+            ORDER BY sq.ordem
+        """, (bloco["id"],)).fetchall()
+
+        # PÁGINA DE PAUSA (antes de cada bloco)
+        blocos_html += f"""
+        <div class="pagina-pausa page-break">
+            <div class="pausa-bloco">BLOCO {bloco['numero']:02d}</div>
+            <div class="pausa-disciplina">{bloco['disciplina_nome'].upper()}</div>
+            <div class="pausa-octogono">
+                <div class="oct-inner">
+                    <div>Aguarde</div>
+                    <div>instruções</div>
+                    <div>para virar</div>
+                    <div>a página.</div>
+                </div>
+            </div>
+            <div class="pausa-tempo">Você terá {bloco['tempo_minutos']} minutos para responder a este bloco.</div>
+        </div>"""
+
+        # QUESTÕES DO BLOCO
+        questoes_html = ""
+        for q in questoes_bloco:
+            num_global += 1
+            alts = conn.execute(
+                "SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra",
+                (q["id"],)
+            ).fetchall()
+            correta = next((a["letra"] for a in alts if a["correta"]), "?")
+            gabarito_data.append((num_global, correta, bloco["numero"]))
+
+            alts_html = "".join(
+                f'<div class="q-alt"><strong>{a["letra"]})</strong> {a["texto"]}</div>'
+                for a in alts
+            )
+            # Textos de apoio
+            textos = conn.execute(
+                "SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            textos_html = ""
+            for t in textos:
+                textos_html += f'<blockquote>{t["conteudo"]}'
+                if t["fonte"]:
+                    textos_html += f'<footer>{t["fonte"]}</footer>'
+                textos_html += '</blockquote>'
+            # Imagens
+            imgs = conn.execute(
+                "SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            imgs_html = "".join(
+                f'<figure><img src="/{img["caminho"]}" alt=""><figcaption>{img["legenda"] or ""}</figcaption></figure>'
+                for img in imgs
+            )
+            questoes_html += f"""
+            <div class="q-sim">
+                <div class="q-num">{num_global}.</div>
+                <div class="q-body">
+                    {textos_html}{imgs_html}
+                    <div class="q-enunciado">{q['enunciado']}</div>
+                    <div class="q-alts">{alts_html}</div>
+                </div>
+            </div>"""
+
+        blocos_html += f"""
+        <div class="bloco-questoes page-break">
+            <div class="bloco-header">Bloco {bloco['numero']} — {bloco['disciplina_nome']}</div>
+            {questoes_html}
+        </div>"""
+
+    conn.close()
+
+    # GABARITO
+    gab_cols = [gabarito_data[i:i+10] for i in range(0, len(gabarito_data), 10)]
+    gab_html = '<div class="gabarito-grid">'
+    for col in gab_cols:
+        gab_html += '<div class="gab-col">'
+        for num, letra, bloco_num in col:
+            gab_html += f'<div class="gab-item"><span class="gab-num">{num}.</span><span class="gab-letra">{letra}</span></div>'
+        gab_html += '</div>'
+    gab_html += '</div>'
+
+    logo_html = '<img src="/static/logo_escola.png" style="height:60px;" alt="Logo">' if True else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>{sim['nome']}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&display=swap');
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: 'Sora', sans-serif; font-size: 12px; color: #000; background: white; }}
+  .no-print {{ padding: 16px 24px; background: #f0f4f8; border-bottom: 2px solid #ddd; display: flex; gap: 10px; }}
+  .btn-print {{ padding: 8px 18px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: inherit; }}
+  @media print {{
+    .no-print {{ display: none !important; }}
+    .page-break {{ page-break-before: always; }}
+    body {{ font-size: 11px; }}
+  }}
+
+  /* CAPA */
+  .capa {{ min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 60px 40px; border-bottom: 2px solid #000; }}
+  .capa-logo {{ margin-bottom: 30px; }}
+  .capa-titulo {{ font-size: 28px; font-weight: 800; margin-bottom: 10px; }}
+  .capa-sub {{ font-size: 16px; margin-bottom: 6px; color: #333; }}
+  .capa-info {{ font-size: 13px; color: #555; margin-top: 20px; }}
+  .capa-valor {{ margin-top: 30px; font-size: 15px; font-weight: 600; border: 2px solid #000; padding: 12px 24px; border-radius: 8px; }}
+
+  /* PÁGINA DE PAUSA */
+  .pagina-pausa {{ min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px; }}
+  .pausa-bloco {{ font-size: 36px; font-weight: 800; margin-bottom: 20px; letter-spacing: 4px; }}
+  .pausa-disciplina {{ font-size: 28px; font-weight: 700; margin-bottom: 50px; }}
+  .pausa-octogono {{ width: 220px; height: 220px; background: #555; clip-path: polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%); display: flex; align-items: center; justify-content: center; margin: 0 auto 50px; }}
+  .oct-inner {{ color: white; font-size: 18px; font-weight: 700; line-height: 1.6; }}
+  .pausa-tempo {{ font-size: 16px; font-weight: 700; }}
+
+  /* QUESTÕES */
+  .bloco-header {{ font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 16px; color: #333; }}
+  .q-sim {{ display: flex; gap: 10px; margin-bottom: 18px; page-break-inside: avoid; }}
+  .q-num {{ font-weight: 800; font-size: 13px; min-width: 22px; padding-top: 1px; }}
+  .q-body {{ flex: 1; }}
+  .q-enunciado {{ margin-bottom: 8px; line-height: 1.5; }}
+  .q-alts {{ padding-left: 4px; }}
+  .q-alt {{ padding: 2px 0; line-height: 1.4; }}
+  blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 0 0 8px; color: #333; font-style: italic; font-size: 11px; background: #fafafa; }}
+  blockquote footer {{ font-size: 9px; font-style: normal; margin-top: 3px; }}
+  figure {{ margin: 8px 0; }}
+  figure img {{ max-width: 100%; max-height: 180px; }}
+  figcaption {{ font-size: 9px; color: #666; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 11px; }}
+  th, td {{ border: 1px solid #999; padding: 4px 8px; }}
+  th {{ background: #f0f0f0; font-weight: 600; }}
+
+  /* GABARITO */
+  .gabarito-page {{ padding: 40px; }}
+  .gabarito-titulo {{ font-size: 18px; font-weight: 800; text-align: center; margin-bottom: 24px; border-bottom: 2px solid #000; padding-bottom: 10px; }}
+  .gabarito-grid {{ display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }}
+  .gab-col {{ display: flex; flex-direction: column; gap: 4px; }}
+  .gab-item {{ display: flex; align-items: center; gap: 10px; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; min-width: 80px; }}
+  .gab-num {{ font-weight: 600; color: #555; min-width: 24px; }}
+  .gab-letra {{ font-weight: 800; font-size: 15px; color: #000; background: #f0f0f0; padding: 1px 8px; border-radius: 3px; }}
+</style>
+</head>
+<body>
+
+<div class="no-print">
+  <button class="btn-print" onclick="window.print()">🖨️ Imprimir simulado</button>
+  <a href="/simulados/{sim_id}" style="padding:8px 16px; border:1px solid #ccc; border-radius:6px; text-decoration:none; color:#333;">← Voltar</a>
+</div>
+
+<!-- CAPA -->
+<div class="capa">
+  <div class="capa-logo">{logo_html}</div>
+  <div class="capa-titulo">{sim['nome']}</div>
+  <div class="capa-sub">{sim['turma_nome'] or ''}</div>
+  <div class="capa-sub">{sim['trimestre']}º Trimestre · {sim['ano']}</div>
+  <div class="capa-valor">Valor por questão: {vpq} ponto{'s' if vpq != 1 else ''} · Total: {sim['pontuacao_total']} pontos</div>
+  <div class="capa-info">Este caderno contém 4 blocos com 10 questões cada · Total: 40 questões</div>
+</div>
+
+<!-- BLOCOS -->
+{blocos_html}
+
+<!-- GABARITO -->
+<div class="gabarito-page page-break">
+  <div class="gabarito-titulo">GABARITO — {sim['nome']}</div>
+  {gab_html}
+</div>
+
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+@app.get("/simulados/{sim_id}/editar", response_class=HTMLResponse)
+def form_editar_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+    turmas = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    professores = conn.execute("SELECT id, nome FROM professores WHERE status = 'ativo' ORDER BY nome").fetchall()
+    conn.close()
+
+    turmas_opts = "".join(
+        f'<option value="{t["id"]}"{" selected" if sim["turma_id"] == t["id"] else ""}>{t["nome"]} ({t["ano_letivo"]})</option>'
+        for t in turmas
+    )
+
+    def disc_opts(sel_id):
+        return "".join(
+            f'<option value="{d["id"]}"{" selected" if sel_id == d["id"] else ""}>{d["nome"]}</option>'
+            for d in disciplinas
+        )
+
+    def prof_opts(sel_id):
+        opts = f'<option value="">— nenhum —</option>'
+        opts += "".join(
+            f'<option value="{p["id"]}"{" selected" if sel_id == p["id"] else ""}>{p["nome"]}</option>'
+            for p in professores
+        )
+        return opts
+
+    blocos_html = ""
+    for b in blocos:
+        blocos_html += f"""
+        <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--bg-subtle);">
+            <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">Bloco {b['numero']}</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <label style="margin:0;">Disciplina
+                    <select name="bloco_{b['numero']}_disciplina_id" required>
+                        {disc_opts(b['disciplina_id'])}
+                    </select>
+                </label>
+                <label style="margin:0;">Professor responsável
+                    <select name="bloco_{b['numero']}_professor_id">
+                        {prof_opts(b['professor_id'])}
+                    </select>
+                </label>
+            </div>
+        </div>"""
+
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar simulado</h1></div>
+        <form method="post" action="/simulados/{sim_id}/editar">
+            <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:12px; margin-bottom:16px;">
+                <label>Nome do simulado
+                    <input type="text" name="nome" value="{sim['nome']}" required>
+                </label>
+                <label>Trimestre
+                    <select name="trimestre" required>
+                        <option value="1"{' selected' if sim['trimestre']==1 else ''}>1º Trimestre</option>
+                        <option value="2"{' selected' if sim['trimestre']==2 else ''}>2º Trimestre</option>
+                        <option value="3"{' selected' if sim['trimestre']==3 else ''}>3º Trimestre</option>
+                    </select>
+                </label>
+                <label>Ano
+                    <input type="number" name="ano" value="{sim['ano']}" min="2024" max="2030" required>
+                </label>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+                <label>Turma
+                    <select name="turma_id">
+                        <option value="">— todas as turmas —</option>
+                        {turmas_opts}
+                    </select>
+                </label>
+                <label>Pontuação total
+                    <input type="number" name="pontuacao_total" value="{sim['pontuacao_total']}" step="0.5" min="1" max="100" required>
+                    <small style="color:var(--text-muted);">Dividida pelas 40 questões</small>
+                </label>
+            </div>
+            <h3 style="margin:20px 0 12px;">Blocos</h3>
+            {blocos_html}
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button type="submit" class="btn btn-primary">💾 Salvar alterações</button>
+                <a href="/simulados/{sim_id}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Editar simulado", content, active="simulados")
+
+
+@app.post("/simulados/{sim_id}/editar")
+def salvar_edicao_simulado(
+    sim_id: int,
+    nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
+    turma_id: str = Form(""), pontuacao_total: float = Form(10.0),
+    bloco_1_disciplina_id: int = Form(...), bloco_1_professor_id: str = Form(""),
+    bloco_2_disciplina_id: int = Form(...), bloco_2_professor_id: str = Form(""),
+    bloco_3_disciplina_id: int = Form(...), bloco_3_professor_id: str = Form(""),
+    bloco_4_disciplina_id: int = Form(...), bloco_4_professor_id: str = Form(""),
+):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    tid = int(turma_id) if turma_id else None
+    conn.execute(
+        "UPDATE simulados SET nome=?, trimestre=?, ano=?, turma_id=?, pontuacao_total=? WHERE id=?",
+        (nome.strip(), trimestre, ano, tid, pontuacao_total, sim_id)
+    )
+    blocos_cfg = [
+        (1, bloco_1_disciplina_id, bloco_1_professor_id),
+        (2, bloco_2_disciplina_id, bloco_2_professor_id),
+        (3, bloco_3_disciplina_id, bloco_3_professor_id),
+        (4, bloco_4_disciplina_id, bloco_4_professor_id),
+    ]
+    for numero, disc_id, p_id in blocos_cfg:
+        pid = int(p_id) if p_id else None
+        bloco = conn.execute(
+            "SELECT id, status FROM simulado_blocos WHERE simulado_id=? AND numero=?",
+            (sim_id, numero)
+        ).fetchone()
+        if bloco:
+            # Atualizar disciplina e professor; recalcular status se mudou professor
+            novo_status = bloco["status"]
+            if pid and bloco["status"] == "aguardando":
+                novo_status = "em_contribuicao"
+            elif not pid and bloco["status"] == "em_contribuicao":
+                novo_status = "aguardando"
+            conn.execute(
+                "UPDATE simulado_blocos SET disciplina_id=?, professor_id=?, status=? WHERE id=?",
+                (disc_id, pid, novo_status, bloco["id"])
+            )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
