@@ -8167,10 +8167,15 @@ def ver_simulado(sim_id: int):
     if is_admin:
         acoes_admin += f'<a href="/simulados/{sim_id}/editar" class="btn">✏️ Editar</a>'
         if sim["status"] == "montagem":
+            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/excluir" style="margin:0;" onsubmit="return confirm(\'Excluir este simulado? Esta ação não pode ser desfeita.\')"><button type="submit" class="btn" style="color:var(--red);border-color:var(--red);">🗑️ Excluir</button></form>'
+        if sim["status"] == "aberto":
+            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/encerrar" style="margin:0;" onsubmit="return confirm(\'Encerrar este simulado? Os professores não poderão mais contribuir.\')"><button type="submit" class="btn" style="color:var(--orange);border-color:var(--orange);">⏹ Encerrar</button></form>'
+        if sim["status"] == "montagem":
             acoes_admin += f'<form method="post" action="/simulados/{sim_id}/abrir" style="margin:0;"><button type="submit" class="btn btn-primary">📤 Abrir para contribuição</button></form>'
         elif sim["status"] == "aberto" and todos_completos:
             acoes_admin += f'<form method="post" action="/simulados/{sim_id}/fechar" style="margin:0;"><button type="submit" class="btn" style="color:var(--green);border-color:var(--green);">✅ Fechar e publicar</button></form>'
         if sim["status"] in ("fechado", "publicado"):
+            acoes_admin += f'<a href="/simulados/{sim_id}/preview" class="btn" target="_blank">👁️ Preview questões</a>'
             acoes_admin += f'<a href="/simulados/{sim_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Gerar PDF</a>'
             acoes_admin += f'<a href="/simulados/{sim_id}/aplicacoes" class="btn" style="color:var(--green);border-color:var(--green);">📋 Aplicações</a>'
 
@@ -8482,18 +8487,45 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     # Lista das questões já no bloco
     bloco_items = ""
     for idx, bq in enumerate(questoes_bloco):
-        preview = _preview_enunciado(bq["enunciado"], max_chars=80)
-        bloco_items += f"""
-        <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; background:var(--card);">
-            <span style="font-weight:700; color:var(--accent); min-width:24px;">{idx+1}.</span>
-            <span style="flex:1; font-size:13px;">{preview}</span>
-            <form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/remover/{bq['sq_id']}" style="margin:0;">
-                <button type="submit" class="btn" style="padding:3px 8px; font-size:11px; color:var(--red); border-color:var(--red);">✕</button>
-            </form>
-        </div>"""
+        preview = _preview_enunciado(bq["enunciado"], max_chars=90)
+        eh_primeira = idx == 0
+        eh_ultima = idx == len(questoes_bloco) - 1
+        alts_q = conn.execute(
+            "SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra",
+            (bq["id"],)
+        ).fetchall()
+        alts_prev = "".join(
+            f'<div style="font-size:11px;padding:1px 0;{"color:var(--green);font-weight:600;" if a["correta"] else "color:var(--text-muted);"}">'
+            f'{a["letra"]}) {a["texto"][:70]}</div>'
+            for a in alts_q
+        )
+        btn_cima = "" if eh_primeira else (
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
+            f'<input type="hidden" name="direcao" value="cima">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Subir">▲</button></form>'
+        )
+        btn_baixo = "" if eh_ultima else (
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
+            f'<input type="hidden" name="direcao" value="baixo">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Descer">▼</button></form>'
+        )
+        bloco_items += (
+            f'<div class="qbi" style="border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--card);overflow:hidden;">'
+            f'<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;">'
+            f'<span style="font-weight:700;color:var(--accent);min-width:22px;">{idx+1}.</span>'
+            f'<span style="flex:1;font-size:13px;">{preview}</span>'
+            f'<div style="display:flex;gap:3px;align-items:center;">'
+            f'{btn_cima}{btn_baixo}'
+            f'<button type="button" class="btn qbi-toggle" style="padding:2px 6px;font-size:11px;" title="Expandir">👁</button>'
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/remover/{bq["sq_id"]}" style="margin:0;">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;color:var(--red);border-color:var(--red);">✕</button></form>'
+            f'</div></div>'
+            f'<div class="qbi-expand" style="display:none;padding:8px 12px 10px 32px;border-top:1px solid var(--border);background:var(--bg-subtle);font-size:12px;">'
+            f'<div style="margin-bottom:6px;line-height:1.5;">{bq["enunciado"][:400] if len(bq["enunciado"]) <= 400 else bq["enunciado"][:400] + "..."}</div>'
+            f'{alts_prev}</div></div>'
+        )
     if not bloco_items:
-        bloco_items = '<div style="color:var(--text-muted); font-size:13px; padding:8px 0;">Nenhuma questão adicionada ainda.</div>'
-
+        bloco_items = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">Nenhuma questão adicionada ainda.</div>'
     # Lista do banco
     banco_items = ""
     for bq in questoes_banco:
@@ -8514,8 +8546,20 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
 
     # Botão finalizar
     btn_finalizar = ""
-    if completo and bloco["status"] == "em_contribuicao":
-        btn_finalizar = f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/finalizar" style="margin-top:12px;"><button type="submit" class="btn btn-primary" style="background:var(--green);border-color:var(--green);">✅ Finalizar entrega do bloco</button></form>'
+    if completo and bloco["status"] in ("em_contribuicao", "completo"):
+        btn_finalizar = f'''
+        <div style="margin-top:14px; background:var(--green-bg); border:1px solid var(--green); border-radius:8px; padding:14px;">
+            <div style="font-weight:600; margin-bottom:6px; color:var(--green);">✅ Bloco completo — {n_add} questões adicionadas</div>
+            <p style="font-size:13px; color:var(--text-muted); margin-bottom:10px;">
+                Ao confirmar, as questões serão entregues para revisão da gestão. Você ainda poderá alterar a ordem antes de confirmar.
+            </p>
+            <form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/finalizar"
+                  onsubmit="return confirm('Confirmar entrega do bloco?')"
+                <button type="submit" class="btn btn-primary" style="background:var(--green);border-color:var(--green);">
+                    ✅ Confirmar entrega do bloco
+                </button>
+            </form>
+        </div>'''
 
     content = f"""
         <div class="page-header">
@@ -8541,6 +8585,18 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             </div>
         </div>
         <div style="margin-top:20px;"><a href="/simulados/{sim_id}" class="btn">← Voltar ao simulado</a></div>
+        <script>
+        document.querySelectorAll('.qbi-toggle').forEach(function(btn) {{
+            btn.addEventListener('click', function() {{
+                var exp = btn.closest('.qbi').querySelector('.qbi-expand');
+                if (exp) {{
+                    var isOpen = exp.style.display !== 'none';
+                    exp.style.display = isOpen ? 'none' : 'block';
+                    btn.textContent = isOpen ? '👁' : '🔼';
+                }}
+            }});
+        }});
+        </script>
     """
     return render_page(f"Bloco {bloco['numero']} — {bloco['disciplina_nome']}", content, active="simulados")
 
@@ -8922,3 +8978,147 @@ def salvar_edicao_simulado(
     conn.commit()
     conn.close()
     return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/excluir")
+def excluir_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT status FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if sim and sim["status"] == "montagem":
+        conn.execute("DELETE FROM simulados WHERE id = ?", (sim_id,))
+        conn.commit()
+    conn.close()
+    return RedirectResponse("/simulados", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/encerrar")
+def encerrar_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulados SET status = 'fechado' WHERE id = ?", (sim_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/mover/{sq_id}")
+def mover_questao_bloco(sim_id: int, bloco_id: int, sq_id: int, direcao: str = Form(...)):
+    """Move uma questão para cima ou para baixo dentro do bloco."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    questoes = conn.execute(
+        "SELECT id, ordem FROM simulado_questoes WHERE bloco_id = ? ORDER BY ordem",
+        (bloco_id,)
+    ).fetchall()
+    ids = [q["id"] for q in questoes]
+    if sq_id not in ids:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+    idx = ids.index(sq_id)
+    if direcao == "cima" and idx > 0:
+        outro_id = ids[idx - 1]
+    elif direcao == "baixo" and idx < len(ids) - 1:
+        outro_id = ids[idx + 1]
+    else:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+    # Trocar ordens
+    ord_atual = questoes[idx]["ordem"]
+    outro_idx = idx - 1 if direcao == "cima" else idx + 1
+    ord_outro = questoes[outro_idx]["ordem"]
+    conn.execute("UPDATE simulado_questoes SET ordem = ? WHERE id = ?", (ord_outro, sq_id))
+    conn.execute("UPDATE simulado_questoes SET ordem = ? WHERE id = ?", (ord_atual, outro_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+
+
+@app.get("/simulados/{sim_id}/preview", response_class=HTMLResponse)
+def preview_simulado(sim_id: int):
+    """Preview de todas as questões em sequência para revisão antes de imprimir."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    num_global = 0
+    blocos_html = ""
+    for bloco in blocos:
+        questoes = conn.execute("""
+            SELECT q.id, q.enunciado, q.tipo
+            FROM simulado_questoes sq
+            JOIN questoes q ON q.id = sq.questao_id
+            WHERE sq.bloco_id = ? ORDER BY sq.ordem
+        """, (bloco["id"],)).fetchall()
+
+        questoes_html = ""
+        for q in questoes:
+            num_global += 1
+            alts = conn.execute(
+                "SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra",
+                (q["id"],)
+            ).fetchall()
+            alts_html = "".join(
+                f'<div style="padding:2px 0;{"font-weight:700;color:green;" if a["correta"] else ""}"><strong>{a["letra"]})</strong> {a["texto"]}</div>'
+                for a in alts
+            )
+            questoes_html += f"""
+            <div style="margin-bottom:16px; padding:12px; border:1px solid #eee; border-radius:6px; page-break-inside:avoid;">
+                <div style="font-weight:700; color:#2563eb; margin-bottom:6px;">Q{num_global}.</div>
+                <div style="margin-bottom:8px; line-height:1.5;">{q['enunciado']}</div>
+                <div style="padding-left:12px;">{alts_html}</div>
+            </div>"""
+
+        n_q = len(questoes)
+        blocos_html += f"""
+        <div style="margin-bottom:24px;">
+            <div style="background:#f0f4f8; border-left:4px solid #2563eb; padding:10px 14px; font-weight:700; font-size:14px; margin-bottom:12px;">
+                Bloco {bloco['numero']} — {bloco['disciplina_nome']}
+                <span style="font-weight:400; font-size:12px; color:#666; margin-left:8px;">{n_q} questão(ões)</span>
+            </div>
+            {questoes_html if questoes_html else '<div style="color:#999; padding:8px;">Nenhuma questão adicionada ainda.</div>'}
+        </div>"""
+
+    conn.close()
+
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Preview — {sim['nome']}</title>
+<style>
+  body {{ font-family: 'Segoe UI', sans-serif; font-size: 13px; color: #111; max-width: 860px; margin: 0 auto; padding: 24px; }}
+  .no-print {{ background: #f0f4f8; padding: 12px 20px; border-radius: 8px; margin-bottom: 24px; display: flex; gap: 10px; align-items: center; }}
+  .btn {{ padding: 7px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; cursor: pointer; font-family: inherit; border: 1px solid #ccc; background: white; }}
+  .btn-primary {{ background: #2563eb; color: white; border-color: #2563eb; }}
+  @media print {{ .no-print {{ display: none; }} }}
+</style>
+</head>
+<body>
+<div class="no-print">
+  <strong>👁️ Preview — {sim['nome']}</strong>
+  <span style="color:#666; font-size:12px;">{_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']} · {num_global} questões</span>
+  <button class="btn btn-primary" onclick="window.print()">🖨️ Imprimir</button>
+  <a href="/simulados/{sim_id}" class="btn">← Voltar</a>
+</div>
+{blocos_html}
+</body>
+</html>"""
+    return HTMLResponse(content=html)
