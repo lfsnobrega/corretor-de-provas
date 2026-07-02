@@ -8172,6 +8172,7 @@ def ver_simulado(sim_id: int):
             acoes_admin += f'<form method="post" action="/simulados/{sim_id}/fechar" style="margin:0;"><button type="submit" class="btn" style="color:var(--green);border-color:var(--green);">✅ Fechar e publicar</button></form>'
         if sim["status"] in ("fechado", "publicado"):
             acoes_admin += f'<a href="/simulados/{sim_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Gerar PDF</a>'
+            acoes_admin += f'<a href="/simulados/{sim_id}/aplicacoes" class="btn" style="color:var(--green);border-color:var(--green);">📋 Aplicações</a>'
 
     # Cards dos blocos
     blocos_html = ""
@@ -8236,6 +8237,165 @@ def ver_simulado(sim_id: int):
         </div>
     """
     return render_page(sim["nome"], content, active="simulados")
+
+
+@app.get("/simulados/{sim_id}/aplicacoes", response_class=HTMLResponse)
+def simulado_aplicacoes(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    # Buscar prova vinculada ao simulado
+    prova_vinculada = conn.execute(
+        "SELECT id, titulo FROM provas WHERE titulo LIKE ? ORDER BY id DESC LIMIT 1",
+        (f"%[SIM-{sim_id}]%",)
+    ).fetchone()
+
+    # Turmas do ano de escolaridade
+    turmas = _turmas_do_ano(conn, sim["ano_escolaridade"] or 0)
+
+    # Aplicações já criadas para este simulado
+    aplicacoes_existentes = {}
+    if prova_vinculada:
+        apps = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome,
+                   (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS n_entregas,
+                   (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS n_alunos
+            FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.prova_id = ? AND a.titulo LIKE ?
+        """, (prova_vinculada["id"], f"%[SIM-{sim_id}]%")).fetchall()
+        for a in apps:
+            aplicacoes_existentes[a["turma_id"]] = a
+    conn.close()
+
+    ano_label = _ano_esc_label(sim["ano_escolaridade"] or 0)
+    todas_criadas = len(turmas) > 0 and all(t["id"] in aplicacoes_existentes for t in turmas)
+
+    # Botão criar em lote
+    btn_criar = ""
+    if not todas_criadas and prova_vinculada:
+        btn_criar = f'<form method="post" action="/simulados/{sim_id}/aplicacoes/criar-lote" style="margin:0;"><button type="submit" class="btn btn-primary">🚀 Criar aplicações para todas as turmas do {ano_label}</button></form>'
+    elif not prova_vinculada:
+        btn_criar = f'<div class="tip" style="background:var(--orange-bg);border-color:var(--orange);">⚠️ Nenhuma prova vinculada a este simulado. <a href="/simulados/{sim_id}/vincular-prova">Vincular prova</a></div>'
+
+    # Cards das turmas
+    turmas_html = ""
+    for t in turmas:
+        app = aplicacoes_existentes.get(t["id"])
+        if app:
+            n_e = app["n_entregas"] or 0
+            n_a = app["n_alunos"] or 0
+            pct = int(n_e / n_a * 100) if n_a else 0
+            status_cor = "var(--green)" if app["aberta"] else "var(--text-muted)"
+            status_txt = "Aberta" if app["aberta"] else "Encerrada"
+            turmas_html += f"""
+            <div style="border:1px solid var(--border); border-radius:8px; padding:14px; background:var(--card); margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <div style="font-weight:600;">{t['nome']}</div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+                            {n_e}/{n_a} cartões escaneados ·
+                            <span style="color:{status_cor}; font-weight:600;">{status_txt}</span>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                        <a href="/aplicacoes/{app['id']}/cartao-resposta" class="btn" style="font-size:12px; padding:5px 12px;" target="_blank">📄 Cartões</a>
+                        <a href="/aplicacoes/{app['id']}/escanear" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">📷 Escanear</a>
+                        <a href="/aplicacoes/{app['id']}/analise" class="btn" style="font-size:12px; padding:5px 12px;">📈 Análise</a>
+                        <a href="/aplicacoes/{app['id']}" class="btn" style="font-size:12px; padding:5px 12px;">Ver →</a>
+                    </div>
+                </div>
+                <div style="margin-top:8px; height:5px; background:var(--border); border-radius:3px;">
+                    <div style="height:5px; width:{pct}%; background:var(--green); border-radius:3px;"></div>
+                </div>
+            </div>"""
+        else:
+            turmas_html += f"""
+            <div style="border:1px solid var(--border); border-radius:8px; padding:14px; background:var(--bg-subtle); margin-bottom:8px; opacity:0.7;">
+                <div style="font-weight:600;">{t['nome']}</div>
+                <div style="font-size:12px; color:var(--text-muted);">Aplicação ainda não criada</div>
+            </div>"""
+
+    if not turmas:
+        turmas_html = '<div class="empty">Nenhuma turma encontrada para o ' + ano_label + '.</div>'
+
+    content = f"""
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h1>📋 Aplicações — {sim['nome']}</h1>
+                <p class="subtitle">{ano_label} · {sim['trimestre']}º Trimestre · {sim['ano']}</p>
+            </div>
+            {btn_criar}
+        </div>
+        {turmas_html}
+        <div style="margin-top:16px;"><a href="/simulados/{sim_id}" class="btn">← Voltar ao simulado</a></div>
+    """
+    return render_page("Aplicações do simulado", content, active="simulados")
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/criar-lote")
+def criar_aplicacoes_lote(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    # Verificar/criar prova vinculada
+    titulo_prova = f"{sim['nome']} [SIM-{sim_id}]"
+    prova = conn.execute("SELECT id FROM provas WHERE titulo = ?", (titulo_prova,)).fetchone()
+    if not prova:
+        # Criar prova agregando todas as questões dos blocos em ordem
+        cur = conn.execute(
+            "INSERT INTO provas (titulo, descricao, criada_por_professor_id) VALUES (?,?,?)",
+            (titulo_prova, f"Simulado gerado automaticamente — {sim['nome']}", prof["id"])
+        )
+        prova_id = cur.lastrowid
+        # Adicionar questões de todos os blocos em ordem corrida
+        ordem_global = 0
+        blocos = conn.execute(
+            "SELECT id FROM simulado_blocos WHERE simulado_id = ? ORDER BY numero",
+            (sim_id,)
+        ).fetchall()
+        for bloco in blocos:
+            questoes = conn.execute(
+                "SELECT questao_id FROM simulado_questoes WHERE bloco_id = ? ORDER BY ordem",
+                (bloco["id"],)
+            ).fetchall()
+            for q in questoes:
+                conn.execute(
+                    "INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?,?,?)",
+                    (prova_id, q["questao_id"], ordem_global)
+                )
+                ordem_global += 1
+        conn.execute("UPDATE provas SET status_revisao = 'aprovada' WHERE id = ?", (prova_id,))
+    else:
+        prova_id = prova["id"]
+
+    # Criar aplicação para cada turma do ano
+    turmas = _turmas_do_ano(conn, sim["ano_escolaridade"] or 0)
+    titulo_app = f"{sim['nome']} [SIM-{sim_id}]"
+    for t in turmas:
+        ja_existe = conn.execute(
+            "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ? AND titulo LIKE ?",
+            (prova_id, t["id"], f"%[SIM-{sim_id}]%")
+        ).fetchone()
+        if not ja_existe:
+            conn.execute(
+                "INSERT INTO aplicacoes (prova_id, turma_id, modo, titulo, aberta, criada_por_professor_id) VALUES (?,?,?,?,?,?)",
+                (prova_id, t["id"], "impressa", titulo_app, 1, prof["id"])
+            )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
 
 
 @app.post("/simulados/{sim_id}/abrir")
