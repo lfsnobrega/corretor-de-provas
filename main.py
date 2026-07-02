@@ -8478,7 +8478,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
         WHERE {wc}
         ORDER BY q.id DESC LIMIT 50
     """, params_q).fetchall()
-    conn.close()
+
 
     n_add = len(questoes_bloco)
     n_tot = bloco["n_questoes"]
@@ -8526,6 +8526,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
         )
     if not bloco_items:
         bloco_items = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">Nenhuma questão adicionada ainda.</div>'
+    conn.close()
     # Lista do banco
     banco_items = ""
     for bq in questoes_banco:
