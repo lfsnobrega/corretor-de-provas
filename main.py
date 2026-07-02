@@ -8174,8 +8174,9 @@ def ver_simulado(sim_id: int):
             acoes_admin += f'<form method="post" action="/simulados/{sim_id}/abrir" style="margin:0;"><button type="submit" class="btn btn-primary">📤 Abrir para contribuição</button></form>'
         elif sim["status"] == "aberto" and todos_completos:
             acoes_admin += f'<form method="post" action="/simulados/{sim_id}/fechar" style="margin:0;"><button type="submit" class="btn" style="color:var(--green);border-color:var(--green);">✅ Fechar e publicar</button></form>'
+        # Preview sempre disponível (em qualquer status)
+        acoes_admin += f'<a href="/simulados/{sim_id}/preview" class="btn" target="_blank">👁️ Preview questões</a>'
         if sim["status"] in ("fechado", "publicado"):
-            acoes_admin += f'<a href="/simulados/{sim_id}/preview" class="btn" target="_blank">👁️ Preview questões</a>'
             acoes_admin += f'<a href="/simulados/{sim_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Gerar PDF</a>'
             acoes_admin += f'<a href="/simulados/{sim_id}/aplicacoes" class="btn" style="color:var(--green);border-color:var(--green);">📋 Aplicações</a>'
 
@@ -8220,6 +8221,9 @@ def ver_simulado(sim_id: int):
     status_cores = {"montagem": "var(--text-muted)", "aberto": "var(--orange)", "fechado": "var(--red)", "publicado": "var(--green)"}
     status_labels = {"montagem": "Em montagem", "aberto": "Aberto", "fechado": "Fechado", "publicado": "Publicado"}
 
+    # Botão preview para todos
+    btn_preview = f'<a href="/simulados/{sim_id}/preview" class="btn" target="_blank" style="font-size:12px;">👁️ Preview questões</a>'
+
     content = f"""
         <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
             <div>
@@ -8228,7 +8232,7 @@ def ver_simulado(sim_id: int):
                     · <span style="color:{status_cores.get(sim['status'],'var(--text-muted)')}; font-weight:600;">{status_labels.get(sim['status'], sim['status'])}</span>
                 </p>
             </div>
-            <div style="display:flex; gap:8px; flex-wrap:wrap;">{acoes_admin}</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">{acoes_admin if is_admin else btn_preview}</div>
         </div>
         <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:20px;">
             <div class="metric"><div class="metric-label">Pontuação total</div><div class="metric-value">{sim['pontuacao_total']}</div></div>
