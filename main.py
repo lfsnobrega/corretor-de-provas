@@ -1083,6 +1083,8 @@ def format_data_br(iso_str):
 def _preview_enunciado(enunciado: str, max_chars: int = 160) -> str:
     """Gera texto limpo para preview: remove tags HTML e simplifica notação MathJax."""
     import re as _re, html as _html
+    # Remove tabelas inteiras (substituir por [tabela])
+    enunciado = _re.sub(r'<table[^>]*>.*?</table>', '[tabela]', enunciado, flags=_re.DOTALL | _re.IGNORECASE)
     # Simplifica fórmulas: remove delimitadores $ mas mantém o conteúdo LaTeX legível
     # ex: $\frac{1}{2}$ → [1/2]   $x^{2}$ → [x^2]
     def _simplificar_formula(m):
