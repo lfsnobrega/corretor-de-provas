@@ -8545,10 +8545,16 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     """, (bloco_id,)).fetchall()
     ids_no_bloco = {q["id"] for q in questoes_bloco}
 
-    # Banco de questões disponíveis (filtrado por disciplina do bloco)
+    # Banco de questões disponíveis (filtrado por disciplina + ano de escolaridade do simulado)
+    ano_esc = sim["ano_escolaridade"] or 0
+    # Mapear ano de escolaridade para label de ano usado no banco
+    ano_esc_labels = {6: "6º ano", 7: "7º ano", 8: "8º ano", 9: "9º ano"}
+    ano_label_q = ano_esc_labels.get(ano_esc, "")
     where_q = ["q.disciplina_id = ?", "q.tipo = 'multipla_escolha'"]
     params_q = [bloco["disciplina_id"]]
-    # Qualquer professor vê todas as questões da disciplina do bloco
+    if ano_label_q:
+        where_q.append("q.ano = ?")
+        params_q.append(ano_label_q)
     if q:
         where_q.append("q.enunciado LIKE ?")
         params_q.append(f"%{q}%")
@@ -8557,7 +8563,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
         SELECT q.id, q.enunciado, q.ano, d.nome AS disc_nome
         FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
         WHERE {wc}
-        ORDER BY q.id DESC LIMIT 50
+        ORDER BY q.id DESC LIMIT 100
     """, params_q).fetchall()
 
 
