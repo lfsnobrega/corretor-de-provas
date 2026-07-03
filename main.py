@@ -8547,13 +8547,25 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     """, (bloco_id,)).fetchall()
     ids_no_bloco = {q["id"] for q in questoes_bloco}
 
-    # Banco de questões disponíveis (filtrado por disciplina + ano de escolaridade do simulado)
+    # Banco de questões disponíveis (filtrado por disciplina + subdisciplinas + ano de escolaridade)
     ano_esc = sim["ano_escolaridade"] or 0
-    # Mapear ano de escolaridade para label de ano usado no banco
     ano_esc_labels = {6: "6º ano", 7: "7º ano", 8: "8º ano", 9: "9º ano"}
     ano_label_q = ano_esc_labels.get(ano_esc, "")
-    where_q = ["q.disciplina_id = ?", "q.tipo = 'multipla_escolha'"]
-    params_q = [bloco["disciplina_id"]]
+
+    # Mapear disciplina-pai para incluir subdisciplinas automaticamente
+    # Buscar todas as disciplinas que começam com o nome da disciplina do bloco
+    disc_pai = conn.execute("SELECT nome FROM disciplinas WHERE id = ?", (bloco["disciplina_id"],)).fetchone()
+    disc_pai_nome = disc_pai["nome"] if disc_pai else ""
+    # Buscar subdisciplinas (ex: "Matemática" inclui "Matemática | Álgebra" e "Matemática | Geometria")
+    subdisciplinas = conn.execute(
+        "SELECT id FROM disciplinas WHERE id = ? OR nome LIKE ?",
+        (bloco["disciplina_id"], f"{disc_pai_nome} |%")
+    ).fetchall()
+    disc_ids = [d["id"] for d in subdisciplinas]
+    placeholders = ",".join("?" * len(disc_ids))
+
+    where_q = [f"q.disciplina_id IN ({placeholders})", "q.tipo = 'multipla_escolha'"]
+    params_q = disc_ids[:]
     if ano_label_q:
         where_q.append("q.ano = ?")
         params_q.append(ano_label_q)
@@ -8565,7 +8577,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
         SELECT q.id, q.enunciado, q.ano, d.nome AS disc_nome
         FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
         WHERE {wc}
-        ORDER BY q.id DESC LIMIT 100
+        ORDER BY d.nome, q.id DESC LIMIT 100
     """, params_q).fetchall()
 
 
@@ -8627,7 +8639,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             <input type="hidden" name="questao_id" value="{bq['id']}">
             <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card);">
                 <span style="flex:1; font-size:13px;">{preview}</span>
-                <span style="font-size:11px; color:var(--text-muted);">{bq['ano'] or '—'}</span>
+                <span style="font-size:11px; color:var(--text-muted);">{bq['disc_nome'].replace(disc_pai_nome, '').strip(' |') or bq['disc_nome']} · {bq['ano'] or '—'}</span>
                 {'<button type="submit" class="btn btn-primary" style="padding:3px 10px; font-size:11px;">+ Add</button>' if not completo else '<span style="font-size:11px; color:var(--text-muted);">Bloco cheio</span>'}
             </div>
         </form>"""
