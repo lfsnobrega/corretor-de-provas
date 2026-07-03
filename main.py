@@ -9263,6 +9263,14 @@ def preview_simulado(sim_id: int):
 <head>
 <meta charset="UTF-8">
 <title>Preview — {sim['nome']}</title>
+<script>
+window.MathJax = {{
+  tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true }},
+  svg: {{ fontCache: 'global' }},
+  options: {{ skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }}
+}};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <style>
   body {{ font-family: 'Segoe UI', sans-serif; font-size: 13px; color: #111; max-width: 860px; margin: 0 auto; padding: 24px; }}
   .no-print {{ background: #f0f4f8; padding: 12px 20px; border-radius: 8px; margin-bottom: 24px; display: flex; gap: 10px; align-items: center; }}
