@@ -1968,7 +1968,7 @@ def form_nova_questao_passo1():
                 <label>Ano de escolaridade<select name="ano">{anos_options}</select></label>
             </div>
             <div id="bncc-container" style="margin:10px 0;">
-                <label style="margin-bottom:6px;">Habilidades BNCC <span style="font-weight:400; color:var(--text-muted); font-size:12px;">(opcional)</span></label>
+                <label style="margin-bottom:6px;">Habilidades BNCC <span style="font-weight:400; color:var(--red); font-size:12px;">* obrigatório</span></label>
                 <input type="hidden" name="habilidades_codigos" id="bncc-hidden">
                 <div id="bncc-chips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:24px; margin-bottom:8px;"></div>
                 <input type="search" id="bncc-search" placeholder="Digite o código (EF09MA09) ou palavra-chave (fração, célula...)" style="margin:0;">
@@ -1976,7 +1976,7 @@ def form_nova_questao_passo1():
             </div>
             {link_catalogo}
             <div class="page-actions">
-                <button type="submit" class="btn btn-primary">Próximo: cadastrar conteúdo →</button>
+                <button type="submit" class="btn btn-primary" onclick="var h=document.getElementById(&quot;bncc-hidden&quot;); if(!h||!h.value.trim()){{alert(&quot;Selecione pelo menos uma Habilidade BNCC antes de avançar.&quot;);return false;}}">Próximo: cadastrar conteúdo →</button>
                 <a href="/questoes" class="btn">Cancelar</a>
             </div>
         </form>
@@ -8646,6 +8646,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             f'<div style="display:flex;gap:3px;align-items:center;">'
             f'{btn_cima}{btn_baixo}'
             f'<button type="button" class="btn qbi-toggle" data-id="{bq["sq_id"]}" style="padding:2px 6px;font-size:11px;" title="Expandir">👁</button>'
+            f'{f'<a href="/questoes/{bq["id"]}/editar" class="btn" style="padding:2px 6px;font-size:11px;" title="Editar questão" target="_blank">✏️</a>' if is_admin else ""}'
             f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/remover/{bq["sq_id"]}" style="margin:0;">'
             f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;color:var(--red);border-color:var(--red);">✕</button></form>'
             f'</div></div>'
@@ -8685,7 +8686,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
                 Ao confirmar, as questões serão entregues para revisão da gestão. Você ainda poderá alterar a ordem antes de confirmar.
             </p>
             <form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/finalizar"
-                  onsubmit="return confirm('Confirmar entrega do bloco?')"
+                  onsubmit="return confirm('Confirmar entrega do bloco? A gestão receberá as questões para revisão.')">
                 <button type="submit" class="btn btn-primary" style="background:var(--green);border-color:var(--green);">
                     ✅ Confirmar entrega do bloco
                 </button>
@@ -8779,13 +8780,36 @@ def finalizar_bloco(sim_id: int, bloco_id: int):
     if not prof:
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
-    bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id)).fetchone()
+    bloco = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.id = ? AND b.simulado_id = ?
+    """, (bloco_id, sim_id)).fetchone()
+    entregue = False
     if bloco:
         n = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
         if n >= bloco["n_questoes"]:
             conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
             conn.commit()
+            entregue = True
     conn.close()
+    if entregue:
+        disc_nome = bloco["disciplina_nome"] if bloco else "bloco"
+        content = f"""
+            <div style="max-width:500px; margin:80px auto; text-align:center; padding:0 20px;">
+                <div style="font-size:60px; margin-bottom:16px;">✅</div>
+                <h1 style="font-size:22px; margin-bottom:8px;">Questões entregues com sucesso!</h1>
+                <p style="color:var(--text-muted); margin-bottom:24px;">
+                    O Bloco {bloco['numero']} — <strong>{disc_nome}</strong> foi marcado como completo
+                    e está aguardando revisão da gestão.
+                </p>
+                <div style="display:flex; gap:10px; justify-content:center;">
+                    <a href="/simulados/{sim_id}" class="btn btn-primary">← Voltar ao simulado</a>
+                    <a href="/simulados/{sim_id}/blocos/{bloco_id}/contribuir" class="btn">Ver minhas questões</a>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Entrega confirmada", content, active="simulados"))
     return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
 
 
