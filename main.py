@@ -8519,6 +8519,29 @@ def aprovar_bloco(sim_id: int, bloco_id: int):
     return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
 
 
+
+def _enunciado_expand(enunciado: str, max_chars: int = 400) -> str:
+    """Sanitiza enunciado para exibição no expand do bloco do simulado.
+    Mantém formatação básica (b, i, u, br) mas remove tags que quebram layout
+    (table, div, style, script, img). Substitui tabelas por [tabela]."""
+    import re as _re, html as _html
+    # Remover tabelas completamente
+    texto = _re.sub(r'<table[^>]*>.*?</table>', '<em>[tabela]</em>', enunciado, flags=_re.DOTALL | _re.IGNORECASE)
+    # Remover tags perigosas mas manter b, i, u, strong, em, br, p, span
+    safe_tags = {'b', 'i', 'u', 'strong', 'em', 'br', 'p', 'span', 'li', 'ul', 'ol'}
+    def _filtrar(m):
+        tag = m.group(0)
+        nome = _re.match(r'</?([a-zA-Z]+)', tag)
+        if nome and nome.group(1).lower() in safe_tags:
+            return tag
+        return ''
+    texto = _re.sub(r'<[^>]+>', _filtrar, texto)
+    # Limitar tamanho
+    if len(texto) > max_chars:
+        texto = texto[:max_chars] + '...'
+    return texto
+
+
 @app.get("/simulados/{sim_id}/blocos/{bloco_id}/contribuir", response_class=HTMLResponse)
 def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = None, q: Optional[str] = None):
     prof = _current_prof_ctx.get()
@@ -8621,8 +8644,8 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/remover/{bq["sq_id"]}" style="margin:0;">'
             f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;color:var(--red);border-color:var(--red);">✕</button></form>'
             f'</div></div>'
-            f'<div class="qbi-expand" style="display:none;padding:8px 12px 10px 32px;border-top:1px solid var(--border);background:var(--bg-subtle);font-size:12px;">'
-            f'<div style="margin-bottom:6px;line-height:1.5;">{bq["enunciado"][:400] if len(bq["enunciado"]) <= 400 else bq["enunciado"][:400] + "..."}</div>'
+            f'<div class="qbi-expand" style="display:none;padding:8px 12px 10px 32px;border-top:1px solid var(--border);background:var(--bg-subtle);font-size:12px;overflow:hidden;">'
+            f'<div style="margin-bottom:6px;line-height:1.5;">{_enunciado_expand(bq["enunciado"])}</div>'
             f'{alts_prev}</div></div>'
         )
     if not bloco_items:
