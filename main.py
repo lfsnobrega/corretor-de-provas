@@ -8244,8 +8244,7 @@ def ver_simulado(sim_id: int):
     acoes_admin = ""
     if is_admin:
         acoes_admin += f'<a href="/simulados/{sim_id}/editar" class="btn">✏️ Editar</a>'
-        if sim["status"] == "montagem":
-            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/excluir" style="margin:0;" onsubmit="return confirm(\'Excluir este simulado? Esta ação não pode ser desfeita.\')"><button type="submit" class="btn" style="color:var(--red);border-color:var(--red);">🗑️ Excluir</button></form>'
+        acoes_admin += f'<form method="post" action="/simulados/{sim_id}/excluir" style="margin:0;" onsubmit="return confirm(\'Excluir este simulado permanentemente? Esta ação não pode ser desfeita.\')"><button type="submit" class="btn" style="color:var(--red);border-color:var(--red);">🗑️ Excluir</button></form>'
         if sim["status"] == "aberto":
             acoes_admin += f'<form method="post" action="/simulados/{sim_id}/encerrar" style="margin:0;" onsubmit="return confirm(\'Encerrar este simulado? Os professores não poderão mais contribuir.\')"><button type="submit" class="btn" style="color:var(--orange);border-color:var(--orange);">⏹ Encerrar</button></form>'
         if sim["status"] == "montagem":
@@ -8867,7 +8866,7 @@ def imprimir_simulado(sim_id: int):
         gab_html += '</div>'
     gab_html += '</div>'
 
-    logo_html = '<img src="/static/logo_escola.png" style="height:60px;" alt="Logo">' if True else ""
+    logo_html = '<img src="/static/imagens/logo_walmir.png" style="max-height:80px; max-width:200px; display:block; margin:0 auto;" alt="E.M. Walmir de Freitas Monteiro">'
 
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -9099,7 +9098,7 @@ def excluir_simulado(sim_id: int):
         return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
     conn = get_db()
     sim = conn.execute("SELECT status FROM simulados WHERE id = ?", (sim_id,)).fetchone()
-    if sim and sim["status"] == "montagem":
+    if sim:
         conn.execute("DELETE FROM simulados WHERE id = ?", (sim_id,))
         conn.commit()
     conn.close()
@@ -9259,6 +9258,10 @@ def preview_simulado(sim_id: int):
 </style>
 </head>
 <body>
+<div style="text-align:center; margin-bottom:20px; padding-bottom:16px; border-bottom:2px solid #000;">
+  <img src="/static/imagens/logo_walmir.png" style="max-height:70px; max-width:180px;" alt="Walmir">
+  <div style="font-size:11px; color:#555; margin-top:6px;">E.M. Walmir de Freitas Monteiro</div>
+</div>
 <div class="no-print">
   <strong>👁️ Preview — {sim['nome']}</strong>
   <span style="color:#666; font-size:12px;">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']} · {num_global} questões</span>
