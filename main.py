@@ -8127,7 +8127,10 @@ def form_novo_simulado(request: Request):
     content = f"""
         <div class="page-header"><h1>+ Novo simulado</h1></div>
         <form method="post" action="/simulados/novo">
-            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
+            <div class="tip" style="margin-bottom:16px; font-size:13px;">
+                💡 O nome será gerado automaticamente: <strong>Simulado — Dia XX · Xº ano · Xº Trimestre</strong>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:14px;">
                 <label>Trimestre
                     <select name="trimestre" required>
                         <option value="1">1º Trimestre</option>
@@ -8146,9 +8149,7 @@ def form_novo_simulado(request: Request):
                 </label>
                 <label>Ano<input type="number" name="ano" value="{ano_atual}" min="2024" max="2030" required></label>
             </div>
-            <div class="tip" style="margin-bottom:14px; font-size:13px;">
-                💡 O nome será gerado automaticamente: <strong>Simulado — Dia XX · Xº ano · Xº Trimestre</strong>
-            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
                 <label>Ano de escolaridade
                     <select name="ano_escolaridade" required>
                         <option value="">— selecione —</option>
@@ -8160,7 +8161,7 @@ def form_novo_simulado(request: Request):
                 </label>
                 <label>Pontuação total
                     <input type="number" name="pontuacao_total" value="10" step="0.5" min="1" max="100" required>
-                    <small style="color:var(--text-muted);">Valor dividido pelas 40 questões</small>
+                    <small style="color:var(--text-muted);">Valor dividido igualmente pelas 40 questões</small>
                 </label>
             </div>
             <h3 style="margin:20px 0 12px;">Configuração dos blocos</h3>
