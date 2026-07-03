@@ -554,6 +554,8 @@ def init_db():
         ano_escolaridade INTEGER,
         pontuacao_total REAL NOT NULL DEFAULT 10.0,
         status TEXT NOT NULL DEFAULT 'montagem',
+        dia INTEGER NOT NULL DEFAULT 1,
+        ordem INTEGER NOT NULL DEFAULT 0,
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         criado_por_professor_id INTEGER,
         FOREIGN KEY (criado_por_professor_id) REFERENCES professores(id)
@@ -562,6 +564,13 @@ def init_db():
     cols_sim = {row[1] for row in conn.execute("PRAGMA table_info(simulados)").fetchall()}
     if "ano_escolaridade" not in cols_sim:
         conn.execute("ALTER TABLE simulados ADD COLUMN ano_escolaridade INTEGER")
+    if "ordem" not in cols_sim:
+        conn.execute("ALTER TABLE simulados ADD COLUMN ordem INTEGER NOT NULL DEFAULT 0")
+        sims = conn.execute("SELECT id FROM simulados ORDER BY ano DESC, trimestre DESC, id DESC").fetchall()
+        for i, s in enumerate(sims):
+            conn.execute("UPDATE simulados SET ordem = ? WHERE id = ?", (i, s["id"]))
+    if "dia" not in cols_sim:
+        conn.execute("ALTER TABLE simulados ADD COLUMN dia INTEGER NOT NULL DEFAULT 1")
     if "turma_id" in cols_sim:
         pass  # mantém coluna legada sem remover
     conn.execute("""CREATE TABLE IF NOT EXISTS simulado_blocos (
@@ -7970,7 +7979,7 @@ def listar_simulados(request: Request):
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
                    (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
             FROM simulados s
-            ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
+            ORDER BY s.ordem ASC, s.id DESC
         """).fetchall()
     else:
         # Professores veem simulados abertos (podem contribuir) + os que criaram
@@ -7987,8 +7996,9 @@ def listar_simulados(request: Request):
 
     btn_novo = '<a href="/simulados/novo" class="btn btn-primary">+ Novo simulado</a>' if is_admin else ""
 
+    ids_ordem = [s["id"] for s in simulados]
     cards = ""
-    for s in simulados:
+    for idx, s in enumerate(simulados):
         n_b = s["n_blocos"] or 0
         n_c = s["n_completos"] or 0
         pct = int(n_c / n_b * 100) if n_b else 0
@@ -7998,26 +8008,44 @@ def listar_simulados(request: Request):
                         "fechado": ("var(--red)", "Fechado"),
                         "publicado": ("var(--green)", "Publicado")}
         sc, sl = status_cores.get(s["status"], ("var(--text-muted)", s["status"]))
+        eh_primeiro = idx == 0
+        eh_ultimo = idx == len(simulados) - 1
+        btns_ordem = ""
+        if is_admin:
+            btn_cima = "" if eh_primeiro else (
+                f'<form method="post" action="/simulados/{s["id"]}/mover" style="margin:0;">' +
+                f'<input type="hidden" name="direcao" value="cima">' +
+                f'<button type="submit" class="btn" style="padding:2px 8px;font-size:12px;" title="Mover para cima">▲</button></form>'
+            )
+            btn_baixo = "" if eh_ultimo else (
+                f'<form method="post" action="/simulados/{s["id"]}/mover" style="margin:0;">' +
+                f'<input type="hidden" name="direcao" value="baixo">' +
+                f'<button type="submit" class="btn" style="padding:2px 8px;font-size:12px;" title="Mover para baixo">▼</button></form>'
+            )
+            btns_ordem = f'<div style="display:flex;gap:3px;align-items:center;">{btn_cima}{btn_baixo}</div>'
         cards += f"""
-        <a href="/simulados/{s['id']}" style="display:block; text-decoration:none; border:1px solid var(--border); border-radius:10px; padding:16px 20px; margin-bottom:12px; background:var(--card);">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
-                <div>
-                    <div style="font-weight:700; font-size:15px; color:var(--text);">{s['nome']}</div>
-                    <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
-                        {s['trimestre']}º trimestre · {s['ano']} · {_ano_esc_label(s['ano_escolaridade'] or 0)}
+        <div style="display:flex; gap:8px; align-items:stretch; margin-bottom:12px;">
+            {f'<div style="display:flex;flex-direction:column;justify-content:center;gap:3px;">{btns_ordem}</div>' if is_admin else ""}
+            <a href="/simulados/{s['id']}" style="flex:1; display:block; text-decoration:none; border:1px solid var(--border); border-radius:10px; padding:16px 20px; background:var(--card);">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <div style="font-weight:700; font-size:15px; color:var(--text);">{s['nome']}</div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
+                            Dia {s['dia']:02d} · {_ano_esc_label(s['ano_escolaridade'] or 0)} · {s['trimestre']}º trimestre · {s['ano']}
+                        </div>
+                    </div>
+                    <span style="color:{sc}; font-size:12px; font-weight:600;">{sl}</span>
+                </div>
+                <div style="margin-top:12px;">
+                    <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-muted); margin-bottom:4px;">
+                        <span>Blocos entregues</span><span>{n_c}/{n_b}</span>
+                    </div>
+                    <div style="height:6px; background:var(--border); border-radius:3px;">
+                        <div style="height:6px; width:{pct}%; background:{cor_barra}; border-radius:3px; transition:width 0.3s;"></div>
                     </div>
                 </div>
-                <span style="color:{sc}; font-size:12px; font-weight:600;">{sl}</span>
-            </div>
-            <div style="margin-top:12px;">
-                <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-muted); margin-bottom:4px;">
-                    <span>Blocos entregues</span><span>{n_c}/{n_b}</span>
-                </div>
-                <div style="height:6px; background:var(--border); border-radius:3px;">
-                    <div style="height:6px; width:{pct}%; background:{cor_barra}; border-radius:3px; transition:width 0.3s;"></div>
-                </div>
-            </div>
-        </a>"""
+            </a>
+        </div>"""
 
     if not cards:
         cards = '<div class="empty">Nenhum simulado encontrado.</div>'
@@ -8031,6 +8059,41 @@ def listar_simulados(request: Request):
     """
     return render_page("Simulados", content, active="simulados")
 
+
+
+
+@app.post("/simulados/{sim_id}/mover")
+def mover_simulado(sim_id: int, direcao: str = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    sims = conn.execute("SELECT id, ordem FROM simulados ORDER BY ordem ASC, id DESC").fetchall()
+    ids = [s["id"] for s in sims]
+    if sim_id not in ids:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+    idx = ids.index(sim_id)
+    if direcao == "cima" and idx > 0:
+        outro_id = ids[idx - 1]
+        outro_idx = idx - 1
+    elif direcao == "baixo" and idx < len(ids) - 1:
+        outro_id = ids[idx + 1]
+        outro_idx = idx + 1
+    else:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+    ord_atual = sims[idx]["ordem"]
+    ord_outro = sims[outro_idx]["ordem"]
+    # Se ordens iguais (inicial), usa posição
+    if ord_atual == ord_outro:
+        ord_atual = idx
+        ord_outro = outro_idx
+    conn.execute("UPDATE simulados SET ordem = ? WHERE id = ?", (ord_outro, sim_id))
+    conn.execute("UPDATE simulados SET ordem = ? WHERE id = ?", (ord_atual, outro_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/simulados", status_code=303)
 
 @app.get("/simulados/novo", response_class=HTMLResponse)
 def form_novo_simulado(request: Request):
@@ -8064,8 +8127,7 @@ def form_novo_simulado(request: Request):
     content = f"""
         <div class="page-header"><h1>+ Novo simulado</h1></div>
         <form method="post" action="/simulados/novo">
-            <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:12px; margin-bottom:16px;">
-                <label>Nome do simulado<input type="text" name="nome" placeholder="Ex: Simulado 1 — 2026" required></label>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
                 <label>Trimestre
                     <select name="trimestre" required>
                         <option value="1">1º Trimestre</option>
@@ -8073,9 +8135,20 @@ def form_novo_simulado(request: Request):
                         <option value="3">3º Trimestre</option>
                     </select>
                 </label>
+                <label>Dia do simulado
+                    <select name="dia" required>
+                        <option value="1">Dia 01</option>
+                        <option value="2">Dia 02</option>
+                        <option value="3">Dia 03</option>
+                        <option value="4">Dia 04</option>
+                        <option value="5">Dia 05</option>
+                    </select>
+                </label>
                 <label>Ano<input type="number" name="ano" value="{ano_atual}" min="2024" max="2030" required></label>
             </div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+            <div class="tip" style="margin-bottom:14px; font-size:13px;">
+                💡 O nome será gerado automaticamente: <strong>Simulado — Dia XX · Xº ano · Xº Trimestre</strong>
+            </div>
                 <label>Ano de escolaridade
                     <select name="ano_escolaridade" required>
                         <option value="">— selecione —</option>
@@ -8103,7 +8176,7 @@ def form_novo_simulado(request: Request):
 
 @app.post("/simulados/novo")
 def criar_simulado(
-    nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
+    dia: int = Form(1), trimestre: int = Form(...), ano: int = Form(...),
     ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
     bloco_1_disciplina_id: int = Form(...),
     bloco_2_disciplina_id: int = Form(...),
@@ -8115,9 +8188,13 @@ def criar_simulado(
         return RedirectResponse("/simulados", status_code=303)
     conn = get_db()
     aesc = int(ano_escolaridade) if ano_escolaridade else None
+    ano_label = _ano_esc_label(aesc) if aesc else "—"
+    nome_auto = f"Simulado — Dia {dia:02d} · {ano_label} · {trimestre}º Trimestre"
+    # Calcular ordem automática: dia * 10 + ano_escolaridade (6→7→8→9)
+    ordem_auto = dia * 10 + (aesc or 0)
     cur = conn.execute(
-        "INSERT INTO simulados (nome, trimestre, ano, ano_escolaridade, pontuacao_total, criado_por_professor_id) VALUES (?,?,?,?,?,?)",
-        (nome.strip(), trimestre, ano, aesc, pontuacao_total, prof["id"])
+        "INSERT INTO simulados (nome, trimestre, ano, dia, ano_escolaridade, pontuacao_total, ordem, criado_por_professor_id) VALUES (?,?,?,?,?,?,?,?)",
+        (nome_auto, trimestre, ano, dia, aesc, pontuacao_total, ordem_auto, prof["id"])
     )
     sim_id = cur.lastrowid
     blocos = [
@@ -8228,7 +8305,7 @@ def ver_simulado(sim_id: int):
         <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
             <div>
                 <h1>📊 {sim['nome']}</h1>
-                <p class="subtitle">{sim['trimestre']}º Trimestre · {sim['ano']} · {_ano_esc_label(sim['ano_escolaridade'] or 0)}
+                <p class="subtitle">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']}
                     · <span style="color:{status_cores.get(sim['status'],'var(--text-muted)')}; font-weight:600;">{status_labels.get(sim['status'], sim['status'])}</span>
                 </p>
             </div>
@@ -8857,7 +8934,7 @@ def imprimir_simulado(sim_id: int):
   <div class="capa-logo">{logo_html}</div>
   <div class="capa-titulo">{sim['nome']}</div>
   <div class="capa-sub">{_ano_esc_label(sim['ano_escolaridade'] or 0)}</div>
-  <div class="capa-sub">{sim['trimestre']}º Trimestre · {sim['ano']}</div>
+  <div class="capa-sub">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {sim['trimestre']}º Trimestre · {sim['ano']}</div>
   <div class="capa-valor">Valor por questão: {vpq} ponto{'s' if vpq != 1 else ''} · Total: {sim['pontuacao_total']} pontos</div>
   <div class="capa-info">Este caderno contém 4 blocos com 10 questões cada · Total: 40 questões</div>
 </div>
@@ -8918,15 +8995,21 @@ def form_editar_simulado(sim_id: int):
     content = f"""
         <div class="page-header"><h1>✏️ Editar simulado</h1></div>
         <form method="post" action="/simulados/{sim_id}/editar">
-            <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:12px; margin-bottom:16px;">
-                <label>Nome do simulado
-                    <input type="text" name="nome" value="{sim['nome']}" required>
-                </label>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:16px;">
                 <label>Trimestre
                     <select name="trimestre" required>
                         <option value="1"{' selected' if sim['trimestre']==1 else ''}>1º Trimestre</option>
                         <option value="2"{' selected' if sim['trimestre']==2 else ''}>2º Trimestre</option>
                         <option value="3"{' selected' if sim['trimestre']==3 else ''}>3º Trimestre</option>
+                    </select>
+                </label>
+                <label>Dia do simulado
+                    <select name="dia" required>
+                        <option value="1"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==1 else ''}>Dia 01</option>
+                        <option value="2"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==2 else ''}>Dia 02</option>
+                        <option value="3"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==3 else ''}>Dia 03</option>
+                        <option value="4"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==4 else ''}>Dia 04</option>
+                        <option value="5"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==5 else ''}>Dia 05</option>
                     </select>
                 </label>
                 <label>Ano
@@ -8962,7 +9045,7 @@ def form_editar_simulado(sim_id: int):
 @app.post("/simulados/{sim_id}/editar")
 def salvar_edicao_simulado(
     sim_id: int,
-    nome: str = Form(...), trimestre: int = Form(...), ano: int = Form(...),
+    dia: int = Form(1), trimestre: int = Form(...), ano: int = Form(...),
     ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
     bloco_1_disciplina_id: int = Form(...),
     bloco_2_disciplina_id: int = Form(...),
@@ -8974,9 +9057,12 @@ def salvar_edicao_simulado(
         return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
     conn = get_db()
     aesc = int(ano_escolaridade) if ano_escolaridade else None
+    ano_label = _ano_esc_label(aesc) if aesc else "—"
+    nome_auto = f"Simulado — Dia {dia:02d} · {ano_label} · {trimestre}º Trimestre"
+    ordem_auto = dia * 10 + (aesc or 0)
     conn.execute(
-        "UPDATE simulados SET nome=?, trimestre=?, ano=?, ano_escolaridade=?, pontuacao_total=? WHERE id=?",
-        (nome.strip(), trimestre, ano, aesc, pontuacao_total, sim_id)
+        "UPDATE simulados SET nome=?, trimestre=?, ano=?, dia=?, ano_escolaridade=?, pontuacao_total=?, ordem=? WHERE id=?",
+        (nome_auto, trimestre, ano, dia, aesc, pontuacao_total, ordem_auto, sim_id)
     )
     blocos_cfg = [
         (1, bloco_1_disciplina_id),
@@ -9168,7 +9254,7 @@ def preview_simulado(sim_id: int):
 <body>
 <div class="no-print">
   <strong>👁️ Preview — {sim['nome']}</strong>
-  <span style="color:#666; font-size:12px;">{_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']} · {num_global} questões</span>
+  <span style="color:#666; font-size:12px;">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']} · {num_global} questões</span>
   <button class="btn btn-primary" onclick="window.print()">🖨️ Imprimir</button>
   <a href="/simulados/{sim_id}" class="btn">← Voltar</a>
 </div>
