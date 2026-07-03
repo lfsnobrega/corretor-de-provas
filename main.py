@@ -8609,30 +8609,35 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     completo = n_add >= n_tot
 
     # Lista das questões já no bloco
+    import html as _html
+
     bloco_items = ""
     for idx, bq in enumerate(questoes_bloco):
         preview = _preview_enunciado(bq["enunciado"], max_chars=90)
         eh_primeira = idx == 0
         eh_ultima = idx == len(questoes_bloco) - 1
+
+        btn_cima = ("" if eh_primeira else
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
+            f'<input type="hidden" name="direcao" value="cima">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Subir">▲</button></form>')
+        btn_baixo = ("" if eh_ultima else
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
+            f'<input type="hidden" name="direcao" value="baixo">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Descer">▼</button></form>')
+
+        # Conteúdo expandido: texto puro sanitizado para evitar quebra de HTML
         alts_q = conn.execute(
             "SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra",
             (bq["id"],)
         ).fetchall()
-        alts_prev = "".join(
-            f'<div style="font-size:11px;padding:1px 0;{"color:var(--green);font-weight:600;" if a["correta"] else "color:var(--text-muted);"}">'
-            f'{a["letra"]}) {a["texto"][:70]}</div>'
-            for a in alts_q
-        )
-        btn_cima = "" if eh_primeira else (
-            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
-            f'<input type="hidden" name="direcao" value="cima">'
-            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Subir">▲</button></form>'
-        )
-        btn_baixo = "" if eh_ultima else (
-            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
-            f'<input type="hidden" name="direcao" value="baixo">'
-            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Descer">▼</button></form>'
-        )
+
+        # Usar template tag para armazenar HTML sem renderizar
+        expand_content = f'<div style="line-height:1.6;margin-bottom:8px;">{_preview_enunciado(bq["enunciado"], max_chars=500)}</div>'
+        for a in alts_q:
+            cor = "color:#16a34a;font-weight:600;" if a["correta"] else "color:#6b7280;"
+            expand_content += f'<div style="font-size:11px;padding:1px 0;{cor}">{_html.escape(str(a["letra"]))}) {_html.escape(str(a["texto"])[:80])}</div>'
+
         bloco_items += (
             f'<div class="qbi" style="border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--card);overflow:hidden;">'
             f'<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;">'
@@ -8640,16 +8645,17 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             f'<span style="flex:1;font-size:13px;">{preview}</span>'
             f'<div style="display:flex;gap:3px;align-items:center;">'
             f'{btn_cima}{btn_baixo}'
-            f'<button type="button" class="btn qbi-toggle" style="padding:2px 6px;font-size:11px;" title="Expandir">👁</button>'
+            f'<button type="button" class="btn qbi-toggle" data-id="{bq["sq_id"]}" style="padding:2px 6px;font-size:11px;" title="Expandir">👁</button>'
             f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/remover/{bq["sq_id"]}" style="margin:0;">'
             f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;color:var(--red);border-color:var(--red);">✕</button></form>'
             f'</div></div>'
-            f'<div class="qbi-expand" style="display:none;padding:8px 12px 10px 32px;border-top:1px solid var(--border);background:var(--bg-subtle);font-size:12px;overflow:hidden;">'
-            f'<div style="margin-bottom:6px;line-height:1.5;">{_enunciado_expand(bq["enunciado"])}</div>'
-            f'{alts_prev}</div></div>'
+            f'<template id="tmpl-{bq["sq_id"]}">{expand_content}</template>'
+            f'<div class="qbi-expand" id="exp-{bq["sq_id"]}" style="display:none;padding:8px 12px 10px 32px;border-top:1px solid var(--border);background:var(--bg-subtle);font-size:12px;"></div>'
+            f'</div>'
         )
     if not bloco_items:
         bloco_items = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">Nenhuma questão adicionada ainda.</div>'
+    conn.close()
     conn.close()
     # Lista do banco
     banco_items = ""
@@ -8713,12 +8719,17 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
         <script>
         document.querySelectorAll('.qbi-toggle').forEach(function(btn) {{
             btn.addEventListener('click', function() {{
-                var exp = btn.closest('.qbi').querySelector('.qbi-expand');
-                if (exp) {{
-                    var isOpen = exp.style.display !== 'none';
-                    exp.style.display = isOpen ? 'none' : 'block';
-                    btn.textContent = isOpen ? '👁' : '🔼';
+                var id = btn.getAttribute('data-id');
+                var exp = document.getElementById('exp-' + id);
+                var tmpl = document.getElementById('tmpl-' + id);
+                if (!exp) return;
+                var isOpen = exp.style.display !== 'none';
+                if (!isOpen && tmpl && !exp.dataset.loaded) {{
+                    exp.innerHTML = tmpl.innerHTML;
+                    exp.dataset.loaded = '1';
                 }}
+                exp.style.display = isOpen ? 'none' : 'block';
+                btn.textContent = isOpen ? '👁' : '🔼';
             }});
         }});
         </script>
