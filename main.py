@@ -9013,8 +9013,20 @@ def imprimir_simulado(sim_id: int):
   <div class="capa-titulo">{sim['nome']}</div>
   <div class="capa-sub">{_ano_esc_label(sim['ano_escolaridade'] or 0)}</div>
   <div class="capa-sub">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {sim['trimestre']}º Trimestre · {sim['ano']}</div>
-  <div class="capa-valor">Valor por questão: {vpq} ponto{'s' if vpq != 1 else ''} · Total: {sim['pontuacao_total']} pontos</div>
+  <div class="capa-valor">Valor por questão: {vpq} {'ponto' if vpq == 1 else 'pontos'} · Total: {sim['pontuacao_total']} {'ponto' if sim['pontuacao_total'] == 1 else 'pontos'}</div>
   <div class="capa-info">Este caderno contém 4 blocos com 10 questões cada · Total: 40 questões</div>
+  <div style="margin-top:40px; width:100%; max-width:480px; text-align:left;">
+    <div style="display:flex; flex-direction:column; gap:18px;">
+      <div style="border-bottom:2px solid #000; padding-bottom:4px;">
+        <span style="font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Nome:</span>
+        <span style="display:block; height:24px;"></span>
+      </div>
+      <div style="border-bottom:2px solid #000; padding-bottom:4px;">
+        <span style="font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Turma:</span>
+        <span style="display:block; height:24px;"></span>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- BLOCOS -->
