@@ -8954,6 +8954,9 @@ def imprimir_simulado(sim_id: int):
   @media print {{
     .no-print {{ display: none !important; }}
     .page-break {{ page-break-before: always; }}
+    /* Garante que a página de pausa ocupa uma folha inteira e o bloco começa numa nova */
+    .pagina-pausa {{ page-break-before: always; page-break-after: always; }}
+    .bloco-questoes {{ page-break-before: always; }}
     body {{ font-size: 11px; }}
   }}
 
