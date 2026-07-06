@@ -8921,7 +8921,7 @@ def imprimir_simulado(sim_id: int):
             </div>"""
 
         blocos_html += f"""
-        <div class="bloco-questoes">
+        <div class="bloco-questoes page-break">
             <div class="bloco-header">Bloco {bloco['numero']} — {bloco['disciplina_nome']}</div>
             {questoes_html}
         </div>"""
@@ -8953,13 +8953,7 @@ def imprimir_simulado(sim_id: int):
   .btn-print {{ padding: 8px 18px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: inherit; }}
   @media print {{
     .no-print {{ display: none !important; }}
-    .page-break {{ page-break-before: always; break-before: always; }}
-    .pagina-pausa {{
-        page-break-before: always; break-before: always;
-        page-break-after: always; break-after: always;
-        height: 100vh; overflow: hidden;
-    }}
-    .bloco-questoes {{ page-break-before: always; break-before: always; }}
+    .page-break {{ page-break-before: always; }}
     body {{ font-size: 11px; }}
   }}
 
@@ -8972,7 +8966,7 @@ def imprimir_simulado(sim_id: int):
   .capa-valor {{ margin-top: 30px; font-size: 15px; font-weight: 600; border: 2px solid #000; padding: 12px 24px; border-radius: 8px; }}
 
   /* PÁGINA DE PAUSA */
-  .pagina-pausa {{ height: 297mm; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px; page-break-before: always; break-before: always; page-break-after: always; break-after: always; }}
+  .pagina-pausa {{ min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px; }}
   .pausa-bloco {{ font-size: 36px; font-weight: 800; margin-bottom: 20px; letter-spacing: 4px; }}
   .pausa-disciplina {{ font-size: 28px; font-weight: 700; margin-bottom: 50px; }}
   .pausa-octogono {{ width: 220px; height: 220px; background: #555; clip-path: polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%); display: flex; align-items: center; justify-content: center; margin: 0 auto 50px; }}
