@@ -9944,126 +9944,94 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
         return RedirectResponse("/login", status_code=303)
 
     conn = get_db()
-    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
-    apl = conn.execute(
-        "SELECT * FROM aplicacoes WHERE id = ?", (app_id,)
-    ).fetchone()
+    try:
+        sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+        apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ?", (app_id,)).fetchone()
+        if not sim or not apl:
+            return HTMLResponse(render_page("Erro", "<p>Simulado ou aplicação não encontrados.</p>", active="simulados"))
 
-    if not sim or not apl:
-        conn.close()
-        return HTMLResponse(render_page("Erro", '<p>Simulado ou aplicação não encontrados.</p>', active="simulados"))
+        blocos = conn.execute("""
+            SELECT b.numero, d.nome AS disciplina_nome
+            FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+            WHERE b.simulado_id = ? ORDER BY b.numero
+        """, (sim_id,)).fetchall()
 
-    # Montar blocos_info (sempre 10 por bloco)
-    blocos = conn.execute("""
-        SELECT b.numero, d.nome AS disciplina_nome
-        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
-        WHERE b.simulado_id = ? ORDER BY b.numero
-    """, (sim_id,)).fetchall()
+        blocos_info = []
+        num_global = 0
+        for bloco in blocos:
+            blocos_info.append({"numero": bloco["numero"], "disciplina_nome": bloco["disciplina_nome"],
+                                 "q_inicio": num_global + 1, "n_questoes": 10})
+            num_global += 10
 
-    blocos_info = []
-    num_global = 0
-    for bloco in blocos:
-        blocos_info.append({
-            "numero": bloco["numero"],
-            "disciplina_nome": bloco["disciplina_nome"],
-            "q_inicio": num_global + 1,
-            "n_questoes": 10,
-        })
-        num_global += 10
+        image_bytes = await foto.read()
+        if not image_bytes:
+            return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p><a href="javascript:history.back()" class="btn">Voltar</a>', active="simulados"))
 
-    # Processar imagem
-    image_bytes = await foto.read()
-    if not image_bytes:
-        conn.close()
-        return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p><a href="javascript:history.back()" class="btn">Voltar</a>', active="simulados"))
+        resultado = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
 
-    resultado = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
+        if not resultado["success"]:
+            content_err = f"""
+                <div class="page-header"><h1>❌ Erro ao processar</h1></div>
+                <div class="tip" style="background:var(--red-bg);border-color:var(--red);">{resultado.get('error','Erro desconhecido')}</div>
+                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary" style="margin-top:16px;">← Tentar novamente</a>
+            """
+            return HTMLResponse(render_page("Erro ao processar", content_err, active="simulados"))
 
-    if not resultado["success"]:
-        conn.close()
-        content_err = f"""
-            <div class="page-header"><h1>❌ Erro ao processar cartão</h1></div>
-            <div class="tip" style="background:var(--red-bg);border-color:var(--red);">
-                {resultado.get('error', 'Erro desconhecido')}
+        aluno_id = resultado["aluno_id"]
+        answers = resultado["answers"]
+
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not aluno:
+            return HTMLResponse(render_page("Erro", f"<p>Aluno {aluno_id} não encontrado.</p>", active="simulados"))
+
+        # Questões do simulado em ordem corrida
+        questoes_ordem = conn.execute("""
+            SELECT sq.questao_id FROM simulado_questoes sq
+            JOIN simulado_blocos b ON b.id = sq.bloco_id
+            WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+        """, (sim_id,)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes_ordem]
+
+        # Limpar respostas anteriores deste aluno nesta aplicação
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+
+        # Inserir respostas novas
+        for q_num, q_id in enumerate(questao_ids, start=1):
+            letra = answers.get(q_num)
+            if letra in ("A", "B", "C", "D"):
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                    (app_id, aluno_id, q_id, letra)
+                )
+
+        # Registrar entrega
+        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone()
+        if not existente:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (app_id, aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+        conn.commit()
+
+        preview_b64 = resultado.get("preview_base64", "")
+        img_tag = (f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:300px;border-radius:6px;margin-top:8px;display:block;">'
+                   if preview_b64 else "")
+
+        content_ok = f"""
+            <div class="page-header"><h1>✅ Cartão processado</h1></div>
+            <div class="tip" style="background:var(--green-bg);border-color:var(--green);margin-bottom:16px;">
+                <strong>{aluno["nome"]}</strong> — {resultado["n_respondidas"]}/40 questões lidas
             </div>
-            <div style="margin-top:16px;">
-                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">← Tentar novamente</a>
+            {img_tag}
+            <div style="display:flex;gap:10px;margin-top:20px;">
+                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Próximo cartão</a>
+                <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
             </div>
         """
-        return HTMLResponse(render_page("Erro ao processar", content_err, active="simulados"))
+        return HTMLResponse(render_page("Cartão processado", content_ok, active="simulados"))
 
-    aluno_id = resultado["aluno_id"]
-    answers = resultado["answers"]
-
-    aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
-    if not aluno:
+    finally:
         conn.close()
-        return HTMLResponse(render_page("Erro", f'<p>Aluno {aluno_id} não encontrado.</p><a href="javascript:history.back()" class="btn">Voltar</a>', active="simulados"))
 
-    # Buscar questões do simulado em ordem corrida
-    questoes_ordem = conn.execute("""
-        SELECT sq.questao_id
-        FROM simulado_questoes sq
-        JOIN simulado_blocos b ON b.id = sq.bloco_id
-        WHERE b.simulado_id = ?
-        ORDER BY b.numero, sq.ordem
-    """, (sim_id,)).fetchall()
-
-    # Criar ou atualizar entrega
-    entrega = conn.execute(
-        "SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
-        (app_id, aluno_id)
-    ).fetchone()
-    if entrega:
-        entrega_id = entrega["id"]
-        conn.execute("DELETE FROM respostas WHERE entrega_id = ?", (entrega_id,))
-    else:
-        cur = conn.execute(
-            "INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)",
-            (app_id, aluno_id)
-        )
-        entrega_id = cur.lastrowid
-
-    # Salvar respostas com gabarito
-    num_q = 0
-    n_corretas = 0
-    for q in questoes_ordem:
-        num_q += 1
-        resp = answers.get(num_q)
-        gabarito = conn.execute(
-            "SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1",
-            (q["questao_id"],)
-        ).fetchone()
-        letra_correta = gabarito["letra"] if gabarito else None
-        correta = bool(resp and letra_correta and resp == letra_correta)
-        if correta:
-            n_corretas += 1
-        conn.execute(
-            "INSERT INTO respostas (entrega_id, questao_id, resposta_aluno, correta) VALUES (?,?,?,?)",
-            (entrega_id, q["questao_id"], resp, 1 if correta else 0)
-        )
-
-    conn.commit()
-    conn.close()
-
-    preview_b64 = resultado.get("preview_base64", "")
-    img_tag = (f'<img src="data:image/jpeg;base64,{preview_b64}" '
-               f'style="max-width:300px;border-radius:6px;margin-top:8px;display:block;">'
-               if preview_b64 else "")
-
-    content_ok = f"""
-        <div class="page-header"><h1>✅ Cartão processado</h1></div>
-        <div class="tip" style="background:var(--green-bg);border-color:var(--green);margin-bottom:16px;">
-            <strong>{aluno["nome"]}</strong> — {resultado["n_respondidas"]}/40 questões lidas
-            · {n_corretas}/{len(questoes_ordem)} corretas
-        </div>
-        {img_tag}
-        <div style="display:flex;gap:10px;margin-top:20px;">
-            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Próximo cartão</a>
-            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
-        </div>
-    """
-    return HTMLResponse(render_page("Cartão processado", content_ok, active="simulados"))
 
 @app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote", response_class=HTMLResponse)
 async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFile] = File(...)):
@@ -10072,172 +10040,134 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
         return RedirectResponse("/login", status_code=303)
 
     conn = get_db()
-    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
-    apl = conn.execute("""
-        SELECT a.*, t.nome AS turma_nome
-        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
-    """, (app_id,)).fetchone()
+    try:
+        sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+        apl = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome FROM aplicacoes a
+            JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+        """, (app_id,)).fetchone()
+        if not sim or not apl:
+            return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
 
-    if not sim or not apl:
-        conn.close()
-        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+        blocos = conn.execute("""
+            SELECT b.numero, d.nome AS disciplina_nome
+            FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+            WHERE b.simulado_id = ? ORDER BY b.numero
+        """, (sim_id,)).fetchall()
 
-    # Montar blocos_info
-    blocos = conn.execute("""
-        SELECT b.numero, d.nome AS disciplina_nome,
-               (SELECT COUNT(*) FROM simulado_questoes WHERE bloco_id = b.id) AS n_q
-        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
-        WHERE b.simulado_id = ? ORDER BY b.numero
-    """, (sim_id,)).fetchall()
+        blocos_info = []
+        num_global = 0
+        for bloco in blocos:
+            blocos_info.append({"numero": bloco["numero"], "disciplina_nome": bloco["disciplina_nome"],
+                                 "q_inicio": num_global + 1, "n_questoes": 10})
+            num_global += 10
 
-    blocos_info = []
-    num_global = 0
-    for bloco in blocos:
-        blocos_info.append({
-            "numero": bloco["numero"],
-            "disciplina_nome": bloco["disciplina_nome"],
-            "q_inicio": num_global + 1,
-            "n_questoes": 10,  # sempre 10 por bloco
-        })
-        num_global += 10
-
-    # Expandir PDFs em imagens
-    all_files = []
-    for f in fotos:
-        data = await f.read()
-        if f.filename and f.filename.lower().endswith(".pdf"):
-            try:
-                from pdf2image import convert_from_bytes
-                pages = convert_from_bytes(data, dpi=200)
-                for i, page in enumerate(pages):
-                    buf = BytesIO()
-                    page.save(buf, format="JPEG", quality=90)
-                    all_files.append((f"{f.filename}_p{i+1}.jpg", buf.getvalue()))
-            except Exception as e:
-                all_files.append((f.filename or "arquivo", data))
-        else:
-            all_files.append((f.filename or "foto.jpg", data))
-
-    # Processar cada imagem
-    resultados = []
-    alunos_no_lote = set()
-
-    for filename, image_bytes in all_files:
-        resultado = _processar_cartao_simulado(image_bytes, blocos_info, filename)
-        if not resultado["success"]:
-            resultados.append({"filename": filename, "success": False,
-                               "error": resultado.get("error", "Erro desconhecido")})
-            continue
-
-        aluno_id = resultado["aluno_id"]
-        duplicado = aluno_id in alunos_no_lote
-        alunos_no_lote.add(aluno_id)
-
-        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
-        if not aluno:
-            resultados.append({"filename": filename, "success": False,
-                               "error": f"Aluno {aluno_id} não encontrado."})
-            continue
-
-        # Salvar respostas
-        answers = resultado["answers"]
+        # Questões do simulado em ordem corrida (fixo para todos)
         questoes_ordem = conn.execute("""
-            SELECT sq.ordem, sq.questao_id
-            FROM simulado_questoes sq
+            SELECT sq.questao_id FROM simulado_questoes sq
             JOIN simulado_blocos b ON b.id = sq.bloco_id
             WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
         """, (sim_id,)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes_ordem]
 
-        entrega = conn.execute(
-            "SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
-            (app_id, aluno_id)
-        ).fetchone()
-        ja_entregue = entrega is not None
+        # Expandir PDFs
+        all_files = []
+        for f in fotos:
+            data = await f.read()
+            if f.filename and f.filename.lower().endswith(".pdf"):
+                try:
+                    from pdf2image import convert_from_bytes
+                    pages = convert_from_bytes(data, dpi=200)
+                    for i, page in enumerate(pages):
+                        buf = BytesIO()
+                        page.save(buf, format="JPEG", quality=90)
+                        all_files.append((f"{f.filename}_p{i+1}.jpg", buf.getvalue()))
+                except Exception:
+                    all_files.append((f.filename or "arquivo", data))
+            else:
+                all_files.append((f.filename or "foto.jpg", data))
 
-        if entrega:
-            entrega_id = entrega["id"]
-            conn.execute("DELETE FROM respostas WHERE entrega_id = ?", (entrega_id,))
-        else:
-            cur = conn.execute(
-                "INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)",
-                (app_id, aluno_id)
-            )
-            entrega_id = cur.lastrowid
+        resultados = []
+        alunos_no_lote = set()
 
-        num_q = 0
-        n_corretas = 0
-        for q in questoes_ordem:
-            num_q += 1
-            resp = answers.get(num_q)
-            gabarito = conn.execute(
-                "SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1",
-                (q["questao_id"],)
-            ).fetchone()
-            letra_correta = gabarito["letra"] if gabarito else None
-            correta = (resp == letra_correta) if resp and letra_correta else False
-            if correta: n_corretas += 1
-            conn.execute(
-                "INSERT INTO respostas (entrega_id, questao_id, resposta_aluno, correta) VALUES (?,?,?,?)",
-                (entrega_id, q["questao_id"], resp, 1 if correta else 0)
-            )
-        conn.commit()
+        for filename, image_bytes in all_files:
+            resultado = _processar_cartao_simulado(image_bytes, blocos_info, filename)
+            if not resultado["success"]:
+                resultados.append({"filename": filename, "success": False, "error": resultado.get("error", "Erro")})
+                continue
 
-        resultados.append({
-            "filename": filename,
-            "success": True,
-            "aluno_nome": aluno["nome"],
-            "aluno_id": aluno_id,
-            "n_respondidas": resultado["n_respondidas"],
-            "n_corretas": n_corretas,
-            "ja_entregue": ja_entregue,
-            "duplicado": duplicado,
-            "preview_b64": resultado.get("preview_base64", ""),
-        })
+            aluno_id = resultado["aluno_id"]
+            duplicado = aluno_id in alunos_no_lote
+            alunos_no_lote.add(aluno_id)
 
-    conn.close()
+            aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+            if not aluno:
+                resultados.append({"filename": filename, "success": False, "error": f"Aluno {aluno_id} não encontrado."})
+                continue
 
-    # Montar tela de resultado do lote
-    n_ok = sum(1 for r in resultados if r["success"])
-    n_err = len(resultados) - n_ok
+            ja_entregue = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone() is not None
 
-    cards_html = ""
-    for r in resultados:
-        if r["success"]:
-            warn = ""
-            if r["ja_entregue"]: warn += " · ⚠️ substituiu entrega anterior"
-            if r["duplicado"]: warn += " · ⚠️ duplicado no lote"
-            preview = f'<img src="data:image/jpeg;base64,{r["preview_b64"]}" style="max-width:120px;border-radius:4px;float:right;">' if r["preview_b64"] else ""
-            cards_html += f"""
-            <div style="border:1px solid var(--green); border-radius:8px; padding:12px 14px;
-                 margin-bottom:8px; background:var(--green-bg); display:flex; justify-content:space-between; align-items:center;">
-                <div>
-                    <div style="font-weight:600;">✅ {r['aluno_nome']}</div>
-                    <div style="font-size:12px; color:var(--text-muted);">{r['filename']} · {r['n_respondidas']}/40 lidas{warn}</div>
-                </div>
-                {preview}
-            </div>"""
-        else:
-            cards_html += f"""
-            <div style="border:1px solid var(--red); border-radius:8px; padding:12px 14px;
-                 margin-bottom:8px; background:var(--red-bg);">
-                <div style="font-weight:600; color:var(--red);">❌ {r['filename']}</div>
-                <div style="font-size:12px;">{r['error']}</div>
-            </div>"""
+            conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+            for q_num, q_id in enumerate(questao_ids, start=1):
+                letra = resultado["answers"].get(q_num)
+                if letra in ("A", "B", "C", "D"):
+                    conn.execute(
+                        "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                        (app_id, aluno_id, q_id, letra)
+                    )
 
-    content = f"""
-        <div class="page-header">
-            <h1>📋 Resultado do lote — {apl['turma_nome']}</h1>
-            <p class="subtitle">{sim['nome']} · {n_ok} processados · {n_err} erros</p>
-        </div>
-        <div style="display:flex; gap:10px; margin-bottom:16px;">
-            <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
-            <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
-            <div class="metric"><div class="metric-label">Total enviados</div><div class="metric-value">{len(resultados)}</div></div>
-        </div>
-        {cards_html}
-        <div style="display:flex; gap:10px; margin-top:20px;">
-            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Escanear mais</a>
-            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
-        </div>
-    """
-    return HTMLResponse(render_page("Resultado do lote", content, active="simulados"))
+            existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone()
+            if not existente:
+                conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (app_id, aluno_id))
+            else:
+                conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+            conn.commit()
+
+            resultados.append({
+                "filename": filename, "success": True,
+                "aluno_nome": aluno["nome"], "aluno_id": aluno_id,
+                "n_respondidas": resultado["n_respondidas"],
+                "ja_entregue": ja_entregue, "duplicado": duplicado,
+                "preview_b64": resultado.get("preview_base64", ""),
+            })
+
+        n_ok = sum(1 for r in resultados if r["success"])
+        n_err = len(resultados) - n_ok
+
+        cards_html = ""
+        for r in resultados:
+            if r["success"]:
+                warn = (" · ⚠️ substituiu entrega anterior" if r["ja_entregue"] else "") + (" · ⚠️ duplicado" if r["duplicado"] else "")
+                preview = f'<img src="data:image/jpeg;base64,{r["preview_b64"]}" style="max-width:100px;border-radius:4px;">' if r["preview_b64"] else ""
+                cards_html += f"""
+                <div style="border:1px solid var(--green);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--green-bg);display:flex;justify-content:space-between;align-items:center;">
+                    <div><div style="font-weight:600;">✅ {r['aluno_nome']}</div>
+                    <div style="font-size:12px;color:var(--text-muted);">{r['filename']} · {r['n_respondidas']}/40 lidas{warn}</div></div>
+                    {preview}
+                </div>"""
+            else:
+                cards_html += f"""
+                <div style="border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--red-bg);">
+                    <div style="font-weight:600;color:var(--red);">❌ {r['filename']}</div>
+                    <div style="font-size:12px;">{r['error']}</div>
+                </div>"""
+
+        content = f"""
+            <div class="page-header">
+                <h1>📋 Resultado do lote — {apl['turma_nome']}</h1>
+                <p class="subtitle">{sim['nome']} · {n_ok} processados · {n_err} erros</p>
+            </div>
+            <div style="display:flex;gap:10px;margin-bottom:16px;">
+                <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+                <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
+            </div>
+            {cards_html}
+            <div style="display:flex;gap:10px;margin-top:20px;">
+                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Escanear mais</a>
+                <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
+            </div>
+        """
+        return HTMLResponse(render_page("Resultado do lote", content, active="simulados"))
+
+    finally:
+        conn.close()
