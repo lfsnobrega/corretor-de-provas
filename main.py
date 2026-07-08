@@ -8370,7 +8370,12 @@ def simulado_aplicacoes(sim_id: int):
     if not todas_criadas and prova_vinculada:
         btn_criar = f'<form method="post" action="/simulados/{sim_id}/aplicacoes/criar-lote" style="margin:0;"><button type="submit" class="btn btn-primary">🚀 Criar aplicações para todas as turmas do {ano_label}</button></form>'
     elif not prova_vinculada:
-        btn_criar = f'<div class="tip" style="background:var(--orange-bg);border-color:var(--orange);">⚠️ Nenhuma prova vinculada a este simulado. <a href="/simulados/{sim_id}/vincular-prova">Vincular prova</a></div>'
+        btn_criar = ('<div class="tip" style="background:var(--orange-bg);border-color:var(--orange);">' +
+            '&#9888;&#65039; Nenhuma prova criada ainda para este simulado.<br>' +
+            '<small>Use o botão abaixo para criar as aplicações — a prova será gerada automaticamente.</small>' +
+            '<form method="post" action="/simulados/' + str(sim_id) + '/aplicacoes/criar-lote" style="margin-top:10px;">'
+            '<button type="submit" class="btn btn-primary">Criar aplicacoes e prova agora</button>'
+            '</form></div>')
 
     # Cards das turmas
     turmas_html = ""
