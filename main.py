@@ -8945,6 +8945,14 @@ def imprimir_simulado(sim_id: int):
 <head>
 <meta charset="UTF-8">
 <title>{sim['nome']}</title>
+<script>
+window.MathJax = {{
+  tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true }},
+  svg: {{ fontCache: 'global' }},
+  options: {{ skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }}
+}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&display=swap');
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -9003,7 +9011,7 @@ def imprimir_simulado(sim_id: int):
 <body>
 
 <div class="no-print">
-  <button class="btn-print" onclick="window.print()">🖨️ Imprimir simulado</button>
+  <button class="btn-print" id="btn-imprimir" onclick="imprimirAposMathJax()">🖨️ Imprimir simulado</button>
   <a href="/simulados/{sim_id}" style="padding:8px 16px; border:1px solid #ccc; border-radius:6px; text-decoration:none; color:#333;">← Voltar</a>
 </div>
 
@@ -9038,6 +9046,43 @@ def imprimir_simulado(sim_id: int):
   {gab_html}
 </div>
 
+<script>
+function imprimirAposMathJax() {{
+    var btn = document.getElementById('btn-imprimir');
+    btn.textContent = '⏳ Aguardando renderização...';
+    btn.disabled = true;
+    if (window.MathJax && MathJax.startup && MathJax.startup.promise) {{
+        MathJax.startup.promise.then(function() {{
+            // Aguarda mais 500ms para garantir que tudo renderizou
+            setTimeout(function() {{
+                btn.textContent = '🖨️ Imprimir simulado';
+                btn.disabled = false;
+                window.print();
+            }}, 500);
+        }});
+    }} else {{
+        setTimeout(function() {{
+            window.print();
+        }}, 2000);
+    }}
+}}
+// Aguardar MathJax antes de liberar o botão na carga inicial
+document.addEventListener('DOMContentLoaded', function() {{
+    if (window.MathJax) {{
+        var btn = document.getElementById('btn-imprimir');
+        if (btn) {{
+            btn.textContent = '⏳ Carregando fórmulas...';
+            btn.disabled = true;
+            MathJax.startup.promise.then(function() {{
+                setTimeout(function() {{
+                    btn.textContent = '🖨️ Imprimir simulado';
+                    btn.disabled = false;
+                }}, 500);
+            }});
+        }}
+    }}
+}});
+</script>
 </body>
 </html>"""
 
