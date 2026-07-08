@@ -9936,7 +9936,6 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
     """
     return render_page(f"Escanear — {apl['turma_nome']}", content, active="simulados")
 
-
 @app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-individual", response_class=HTMLResponse)
 async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFile = File(...)):
     prof = _current_prof_ctx.get()
@@ -9946,7 +9945,10 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
     conn = get_db()
     try:
         sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
-        apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ?", (app_id,)).fetchone()
+        apl = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome FROM aplicacoes a
+            JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+        """, (app_id,)).fetchone()
         if not sim or not apl:
             return HTMLResponse(render_page("Erro", "<p>Simulado ou aplicação não encontrados.</p>", active="simulados"))
 
@@ -9955,7 +9957,6 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
             FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
             WHERE b.simulado_id = ? ORDER BY b.numero
         """, (sim_id,)).fetchall()
-
         blocos_info = []
         num_global = 0
         for bloco in blocos:
@@ -9963,28 +9964,144 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
                                  "q_inicio": num_global + 1, "n_questoes": 10})
             num_global += 10
 
+        # Questões em ordem corrida
+        questoes_ordem = conn.execute("""
+            SELECT sq.questao_id FROM simulado_questoes sq
+            JOIN simulado_blocos b ON b.id = sq.bloco_id
+            WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+        """, (sim_id,)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes_ordem]
+        n_questoes = len(questao_ids)
+
         image_bytes = await foto.read()
         if not image_bytes:
-            return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p><a href="javascript:history.back()" class="btn">Voltar</a>', active="simulados"))
+            return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p>', active="simulados"))
 
-        resultado = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
+        result = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
 
-        if not resultado["success"]:
+        if not result["success"]:
             content_err = f"""
-                <div class="page-header"><h1>❌ Erro ao processar</h1></div>
-                <div class="tip" style="background:var(--red-bg);border-color:var(--red);">{resultado.get('error','Erro desconhecido')}</div>
-                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary" style="margin-top:16px;">← Tentar novamente</a>
+                <div class="page-header"><h1>❌ Erro na leitura</h1></div>
+                <div style="border:1px solid var(--red);background:var(--red-bg);padding:16px;border-radius:6px;color:var(--red);">
+                    <strong>Problema:</strong> {result.get('error','Erro desconhecido')}
+                </div>
+                <p>Tente com foto mais nítida, boa iluminação e todos os 4 cantos visíveis.</p>
+                <div style="display:flex;gap:10px;margin-top:16px;">
+                    <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Tentar outra foto</a>
+                    <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
+                </div>
             """
-            return HTMLResponse(render_page("Erro ao processar", content_err, active="simulados"))
+            return HTMLResponse(render_page("Erro no escaneamento", content_err, active="simulados"))
 
-        aluno_id = resultado["aluno_id"]
-        answers = resultado["answers"]
-
+        aluno_id = result["aluno_id"]
         aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
         if not aluno:
-            return HTMLResponse(render_page("Erro", f"<p>Aluno {aluno_id} não encontrado.</p>", active="simulados"))
+            return HTMLResponse(render_page("Erro", f"<p>Aluno {aluno_id} não encontrado no banco.</p>", active="simulados"))
 
-        # Questões do simulado em ordem corrida
+        # Verificar entrega anterior
+        ja_entregue = conn.execute(
+            "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+            (app_id, aluno_id)
+        ).fetchone()
+
+        answers = result["answers"]
+
+        # Tabela editável de respostas (igual ao OMR normal)
+        # Agrupar por bloco para melhor visualização
+        blocos_rows = {}
+        for bloco in blocos:
+            blocos_rows[bloco["numero"]] = {"nome": bloco["disciplina_nome"], "rows": ""}
+
+        rows_por_bloco = {b["numero"]: [] for b in blocos}
+        for q_num in range(1, n_questoes + 1):
+            bloco_num = ((q_num - 1) // 10) + 1
+            rows_por_bloco[bloco_num].append(q_num)
+
+        tabela_html = ""
+        for bloco in blocos:
+            tabela_html += f"""
+            <tr style="background:var(--accent-bg);">
+                <td colspan="7" style="padding:6px 8px;font-weight:700;color:var(--accent);">
+                    Bloco {bloco['numero']} — {bloco['disciplina_nome']}
+                </td>
+            </tr>"""
+            for q_num in rows_por_bloco.get(bloco["numero"], []):
+                detected = answers.get(q_num)
+                cells = ""
+                for letra in ["A", "B", "C", "D"]:
+                    checked = " checked" if detected == letra else ""
+                    cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
+                em_branco = " checked" if detected is None else ""
+                cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco}></td>'
+                marca = f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
+                tabela_html += f'<tr><td style="padding:5px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;color:var(--text-muted);padding:0 8px;">{marca}</td></tr>'
+
+        override_aviso = ""
+        if ja_entregue:
+            override_aviso = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin:16px 0;color:var(--orange);"><strong>⚠️ Atenção:</strong> este aluno já tem entrega registrada ({ja_entregue["finalizada_em"]}). Confirmar irá <strong>sobrescrever</strong> as respostas anteriores.</div>'
+
+        preview_img = f'<img src="data:image/jpeg;base64,{result["preview_base64"]}" style="max-width:100%;border:1px solid var(--border);border-radius:6px;">' if result.get("preview_base64") else ""
+
+        content = f"""
+            <div class="page-header">
+                <h1>Revisão da leitura</h1>
+                <p class="subtitle">{sim['nome']} · Aluno: <strong>{aluno['nome']}</strong></p>
+            </div>
+            {override_aviso}
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:flex-start;">
+                <div>
+                    <h2 style="margin-top:0;">Imagem processada</h2>
+                    <p style="font-size:13px;color:var(--text-muted);">Confira se as marcações estão corretas antes de confirmar.</p>
+                    {preview_img}
+                </div>
+                <div>
+                    <h2 style="margin-top:0;">Respostas detectadas</h2>
+                    <p style="font-size:13px;color:var(--text-muted);">Corrija qualquer marcação antes de salvar.</p>
+                    <form action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-confirmar" method="post">
+                        <input type="hidden" name="aluno_id" value="{aluno_id}">
+                        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                            <thead>
+                                <tr style="background:var(--bg-subtle);">
+                                    <th style="padding:5px;">Q</th>
+                                    <th style="padding:5px;">A</th>
+                                    <th style="padding:5px;">B</th>
+                                    <th style="padding:5px;">C</th>
+                                    <th style="padding:5px;">D</th>
+                                    <th style="padding:5px;">∅</th>
+                                    <th style="padding:5px;">Detectado</th>
+                                </tr>
+                            </thead>
+                            <tbody>{tabela_html}</tbody>
+                        </table>
+                        <div style="display:flex;gap:10px;margin-top:16px;">
+                            <button type="submit" class="btn btn-primary">✓ Confirmar e salvar</button>
+                            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn">📷 Tentar outra foto</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Revisão da leitura", content, active="simulados"))
+
+    finally:
+        conn.close()
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-confirmar", response_class=HTMLResponse)
+async def confirmar_escaneamento_simulado(sim_id: int, app_id: int, request: Request, aluno_id: int = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    form = await request.form()
+    conn = get_db()
+    try:
+        sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not sim or not aluno:
+            return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+        # Questões em ordem corrida
         questoes_ordem = conn.execute("""
             SELECT sq.questao_id FROM simulado_questoes sq
             JOIN simulado_blocos b ON b.id = sq.bloco_id
@@ -9992,12 +10109,10 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
         """, (sim_id,)).fetchall()
         questao_ids = [q["questao_id"] for q in questoes_ordem]
 
-        # Limpar respostas anteriores deste aluno nesta aplicação
+        # Salvar respostas confirmadas
         conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
-
-        # Inserir respostas novas
         for q_num, q_id in enumerate(questao_ids, start=1):
-            letra = answers.get(q_num)
+            letra = form.get(f"q_{q_num}", "").strip()
             if letra in ("A", "B", "C", "D"):
                 conn.execute(
                     "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
@@ -10012,22 +10127,17 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
             conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
         conn.commit()
 
-        preview_b64 = resultado.get("preview_base64", "")
-        img_tag = (f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:300px;border-radius:6px;margin-top:8px;display:block;">'
-                   if preview_b64 else "")
-
         content_ok = f"""
-            <div class="page-header"><h1>✅ Cartão processado</h1></div>
+            <div class="page-header"><h1>✅ Respostas salvas</h1></div>
             <div class="tip" style="background:var(--green-bg);border-color:var(--green);margin-bottom:16px;">
-                <strong>{aluno["nome"]}</strong> — {resultado["n_respondidas"]}/40 questões lidas
+                Respostas de <strong>{aluno['nome']}</strong> confirmadas e salvas com sucesso.
             </div>
-            {img_tag}
             <div style="display:flex;gap:10px;margin-top:20px;">
                 <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Próximo cartão</a>
                 <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
             </div>
         """
-        return HTMLResponse(render_page("Cartão processado", content_ok, active="simulados"))
+        return HTMLResponse(render_page("Respostas salvas", content_ok, active="simulados"))
 
     finally:
         conn.close()
