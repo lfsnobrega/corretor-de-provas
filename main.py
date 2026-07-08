@@ -8255,6 +8255,7 @@ def ver_simulado(sim_id: int):
             acoes_admin += f'<form method="post" action="/simulados/{sim_id}/fechar" style="margin:0;"><button type="submit" class="btn" style="color:var(--green);border-color:var(--green);">✅ Fechar e publicar</button></form>'
         # Preview sempre disponível (em qualquer status)
         acoes_admin += f'<a href="/simulados/{sim_id}/preview" class="btn" target="_blank">👁️ Preview questões</a>'
+        acoes_admin += f'<a href="/simulados/{sim_id}/cartao-resposta" class="btn" target="_blank">📋 Cartões OMR</a>'
         if sim["status"] in ("fechado", "publicado"):
             acoes_admin += f'<a href="/simulados/{sim_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Gerar PDF</a>'
             acoes_admin += f'<a href="/simulados/{sim_id}/aplicacoes" class="btn" style="color:var(--green);border-color:var(--green);">📋 Aplicações</a>'
@@ -8393,7 +8394,7 @@ def simulado_aplicacoes(sim_id: int):
                     </div>
                     <div style="display:flex; gap:6px; flex-wrap:wrap;">
                         <a href="/aplicacoes/{app['id']}/cartao-resposta" class="btn" style="font-size:12px; padding:5px 12px;" target="_blank">📄 Cartões</a>
-                        <a href="/aplicacoes/{app['id']}/escanear" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">📷 Escanear</a>
+                        <a href="/simulados/{sim_id}/aplicacoes/{app['id']}/escanear" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">📷 Escanear</a>
                         <a href="/aplicacoes/{app['id']}/analise" class="btn" style="font-size:12px; padding:5px 12px;">📈 Análise</a>
                         <a href="/aplicacoes/{app['id']}" class="btn" style="font-size:12px; padding:5px 12px;">Ver →</a>
                     </div>
@@ -9409,3 +9410,821 @@ window.MathJax = {{
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+# ==========================================
+#  CARTÃO RESPOSTA ESPECIAL DO SIMULADO
+# ==========================================
+
+def _gerar_cartao_simulado_pdf(sim, blocos_info, alunos):
+    """Gera PDF com cartão OMR do simulado — 1 cartão por aluno com 4 seções (uma por bloco).
+    blocos_info: lista de dicts {numero, disciplina_nome, questoes: [{num_global, questao_id}]}
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    marker_size = 8 * mm
+    margin = 10 * mm
+    bubble_radius = 3.0 * mm
+    ROW_H = 9 * mm
+    BUBBLE_SPACING = 10 * mm
+
+    for aluno in alunos:
+        # Marcadores de canto para OMR
+        c.setFillColorRGB(0, 0, 0)
+        for rx, ry in [
+            (margin, height - margin - marker_size),
+            (width - margin - marker_size, height - margin - marker_size),
+            (margin, margin),
+            (width - margin - marker_size, margin),
+        ]:
+            c.rect(rx, ry, marker_size, marker_size, fill=1, stroke=0)
+
+        # Cabeçalho
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(30*mm, height - 22*mm, sim["nome"][:55])
+        c.setFont("Helvetica", 9)
+        c.drawString(30*mm, height - 29*mm, f"Turma: {aluno.get('turma_nome', '')}  |  Ano: {sim.get('ano', '')}")
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(30*mm, height - 37*mm, f"Aluno: {aluno['nome']}")
+        c.setFont("Helvetica", 9)
+        num_str = f"Nº {aluno['numero']} · " if aluno.get("numero") else ""
+        c.drawString(30*mm, height - 44*mm, f"{num_str}Código: {aluno.get('codigo_unico', aluno['id'])}")
+
+        # QR Code
+        qr_data = f"SIM:{aluno['id']}:{sim['id']}"
+        qr_obj = qrcode.QRCode(box_size=10, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        qr_obj.add_data(qr_data)
+        qr_obj.make(fit=True)
+        qr_img = qr_obj.make_image(fill_color="black", back_color="white")
+        qr_buf = BytesIO()
+        qr_img.save(qr_buf, format="PNG")
+        qr_buf.seek(0)
+        c.drawImage(ImageReader(qr_buf), width - 48*mm, height - 50*mm, width=28*mm, height=28*mm)
+
+        # Instruções
+        c.setFont("Helvetica", 7.5)
+        c.drawString(30*mm, height - 51*mm, "Preencha com caneta preta. Pinte toda a bolha. Não rasure.")
+
+        # Linha divisória
+        c.setStrokeColorRGB(0, 0, 0)
+        c.setLineWidth(0.8)
+        c.line(margin, height - 55*mm, width - margin, height - 55*mm)
+
+        # Layout: 2 colunas, 2 blocos por coluna
+        # Bloco 1 e 2 na coluna esquerda; Bloco 3 e 4 na coluna direita
+        COL_X = [25*mm, 115*mm]
+        COL_W = 80*mm
+        SECTION_START_Y = height - 60*mm
+        LETRAS = ["A", "B", "C", "D"]
+        N_QUESTOES = 10
+
+        for idx, bloco in enumerate(blocos_info):
+            col = idx % 2          # 0=esquerda, 1=direita
+            row = idx // 2         # 0=topo, 1=baixo
+            x_base = COL_X[col]
+
+            # Calcular Y de início da seção
+            # Cada seção tem: título (8mm) + 10 linhas de bolhas (9mm cada) + margem (5mm) = ~103mm
+            section_h = 8*mm + N_QUESTOES * ROW_H + 5*mm
+            y_section = SECTION_START_Y - row * (section_h + 4*mm)
+
+            # Título da seção
+            c.setFillColorRGB(0.1, 0.1, 0.1)
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(x_base, y_section,
+                         f"BLOCO {bloco['numero']:02d} — {bloco['disciplina_nome'].upper()[:28]}")
+
+            # Linha abaixo do título
+            c.setLineWidth(0.5)
+            c.line(x_base, y_section - 2*mm, x_base + COL_W - 5*mm, y_section - 2*mm)
+
+            # Cabeçalho das letras
+            label_y = y_section - 7*mm
+            c.setFont("Helvetica-Bold", 8)
+            c.setFillColorRGB(0.3, 0.3, 0.3)
+            num_offset = 14*mm
+            bubble_start_x = x_base + num_offset + 4*mm
+            for li, letra in enumerate(LETRAS):
+                bx = bubble_start_x + li * BUBBLE_SPACING
+                c.drawCentredString(bx, label_y, letra)
+
+            # Questões
+            c.setFillColorRGB(0, 0, 0)
+            for qi in range(N_QUESTOES):
+                q_num = bloco["q_inicio"] + qi   # número global da questão
+                q_y = y_section - 10*mm - qi * ROW_H
+
+                # Número da questão
+                c.setFont("Helvetica", 8.5)
+                c.drawRightString(x_base + num_offset, q_y + 1*mm, f"{q_num}.")
+
+                # Bolhas A B C D
+                for li, _ in enumerate(LETRAS):
+                    bx = bubble_start_x + li * BUBBLE_SPACING
+                    c.circle(bx, q_y, bubble_radius, stroke=1, fill=0)
+
+            # Linha divisória entre colunas (apenas para col 0)
+            if col == 0:
+                c.setStrokeColorRGB(0.7, 0.7, 0.7)
+                c.setLineWidth(0.3)
+                c.line(COL_X[0] + COL_W, SECTION_START_Y + 2*mm,
+                       COL_X[0] + COL_W, SECTION_START_Y - 2 * (section_h + 4*mm))
+
+        # Linha horizontal entre blocos superiores e inferiores
+        c.setStrokeColorRGB(0.6, 0.6, 0.6)
+        c.setLineWidth(0.4)
+        section_h = 8*mm + N_QUESTOES * ROW_H + 5*mm
+        meio_y = SECTION_START_Y - section_h - 2*mm
+        c.line(margin + marker_size + 2*mm, meio_y,
+               width - margin - marker_size - 2*mm, meio_y)
+
+        # Rodapé
+        c.setFont("Helvetica", 7)
+        c.setFillColorRGB(0.5, 0.5, 0.5)
+        c.drawString(margin + marker_size + 4*mm, margin + 2*mm,
+                     f"Cartão Simulado · Aluno {aluno['id']} · Simulado {sim['id']} · 40 questões")
+        c.setFillColorRGB(0, 0, 0)
+
+        c.showPage()
+
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+
+@app.get("/simulados/{sim_id}/cartao-resposta")
+def cartao_resposta_simulado(sim_id: int, turma_id: int = None):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    # Blocos com disciplina e questões
+    blocos = conn.execute("""
+        SELECT b.numero, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    blocos_info = []
+    num_global = 0
+    for bloco in blocos:
+        n_q = conn.execute("""
+            SELECT COUNT(*) AS c FROM simulado_questoes sq
+            JOIN simulado_blocos b ON b.id = sq.bloco_id
+            WHERE b.simulado_id = ? AND b.numero = ?
+        """, (sim_id, bloco["numero"])).fetchone()["c"]
+        blocos_info.append({
+            "numero": bloco["numero"],
+            "disciplina_nome": bloco["disciplina_nome"],
+            "q_inicio": num_global + 1,
+            "n_questoes": n_q or 10,
+        })
+        num_global += n_q or 10
+
+    # Turmas do ano de escolaridade
+    turmas = _turmas_do_ano(conn, sim["ano_escolaridade"] or 0)
+
+    # Filtrar por turma se especificado
+    if turma_id:
+        turmas = [t for t in turmas if t["id"] == turma_id]
+
+    # Alunos de todas as turmas
+    alunos = []
+    for t in turmas:
+        als = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome
+            FROM alunos a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.turma_id = ? ORDER BY a.nome
+        """, (t["id"],)).fetchall()
+        alunos.extend([dict(a) for a in als])
+
+    conn.close()
+
+    if not alunos:
+        return HTMLResponse("<p>Nenhum aluno encontrado para este simulado.</p>")
+
+    sim_dict = dict(sim)
+    buffer = _gerar_cartao_simulado_pdf(sim_dict, blocos_info, alunos)
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=cartao_simulado_{sim_id}.pdf"}
+    )
+
+
+# ==========================================
+#  OMR ESPECIAL DO SIMULADO
+# ==========================================
+
+def _calcular_layout_cartao_simulado(blocos_info):
+    """Calcula coordenadas das bolhas para o cartão especial do simulado.
+    Sincronizado com _gerar_cartao_simulado_pdf — mesmas constantes.
+    Retorna lista de {q_num, bloco_num, x_mm, y_mm, label} para cada bolha.
+    """
+    # Constantes idênticas ao gerador
+    PAGE_H_MM = 297
+    COL_X_MM = [25, 115]          # x base de cada coluna
+    NUM_OFFSET_MM = 14             # offset do número à esquerda
+    BUBBLE_START_X_OFFSET = 18    # x_base + 18mm = início das bolhas
+    BUBBLE_SPACING_MM = 10        # espaço entre A/B/C/D
+    SECTION_START_Y_MM = 60       # mm do topo da página
+    ROW_H_MM = 9                   # altura de cada linha de questão
+    SECTION_H_MM = 8 + 10 * 9 + 5 # título(8) + 10 linhas(90) + margem(5) = 103mm
+    SECTION_GAP_MM = 4
+    TITULO_H_MM = 8               # altura do título da seção
+    LABEL_OFFSET_MM = 7           # y do cabeçalho A/B/C/D abaixo do título
+    FIRST_Q_OFFSET_MM = 10        # y da primeira questão abaixo do título
+    LETRAS = ["A", "B", "C", "D"]
+
+    bolhas = []
+    for idx, bloco in enumerate(blocos_info):
+        col = idx % 2
+        row = idx // 2
+        x_base_mm = COL_X_MM[col]
+        y_section_top = SECTION_START_Y_MM + row * (SECTION_H_MM + SECTION_GAP_MM)
+        bubble_start_x = x_base_mm + BUBBLE_START_X_OFFSET
+
+        n_q = bloco.get("n_questoes", 10)
+        for qi in range(n_q):
+            q_num = bloco["q_inicio"] + qi
+            # y do centro das bolhas desta questão (do topo da página)
+            q_y_mm = y_section_top + FIRST_Q_OFFSET_MM + qi * ROW_H_MM
+
+            for li, letra in enumerate(LETRAS):
+                bx_mm = bubble_start_x + li * BUBBLE_SPACING_MM
+                bolhas.append({
+                    "q_num": q_num,
+                    "bloco_num": bloco["numero"],
+                    "label": letra,
+                    "x_mm": bx_mm,
+                    "y_mm": q_y_mm,
+                })
+    return bolhas
+
+
+def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
+    """Processa imagem de cartão resposta do simulado.
+    Detecta marcadores, corrige perspectiva, lê QR SIM:aluno_id:sim_id,
+    lê as 40 bolhas nas 4 seções.
+    Retorna dict com success, aluno_id, sim_id, answers ({q_num: letra}).
+    """
+    import cv2
+    import numpy as np
+    import base64
+
+    img, erro = _decode_image_universal(image_bytes, filename)
+    if img is None:
+        return {"success": False, "error": erro or "Erro ao abrir imagem."}
+
+    h, w = img.shape[:2]
+    if h < 400 or w < 300:
+        return {"success": False, "error": f"Imagem muito pequena ({w}×{h}px)."}
+
+    # Detectar marcadores de canto (mesmo algoritmo do OMR padrão)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 100: continue
+        x, y, ww, hh = cv2.boundingRect(cnt)
+        if ww == 0 or hh == 0: continue
+        if not (0.7 < ww/hh < 1.3): continue
+        if (ww * hh) == 0 or area / (ww * hh) < 0.7: continue
+        if ww < 15 or ww > w * 0.15: continue
+        candidates.append((x + ww/2, y + hh/2, area))
+
+    if len(candidates) < 4:
+        return {"success": False, "error": f"Apenas {len(candidates)} marcadores detectados (esperados 4)."}
+
+    max_d = (w*w + h*h)**0.5 * 0.30
+    def closest(cx, cy):
+        best, bd = None, float("inf")
+        for px, py, _ in candidates:
+            d = ((px-cx)**2 + (py-cy)**2)**0.5
+            if d < max_d and d < bd:
+                best, bd = (px, py), d
+        return best
+
+    tl, tr, bl, br = closest(0,0), closest(w,0), closest(0,h), closest(w,h)
+    if not all([tl, tr, bl, br]) or len({tl,tr,bl,br}) < 4:
+        return {"success": False, "error": "Não foi possível identificar os 4 marcadores de canto."}
+
+    # Perspective transform → A4 canônico 1191×1684px
+    canon_w, canon_h = 1191, 1684
+    margin_c = int(14/210*canon_w)
+    M = cv2.getPerspectiveTransform(
+        np.float32([tl, tr, bl, br]),
+        np.float32([[margin_c,margin_c],[canon_w-margin_c,margin_c],
+                    [margin_c,canon_h-margin_c],[canon_w-margin_c,canon_h-margin_c]])
+    )
+    warped = cv2.warpPerspective(img, M, (canon_w, canon_h))
+    warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+    # Ler QR Code
+    qr_detector = cv2.QRCodeDetector()
+    qr_data = ""
+    try:
+        r = qr_detector.detectAndDecode(warped)
+        qr_data = r[0] if r else ""
+    except Exception:
+        pass
+    if not qr_data:
+        try:
+            r = qr_detector.detectAndDecode(img)
+            qr_data = r[0] if r else ""
+        except Exception:
+            pass
+
+    if not qr_data or not qr_data.startswith("SIM:"):
+        return {"success": False, "error": f"QR Code inválido ou não encontrado. (lido: '{qr_data[:30]}')"}
+
+    try:
+        parts = qr_data.split(":")
+        aluno_id = int(parts[1])
+        sim_id_qr = int(parts[2])
+    except Exception as e:
+        return {"success": False, "error": f"QR Code com formato inválido: {e}"}
+
+    # Conversão mm → pixels
+    def mm_x(mm): return int(mm / 210 * canon_w)
+    def mm_y(mm): return int(mm / 297 * canon_h)
+
+    # Ler bolhas
+    bolhas = _calcular_layout_cartao_simulado(blocos_info)
+    bubble_r_px = int(3.0 / 210 * canon_w)
+    THRESHOLD = 0.35  # fração da área da bolha que deve estar escura
+
+    respostas = {}  # {q_num: letra_marcada}
+    votos = {}      # {q_num: {letra: media_escuridao}}
+
+    for b in bolhas:
+        bx = mm_x(b["x_mm"])
+        by = mm_y(b["y_mm"])
+        q = b["q_num"]
+        # Recortar região da bolha
+        x1 = max(0, bx - bubble_r_px)
+        x2 = min(canon_w, bx + bubble_r_px)
+        y1 = max(0, by - bubble_r_px)
+        y2 = min(canon_h, by + bubble_r_px)
+        roi = warped_gray[y1:y2, x1:x2]
+        if roi.size == 0:
+            continue
+        # Escuridão média (0=preto, 255=branco → inverter)
+        escuridao = 1.0 - float(roi.mean()) / 255.0
+        if q not in votos:
+            votos[q] = {}
+        votos[q][b["label"]] = escuridao
+
+    # Para cada questão, marcar a letra mais escura (se acima do threshold)
+    for q_num, letras_esc in votos.items():
+        melhor_letra = max(letras_esc, key=letras_esc.get)
+        if letras_esc[melhor_letra] >= THRESHOLD:
+            respostas[q_num] = melhor_letra
+        else:
+            respostas[q_num] = None  # não marcado
+
+    # Preview da imagem corrigida
+    _, enc = cv2.imencode(".jpg", warped, [cv2.IMWRITE_JPEG_QUALITY, 60])
+    preview_b64 = base64.b64encode(enc.tobytes()).decode()
+
+    return {
+        "success": True,
+        "aluno_id": aluno_id,
+        "sim_id": sim_id_qr,
+        "answers": respostas,
+        "preview_base64": preview_b64,
+        "n_respondidas": sum(1 for v in respostas.values() if v),
+    }
+
+
+@app.get("/simulados/{sim_id}/aplicacoes/{app_id}/escanear", response_class=HTMLResponse)
+def escanear_simulado_tela(sim_id: int, app_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    apl = conn.execute("""
+        SELECT a.*, t.nome AS turma_nome, p.titulo AS prova_titulo
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+        LEFT JOIN provas p ON p.id = a.prova_id
+        WHERE a.id = ?
+    """, (app_id,)).fetchone()
+    n_cartoes = conn.execute(
+        "SELECT COUNT(DISTINCT aluno_id) FROM entregas WHERE aplicacao_id = ?", (app_id,)
+    ).fetchone()[0]
+    n_alunos = conn.execute(
+        "SELECT COUNT(*) FROM alunos WHERE turma_id = ?", (apl["turma_id"],)
+    ).fetchone()[0] if apl else 0
+    conn.close()
+    if not sim or not apl:
+        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+    content = f"""
+        <div class="page-header">
+            <h1>📷 Escanear cartões — {apl['turma_nome']}</h1>
+            <p class="subtitle">{sim['nome']} · {n_cartoes}/{n_alunos} cartões processados</p>
+        </div>
+
+        <div class="tip" style="margin-bottom:16px;">
+            <strong>Dicas para boa leitura:</strong>
+            <ul style="margin:8px 0 0 18px;">
+                <li>Tire a foto com boa luz, sem sombras sobre a folha</li>
+                <li>Mantenha o celular paralelo à folha (sem inclinar)</li>
+                <li>Inclua os 4 marcadores pretos dos cantos no enquadramento</li>
+                <li>O QR Code precisa estar legível (sem reflexo nem desfoque)</li>
+            </ul>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:24px;">
+
+            <!-- Individual -->
+            <form id="form-single" action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-individual"
+                  method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+                <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
+                <p style="font-size:13px; color:var(--text-muted);">Recomendado para correção ao vivo, durante a aplicação.</p>
+                <label>Foto<input type="file" name="foto" accept="image/*" capture="environment" required></label>
+                <p style="font-size:11px; color:var(--text-muted);">No celular abre a câmera direto.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Processar 1 foto</button>
+            </form>
+
+            <!-- Lote -->
+            <form id="form-lote" action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote"
+                  method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+                <h3 style="margin-top:0;">📁 Lote (várias de uma vez)</h3>
+                <p style="font-size:13px; color:var(--text-muted);">Recomendado quando você já tem todas as fotos prontas.</p>
+                <label>Fotos ou PDF<input type="file" name="fotos" accept="image/*,.pdf" multiple required></label>
+                <p style="font-size:11px; color:var(--text-muted);">Selecione múltiplas imagens ou um PDF.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Processar lote</button>
+            </form>
+
+        </div>
+
+        <!-- Overlay de loading -->
+        <div id="loading-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65);
+             z-index:9999; flex-direction:column; align-items:center; justify-content:center; gap:20px;">
+            <div style="width:64px; height:64px; border:6px solid rgba(255,255,255,0.2);
+                 border-top-color:#fff; border-radius:50%; animation:spin 0.9s linear infinite;"></div>
+            <div id="loading-msg" style="color:#fff; font-size:18px; font-weight:600; text-align:center;">
+                ⏳ Processando cartão…
+            </div>
+            <div style="color:rgba(255,255,255,0.7); font-size:13px;">Aguarde, não feche esta página.</div>
+        </div>
+
+        <style>
+        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+        </style>
+
+        <script>
+        (function() {{
+            var overlay = document.getElementById('loading-overlay');
+            var msg = document.getElementById('loading-msg');
+
+            function mostrarLoading(texto) {{
+                msg.textContent = texto;
+                overlay.style.display = 'flex';
+            }}
+
+            // Individual
+            var fs = document.getElementById('form-single');
+            if (fs) {{
+                fs.addEventListener('submit', function(e) {{
+                    var btn = fs.querySelector('button[type="submit"]');
+                    if (btn) {{ btn.disabled = true; }}
+                    mostrarLoading('⏳ Processando cartão…');
+                }});
+            }}
+
+            // Lote
+            var fl = document.getElementById('form-lote');
+            if (fl) {{
+                fl.addEventListener('submit', function(e) {{
+                    var inp = fl.querySelector('input[type="file"]');
+                    var n = inp && inp.files ? inp.files.length : '?';
+                    var btn = fl.querySelector('button[type="submit"]');
+                    if (btn) {{ btn.disabled = true; }}
+                    mostrarLoading('⏳ Processando ' + n + ' cartão(ões)… Isso pode levar alguns segundos.');
+                }});
+            }}
+        }})();
+        </script>
+
+        <div style="margin-top:16px;">
+            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
+        </div>
+    """
+    return render_page(f"Escanear — {apl['turma_nome']}", content, active="simulados")
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-individual", response_class=HTMLResponse)
+async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFile = File(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return {"success": False, "error": "Não autenticado."}
+    from fastapi.responses import JSONResponse
+
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ? AND prova_id IN (SELECT id FROM provas WHERE titulo LIKE ?)",
+                       (app_id, f"%[SIM-{sim_id}]%")).fetchone()
+    if not sim or not apl:
+        conn.close()
+        return JSONResponse({"success": False, "error": "Simulado ou aplicação não encontrados."})
+
+    # Montar blocos_info para o leitor
+    blocos = conn.execute("""
+        SELECT b.numero, d.nome AS disciplina_nome,
+               (SELECT COUNT(*) FROM simulado_questoes WHERE bloco_id = b.id) AS n_q
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    blocos_info = []
+    num_global = 0
+    for bloco in blocos:
+        nq = bloco["n_q"] or 10
+        blocos_info.append({
+            "numero": bloco["numero"],
+            "disciplina_nome": bloco["disciplina_nome"],
+            "q_inicio": num_global + 1,
+            "n_questoes": nq,
+        })
+        num_global += nq
+
+    # Processar imagem
+    image_bytes = await foto.read()
+    resultado = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
+
+    if not resultado["success"]:
+        conn.close()
+        return JSONResponse(resultado)
+
+    aluno_id = resultado["aluno_id"]
+    answers = resultado["answers"]
+
+    # Verificar aluno
+    aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return JSONResponse({"success": False, "error": f"Aluno {aluno_id} não encontrado no banco."})
+
+    # Buscar gabarito (questoes do simulado em ordem)
+    questoes_ordem = conn.execute("""
+        SELECT sq.ordem, sq.questao_id, b.numero AS bloco_num
+        FROM simulado_questoes sq
+        JOIN simulado_blocos b ON b.id = sq.bloco_id
+        WHERE b.simulado_id = ?
+        ORDER BY b.numero, sq.ordem
+    """, (sim_id,)).fetchall()
+
+    # Salvar ou atualizar entrega
+    entrega = conn.execute(
+        "SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+        (app_id, aluno_id)
+    ).fetchone()
+
+    if entrega:
+        entrega_id = entrega["id"]
+        conn.execute("DELETE FROM respostas WHERE entrega_id = ?", (entrega_id,))
+    else:
+        cur = conn.execute(
+            "INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)",
+            (app_id, aluno_id)
+        )
+        entrega_id = cur.lastrowid
+
+    # Salvar respostas
+    num_global = 0
+    for q in questoes_ordem:
+        num_global += 1
+        resp_aluno = answers.get(num_global)
+        # Buscar gabarito
+        gabarito = conn.execute(
+            "SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1",
+            (q["questao_id"],)
+        ).fetchone()
+        letra_correta = gabarito["letra"] if gabarito else None
+        correta = (resp_aluno == letra_correta) if resp_aluno and letra_correta else False
+        conn.execute(
+            "INSERT INTO respostas (entrega_id, questao_id, resposta_aluno, correta) VALUES (?,?,?,?)",
+            (entrega_id, q["questao_id"], resp_aluno, 1 if correta else 0)
+        )
+
+    conn.commit()
+    conn.close()
+
+    # Calcular acerto
+    n_corretas = sum(1 for r in conn2_check if False)  # placeholder
+    preview_b64 = resultado.get("preview_base64", "")
+    img_tag = f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:300px; border-radius:6px; margin-top:8px;">' if preview_b64 else ""
+
+    content_ok = f"""
+        <div class="page-header"><h1>✅ Cartão processado</h1></div>
+        <div class="tip" style="background:var(--green-bg); border-color:var(--green); margin-bottom:16px;">
+            <strong>{aluno["nome"]}</strong> — {resultado["n_respondidas"]}/40 questões lidas
+        </div>
+        {img_tag}
+        <div style="display:flex; gap:10px; margin-top:20px;">
+            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Próximo cartão</a>
+            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Cartão processado", content_ok, active="simulados"))
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote", response_class=HTMLResponse)
+async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFile] = File(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    apl = conn.execute("""
+        SELECT a.*, t.nome AS turma_nome
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+    """, (app_id,)).fetchone()
+
+    if not sim or not apl:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+    # Montar blocos_info
+    blocos = conn.execute("""
+        SELECT b.numero, d.nome AS disciplina_nome,
+               (SELECT COUNT(*) FROM simulado_questoes WHERE bloco_id = b.id) AS n_q
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    blocos_info = []
+    num_global = 0
+    for bloco in blocos:
+        nq = bloco["n_q"] or 10
+        blocos_info.append({
+            "numero": bloco["numero"],
+            "disciplina_nome": bloco["disciplina_nome"],
+            "q_inicio": num_global + 1,
+            "n_questoes": nq,
+        })
+        num_global += nq
+
+    # Expandir PDFs em imagens
+    all_files = []
+    for f in fotos:
+        data = await f.read()
+        if f.filename and f.filename.lower().endswith(".pdf"):
+            try:
+                from pdf2image import convert_from_bytes
+                pages = convert_from_bytes(data, dpi=200)
+                for i, page in enumerate(pages):
+                    buf = BytesIO()
+                    page.save(buf, format="JPEG", quality=90)
+                    all_files.append((f"{f.filename}_p{i+1}.jpg", buf.getvalue()))
+            except Exception as e:
+                all_files.append((f.filename or "arquivo", data))
+        else:
+            all_files.append((f.filename or "foto.jpg", data))
+
+    # Processar cada imagem
+    resultados = []
+    alunos_no_lote = set()
+
+    for filename, image_bytes in all_files:
+        resultado = _processar_cartao_simulado(image_bytes, blocos_info, filename)
+        if not resultado["success"]:
+            resultados.append({"filename": filename, "success": False,
+                               "error": resultado.get("error", "Erro desconhecido")})
+            continue
+
+        aluno_id = resultado["aluno_id"]
+        duplicado = aluno_id in alunos_no_lote
+        alunos_no_lote.add(aluno_id)
+
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not aluno:
+            resultados.append({"filename": filename, "success": False,
+                               "error": f"Aluno {aluno_id} não encontrado."})
+            continue
+
+        # Salvar respostas
+        answers = resultado["answers"]
+        questoes_ordem = conn.execute("""
+            SELECT sq.ordem, sq.questao_id
+            FROM simulado_questoes sq
+            JOIN simulado_blocos b ON b.id = sq.bloco_id
+            WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+        """, (sim_id,)).fetchall()
+
+        entrega = conn.execute(
+            "SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+            (app_id, aluno_id)
+        ).fetchone()
+        ja_entregue = entrega is not None
+
+        if entrega:
+            entrega_id = entrega["id"]
+            conn.execute("DELETE FROM respostas WHERE entrega_id = ?", (entrega_id,))
+        else:
+            cur = conn.execute(
+                "INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)",
+                (app_id, aluno_id)
+            )
+            entrega_id = cur.lastrowid
+
+        num_q = 0
+        n_corretas = 0
+        for q in questoes_ordem:
+            num_q += 1
+            resp = answers.get(num_q)
+            gabarito = conn.execute(
+                "SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1",
+                (q["questao_id"],)
+            ).fetchone()
+            letra_correta = gabarito["letra"] if gabarito else None
+            correta = (resp == letra_correta) if resp and letra_correta else False
+            if correta: n_corretas += 1
+            conn.execute(
+                "INSERT INTO respostas (entrega_id, questao_id, resposta_aluno, correta) VALUES (?,?,?,?)",
+                (entrega_id, q["questao_id"], resp, 1 if correta else 0)
+            )
+        conn.commit()
+
+        resultados.append({
+            "filename": filename,
+            "success": True,
+            "aluno_nome": aluno["nome"],
+            "aluno_id": aluno_id,
+            "n_respondidas": resultado["n_respondidas"],
+            "n_corretas": n_corretas,
+            "ja_entregue": ja_entregue,
+            "duplicado": duplicado,
+            "preview_b64": resultado.get("preview_base64", ""),
+        })
+
+    conn.close()
+
+    # Montar tela de resultado do lote
+    n_ok = sum(1 for r in resultados if r["success"])
+    n_err = len(resultados) - n_ok
+
+    cards_html = ""
+    for r in resultados:
+        if r["success"]:
+            warn = ""
+            if r["ja_entregue"]: warn += " · ⚠️ substituiu entrega anterior"
+            if r["duplicado"]: warn += " · ⚠️ duplicado no lote"
+            preview = f'<img src="data:image/jpeg;base64,{r["preview_b64"]}" style="max-width:120px;border-radius:4px;float:right;">' if r["preview_b64"] else ""
+            cards_html += f"""
+            <div style="border:1px solid var(--green); border-radius:8px; padding:12px 14px;
+                 margin-bottom:8px; background:var(--green-bg); display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <div style="font-weight:600;">✅ {r['aluno_nome']}</div>
+                    <div style="font-size:12px; color:var(--text-muted);">{r['filename']} · {r['n_respondidas']}/40 lidas{warn}</div>
+                </div>
+                {preview}
+            </div>"""
+        else:
+            cards_html += f"""
+            <div style="border:1px solid var(--red); border-radius:8px; padding:12px 14px;
+                 margin-bottom:8px; background:var(--red-bg);">
+                <div style="font-weight:600; color:var(--red);">❌ {r['filename']}</div>
+                <div style="font-size:12px;">{r['error']}</div>
+            </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Resultado do lote — {apl['turma_nome']}</h1>
+            <p class="subtitle">{sim['nome']} · {n_ok} processados · {n_err} erros</p>
+        </div>
+        <div style="display:flex; gap:10px; margin-bottom:16px;">
+            <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
+            <div class="metric"><div class="metric-label">Total enviados</div><div class="metric-value">{len(resultados)}</div></div>
+        </div>
+        {cards_html}
+        <div style="display:flex; gap:10px; margin-top:20px;">
+            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Escanear mais</a>
+            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Resultado do lote", content, active="simulados"))
