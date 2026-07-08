@@ -8398,7 +8398,7 @@ def simulado_aplicacoes(sim_id: int):
                         </div>
                     </div>
                     <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                        <a href="/aplicacoes/{app['id']}/cartao-resposta" class="btn" style="font-size:12px; padding:5px 12px;" target="_blank">📄 Cartões</a>
+                        <a href="/simulados/{sim_id}/cartao-resposta?turma_id={app['turma_id']}" class="btn" style="font-size:12px; padding:5px 12px;" target="_blank">📄 Cartões</a>
                         <a href="/simulados/{sim_id}/aplicacoes/{app['id']}/escanear" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">📷 Escanear</a>
                         <a href="/aplicacoes/{app['id']}/analise" class="btn" style="font-size:12px; padding:5px 12px;">📈 Análise</a>
                         <a href="/aplicacoes/{app['id']}" class="btn" style="font-size:12px; padding:5px 12px;">Ver →</a>
@@ -9585,18 +9585,15 @@ def cartao_resposta_simulado(sim_id: int, turma_id: int = None):
     blocos_info = []
     num_global = 0
     for bloco in blocos:
-        n_q = conn.execute("""
-            SELECT COUNT(*) AS c FROM simulado_questoes sq
-            JOIN simulado_blocos b ON b.id = sq.bloco_id
-            WHERE b.simulado_id = ? AND b.numero = ?
-        """, (sim_id, bloco["numero"])).fetchone()["c"]
+        # Simulado sempre tem 10 questões por bloco (fixo)
+        N_Q_BLOCO = 10
         blocos_info.append({
             "numero": bloco["numero"],
             "disciplina_nome": bloco["disciplina_nome"],
             "q_inicio": num_global + 1,
-            "n_questoes": n_q or 10,
+            "n_questoes": N_Q_BLOCO,
         })
-        num_global += n_q or 10
+        num_global += N_Q_BLOCO
 
     # Turmas do ano de escolaridade
     turmas = _turmas_do_ano(conn, sim["ano_escolaridade"] or 0)
