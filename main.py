@@ -9963,14 +9963,13 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
     blocos_info = []
     num_global = 0
     for bloco in blocos:
-        nq = bloco["n_q"] or 10
         blocos_info.append({
             "numero": bloco["numero"],
             "disciplina_nome": bloco["disciplina_nome"],
             "q_inicio": num_global + 1,
-            "n_questoes": nq,
+            "n_questoes": 10,  # sempre 10 por bloco
         })
-        num_global += nq
+        num_global += 10
 
     # Processar imagem
     image_bytes = await foto.read()
@@ -10034,8 +10033,6 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
     conn.commit()
     conn.close()
 
-    # Calcular acerto
-    n_corretas = sum(1 for r in conn2_check if False)  # placeholder
     preview_b64 = resultado.get("preview_base64", "")
     img_tag = f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:300px; border-radius:6px; margin-top:8px;">' if preview_b64 else ""
 
@@ -10081,14 +10078,13 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
     blocos_info = []
     num_global = 0
     for bloco in blocos:
-        nq = bloco["n_q"] or 10
         blocos_info.append({
             "numero": bloco["numero"],
             "disciplina_nome": bloco["disciplina_nome"],
             "q_inicio": num_global + 1,
-            "n_questoes": nq,
+            "n_questoes": 10,  # sempre 10 por bloco
         })
-        num_global += nq
+        num_global += 10
 
     # Expandir PDFs em imagens
     all_files = []
