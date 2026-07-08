@@ -9941,21 +9941,21 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
 async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFile = File(...)):
     prof = _current_prof_ctx.get()
     if not prof:
-        return {"success": False, "error": "Não autenticado."}
-    from fastapi.responses import JSONResponse
+        return RedirectResponse("/login", status_code=303)
 
     conn = get_db()
     sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
-    apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ? AND prova_id IN (SELECT id FROM provas WHERE titulo LIKE ?)",
-                       (app_id, f"%[SIM-{sim_id}]%")).fetchone()
+    apl = conn.execute(
+        "SELECT * FROM aplicacoes WHERE id = ?", (app_id,)
+    ).fetchone()
+
     if not sim or not apl:
         conn.close()
-        return JSONResponse({"success": False, "error": "Simulado ou aplicação não encontrados."})
+        return HTMLResponse(render_page("Erro", '<p>Simulado ou aplicação não encontrados.</p>', active="simulados"))
 
-    # Montar blocos_info para o leitor
+    # Montar blocos_info (sempre 10 por bloco)
     blocos = conn.execute("""
-        SELECT b.numero, d.nome AS disciplina_nome,
-               (SELECT COUNT(*) FROM simulado_questoes WHERE bloco_id = b.id) AS n_q
+        SELECT b.numero, d.nome AS disciplina_nome
         FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
         WHERE b.simulado_id = ? ORDER BY b.numero
     """, (sim_id,)).fetchall()
@@ -9967,42 +9967,53 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
             "numero": bloco["numero"],
             "disciplina_nome": bloco["disciplina_nome"],
             "q_inicio": num_global + 1,
-            "n_questoes": 10,  # sempre 10 por bloco
+            "n_questoes": 10,
         })
         num_global += 10
 
     # Processar imagem
     image_bytes = await foto.read()
+    if not image_bytes:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p><a href="javascript:history.back()" class="btn">Voltar</a>', active="simulados"))
+
     resultado = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
 
     if not resultado["success"]:
         conn.close()
-        return JSONResponse(resultado)
+        content_err = f"""
+            <div class="page-header"><h1>❌ Erro ao processar cartão</h1></div>
+            <div class="tip" style="background:var(--red-bg);border-color:var(--red);">
+                {resultado.get('error', 'Erro desconhecido')}
+            </div>
+            <div style="margin-top:16px;">
+                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">← Tentar novamente</a>
+            </div>
+        """
+        return HTMLResponse(render_page("Erro ao processar", content_err, active="simulados"))
 
     aluno_id = resultado["aluno_id"]
     answers = resultado["answers"]
 
-    # Verificar aluno
     aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
     if not aluno:
         conn.close()
-        return JSONResponse({"success": False, "error": f"Aluno {aluno_id} não encontrado no banco."})
+        return HTMLResponse(render_page("Erro", f'<p>Aluno {aluno_id} não encontrado.</p><a href="javascript:history.back()" class="btn">Voltar</a>', active="simulados"))
 
-    # Buscar gabarito (questoes do simulado em ordem)
+    # Buscar questões do simulado em ordem corrida
     questoes_ordem = conn.execute("""
-        SELECT sq.ordem, sq.questao_id, b.numero AS bloco_num
+        SELECT sq.questao_id
         FROM simulado_questoes sq
         JOIN simulado_blocos b ON b.id = sq.bloco_id
         WHERE b.simulado_id = ?
         ORDER BY b.numero, sq.ordem
     """, (sim_id,)).fetchall()
 
-    # Salvar ou atualizar entrega
+    # Criar ou atualizar entrega
     entrega = conn.execute(
         "SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
         (app_id, aluno_id)
     ).fetchone()
-
     if entrega:
         entrega_id = entrega["id"]
         conn.execute("DELETE FROM respostas WHERE entrega_id = ?", (entrega_id,))
@@ -10013,42 +10024,46 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
         )
         entrega_id = cur.lastrowid
 
-    # Salvar respostas
-    num_global = 0
+    # Salvar respostas com gabarito
+    num_q = 0
+    n_corretas = 0
     for q in questoes_ordem:
-        num_global += 1
-        resp_aluno = answers.get(num_global)
-        # Buscar gabarito
+        num_q += 1
+        resp = answers.get(num_q)
         gabarito = conn.execute(
             "SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1",
             (q["questao_id"],)
         ).fetchone()
         letra_correta = gabarito["letra"] if gabarito else None
-        correta = (resp_aluno == letra_correta) if resp_aluno and letra_correta else False
+        correta = bool(resp and letra_correta and resp == letra_correta)
+        if correta:
+            n_corretas += 1
         conn.execute(
             "INSERT INTO respostas (entrega_id, questao_id, resposta_aluno, correta) VALUES (?,?,?,?)",
-            (entrega_id, q["questao_id"], resp_aluno, 1 if correta else 0)
+            (entrega_id, q["questao_id"], resp, 1 if correta else 0)
         )
 
     conn.commit()
     conn.close()
 
     preview_b64 = resultado.get("preview_base64", "")
-    img_tag = f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:300px; border-radius:6px; margin-top:8px;">' if preview_b64 else ""
+    img_tag = (f'<img src="data:image/jpeg;base64,{preview_b64}" '
+               f'style="max-width:300px;border-radius:6px;margin-top:8px;display:block;">'
+               if preview_b64 else "")
 
     content_ok = f"""
         <div class="page-header"><h1>✅ Cartão processado</h1></div>
-        <div class="tip" style="background:var(--green-bg); border-color:var(--green); margin-bottom:16px;">
+        <div class="tip" style="background:var(--green-bg);border-color:var(--green);margin-bottom:16px;">
             <strong>{aluno["nome"]}</strong> — {resultado["n_respondidas"]}/40 questões lidas
+            · {n_corretas}/{len(questoes_ordem)} corretas
         </div>
         {img_tag}
-        <div style="display:flex; gap:10px; margin-top:20px;">
+        <div style="display:flex;gap:10px;margin-top:20px;">
             <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Próximo cartão</a>
             <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
         </div>
     """
     return HTMLResponse(render_page("Cartão processado", content_ok, active="simulados"))
-
 
 @app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote", response_class=HTMLResponse)
 async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFile] = File(...)):
