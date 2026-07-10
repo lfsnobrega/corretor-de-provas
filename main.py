@@ -1030,6 +1030,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
                 {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
                 {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
@@ -10320,3 +10321,342 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
 
     finally:
         conn.close()
+
+
+
+# ==========================================
+#  ESCANEAMENTO UNIVERSAL — SEM PRÉ-SELEÇÃO
+# ==========================================
+
+@app.get("/escanear", response_class=HTMLResponse)
+def escanear_universal_tela(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    content = """
+        <div class="page-header">
+            <h1>📷 Digitalizar cartão</h1>
+            <p class="subtitle">O sistema identifica automaticamente de qual atividade é o cartão.</p>
+        </div>
+
+        <div class="tip" style="margin-bottom:20px;">
+            <strong>Como usar:</strong>
+            <ul style="margin:8px 0 0 18px;">
+                <li>Tire a foto com boa iluminação, sem sombras</li>
+                <li>Inclua os 4 marcadores pretos dos cantos</li>
+                <li>O QR Code precisa estar legível</li>
+                <li>Funciona com cartões de <strong>provas normais</strong> e <strong>simulados</strong></li>
+            </ul>
+        </div>
+
+        <form id="form-scan" action="/escanear" method="post" enctype="multipart/form-data">
+            <label style="font-size:15px;font-weight:600;">Foto do cartão resposta
+                <input type="file" name="foto" accept="image/*" capture="environment" required
+                       style="margin-top:8px;">
+            </label>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">No celular abre a câmera direto.</p>
+            <button type="submit" class="btn btn-primary" style="margin-top:12px;width:100%;font-size:16px;padding:12px;">
+                📤 Processar cartão
+            </button>
+        </form>
+
+        <!-- Overlay de loading -->
+        <div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);
+             z-index:9999;flex-direction:column;align-items:center;justify-content:center;gap:20px;">
+            <div style="width:64px;height:64px;border:6px solid rgba(255,255,255,0.2);
+                 border-top-color:#fff;border-radius:50%;animation:spin 0.9s linear infinite;"></div>
+            <div style="color:#fff;font-size:18px;font-weight:600;">⏳ Identificando cartão…</div>
+            <div style="color:rgba(255,255,255,0.7);font-size:13px;">Aguarde, não feche esta página.</div>
+        </div>
+        <style>@keyframes spin{to{transform:rotate(360deg);}}</style>
+        <script>
+        document.getElementById('form-scan').addEventListener('submit', function() {
+            document.getElementById('loading-overlay').style.display = 'flex';
+        });
+        </script>
+    """
+    return render_page("Digitalizar cartão", content, active="aplicacoes")
+
+
+@app.post("/escanear", response_class=HTMLResponse)
+async def escanear_universal_post(foto: UploadFile = File(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    image_bytes = await foto.read()
+    if not image_bytes:
+        return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p><a href="/escanear" class="btn">← Voltar</a>', active="aplicacoes"))
+
+    # Tentar ler o QR Code da imagem para identificar o tipo
+    import cv2
+    import numpy as np
+
+    img_arr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return HTMLResponse(render_page("Erro", '<p>Não foi possível abrir a imagem.</p><a href="/escanear" class="btn">← Voltar</a>', active="aplicacoes"))
+
+    qr_detector = cv2.QRCodeDetector()
+    qr_data = ""
+    try:
+        r = qr_detector.detectAndDecode(img)
+        qr_data = r[0] if r else ""
+    except Exception:
+        pass
+
+    def _render_erro(msg):
+        content = f"""
+            <div class="page-header"><h1>❌ Cartão não identificado</h1></div>
+            <div style="border:1px solid var(--red);background:var(--red-bg);padding:16px;border-radius:6px;color:var(--red);">
+                <strong>Problema:</strong> {msg}
+            </div>
+            <p style="margin-top:12px;">Verifique se o QR Code está visível e nítido na foto.</p>
+            <a href="/escanear" class="btn btn-primary" style="margin-top:12px;">📷 Tentar novamente</a>
+        """
+        return HTMLResponse(render_page("Não identificado", content, active="aplicacoes"))
+
+    if not qr_data:
+        return _render_erro("QR Code não encontrado na imagem.")
+
+    # === PROVA NORMAL: CR:aluno_id:aplicacao_id ===
+    if qr_data.startswith("CR:"):
+        try:
+            parts = qr_data.split(":")
+            aluno_id = int(parts[1])
+            aplicacao_id = int(parts[2])
+        except Exception:
+            return _render_erro(f"QR Code com formato inválido: '{qr_data}'")
+
+        conn = get_db()
+        try:
+            apl = conn.execute("""
+                SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome
+                FROM aplicacoes a JOIN provas p ON p.id = a.prova_id
+                JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+            """, (aplicacao_id,)).fetchone()
+            if not apl:
+                return _render_erro(f"Aplicação {aplicacao_id} não encontrada.")
+
+            questoes = conn.execute(
+                "SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem",
+                (apl["prova_id"],)
+            ).fetchall()
+            n_questoes = len(questoes)
+            questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+            aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+            if not aluno:
+                return _render_erro(f"Aluno {aluno_id} não encontrado.")
+            ja_entregue = conn.execute(
+                "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+                (aplicacao_id, aluno_id)
+            ).fetchone()
+        finally:
+            conn.close()
+
+        # Processar com OMR normal
+        result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
+        if not result["success"]:
+            return _render_erro(result.get("error", "Erro no processamento."))
+
+        # Montar tela de revisão (reaproveita a mesma lógica do escanear normal)
+        answers = result["answers"]
+        qs_com_aviso = {}
+        import re as _re
+        for w in result.get("warnings", []):
+            m = _re.match(r"Q(\d+)", w)
+            if m:
+                qs_com_aviso[int(m.group(1))] = w
+
+        rows_html = ""
+        for q_num in range(1, n_questoes + 1):
+            detected = answers.get(q_num)
+            tem_aviso = q_num in qs_com_aviso
+            row_bg = ' style="background:var(--orange-bg);"' if tem_aviso else ""
+            cells = ""
+            for letra in ["A", "B", "C", "D"]:
+                checked = " checked" if detected == letra else ""
+                cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
+            em_branco = " checked" if detected is None else ""
+            cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco}></td>'
+            if tem_aviso:
+                marca = f'<span style="color:var(--orange);font-weight:600;">⚠️ {qs_com_aviso[q_num]}</span>'
+            else:
+                marca = f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
+            rows_html += f'<tr{row_bg}><td style="padding:5px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 8px;">{marca}</td></tr>'
+
+        avisos_html = ""
+        if result.get("warnings"):
+            items_w = "".join(f"<li>{w}</li>" for w in result["warnings"])
+            avisos_html = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ {len(result["warnings"])} questão(ões) com marcação dupla ou ambígua:</strong><ul style="margin:6px 0 0 18px;">{items_w}</ul></div>'
+
+        override_aviso = ""
+        if ja_entregue:
+            override_aviso = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ Atenção:</strong> entrega anterior registrada em {ja_entregue["finalizada_em"]}. Confirmar irá <strong>sobrescrever</strong>.</div>'
+
+        preview_img = f'<img src="data:image/jpeg;base64,{result["preview_base64"]}" style="max-width:100%;border:1px solid var(--border);border-radius:6px;">' if result.get("preview_base64") else ""
+
+        content = f"""
+            <div class="page-header">
+                <h1>Revisão da leitura</h1>
+                <p class="subtitle">{apl['prova_titulo']} · {apl['turma_nome']} · <strong>{aluno['nome']}</strong></p>
+            </div>
+            {avisos_html}{override_aviso}
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:flex-start;">
+                <div>
+                    <h2 style="margin-top:0;">Imagem processada</h2>
+                    {preview_img}
+                </div>
+                <div>
+                    <h2 style="margin-top:0;">Respostas detectadas</h2>
+                    <p style="font-size:13px;color:var(--text-muted);">Corrija antes de salvar se necessário.</p>
+                    <form action="/aplicacoes/{aplicacao_id}/escanear/confirmar" method="post">
+                        <input type="hidden" name="aluno_id" value="{aluno_id}">
+                        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                            <thead><tr style="background:var(--bg-subtle);">
+                                <th style="padding:5px;">Q</th>
+                                <th style="padding:5px;">A</th><th style="padding:5px;">B</th>
+                                <th style="padding:5px;">C</th><th style="padding:5px;">D</th>
+                                <th style="padding:5px;">∅</th><th style="padding:5px;">Status</th>
+                            </tr></thead>
+                            <tbody>{rows_html}</tbody>
+                        </table>
+                        <div style="display:flex;gap:10px;margin-top:16px;">
+                            <button type="submit" class="btn btn-primary">✓ Confirmar e salvar</button>
+                            <a href="/escanear" class="btn">📷 Próximo cartão</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Revisão", content, active="aplicacoes"))
+
+    # === SIMULADO: SIM:aluno_id:sim_id ===
+    elif qr_data.startswith("SIM:"):
+        try:
+            parts = qr_data.split(":")
+            aluno_id = int(parts[1])
+            sim_id = int(parts[2])
+        except Exception:
+            return _render_erro(f"QR Code de simulado com formato inválido: '{qr_data}'")
+
+        conn = get_db()
+        try:
+            sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+            if not sim:
+                return _render_erro(f"Simulado {sim_id} não encontrado.")
+
+            aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+            if not aluno:
+                return _render_erro(f"Aluno {aluno_id} não encontrado.")
+
+            # Buscar aplicação do simulado para a turma do aluno
+            apl = conn.execute("""
+                SELECT a.id FROM aplicacoes a
+                WHERE a.turma_id = ? AND a.titulo LIKE ?
+                ORDER BY a.id DESC LIMIT 1
+            """, (aluno["turma_id"], f"%[SIM-{sim_id}]%")).fetchone()
+            if not apl:
+                return _render_erro(f"Nenhuma aplicação do simulado {sim_id} encontrada para a turma do aluno.")
+            app_id = apl["id"]
+
+            blocos = conn.execute("""
+                SELECT b.numero, d.nome AS disciplina_nome
+                FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+                WHERE b.simulado_id = ? ORDER BY b.numero
+            """, (sim_id,)).fetchall()
+            blocos_info = []
+            num_global = 0
+            for bloco in blocos:
+                blocos_info.append({"numero": bloco["numero"], "disciplina_nome": bloco["disciplina_nome"],
+                                     "q_inicio": num_global + 1, "n_questoes": 10})
+                num_global += 10
+
+            questoes_ordem = conn.execute("""
+                SELECT sq.questao_id FROM simulado_questoes sq
+                JOIN simulado_blocos b ON b.id = sq.bloco_id
+                WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+            """, (sim_id,)).fetchall()
+            questao_ids = [q["questao_id"] for q in questoes_ordem]
+
+            ja_entregue = conn.execute(
+                "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+                (app_id, aluno_id)
+            ).fetchone()
+        finally:
+            conn.close()
+
+        result = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
+        if not result["success"]:
+            return _render_erro(result.get("error", "Erro no processamento."))
+
+        answers = result["answers"]
+        qs_aviso = {}
+        import re as _re2
+        for w in result.get("warnings", []):
+            m = _re2.match(r"Q(\d+)", w)
+            if m:
+                qs_aviso[int(m.group(1))] = w
+
+        rows_por_bloco = {b["numero"]: list(range(b["q_inicio"], b["q_inicio"] + b["n_questoes"])) for b in blocos_info}
+        tabela_html = ""
+        for bloco in blocos_info:
+            tabela_html += f'<tr style="background:var(--accent-bg);"><td colspan="7" style="padding:5px 8px;font-weight:700;color:var(--accent);">Bloco {bloco["numero"]} — {bloco["disciplina_nome"]}</td></tr>'
+            for q_num in rows_por_bloco[bloco["numero"]]:
+                detected = answers.get(q_num)
+                tem_aviso = q_num in qs_aviso
+                row_bg = ' style="background:var(--orange-bg);"' if tem_aviso else ""
+                cells = ""
+                for letra in ["A", "B", "C", "D"]:
+                    checked = " checked" if detected == letra else ""
+                    cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
+                em_branco = " checked" if detected is None else ""
+                cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco}></td>'
+                marca = f'<span style="color:var(--orange);font-weight:600;">⚠️ {qs_aviso[q_num]}</span>' if tem_aviso else (f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>')
+                tabela_html += f'<tr{row_bg}><td style="padding:4px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 6px;">{marca}</td></tr>'
+
+        avisos_html = ""
+        if result.get("warnings"):
+            items_w = "".join(f"<li>{w}</li>" for w in result["warnings"])
+            avisos_html = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ {len(result["warnings"])} questão(ões) com marcação dupla ou ambígua:</strong><ul style="margin:6px 0 0 18px;">{items_w}</ul></div>'
+
+        override_aviso = ""
+        if ja_entregue:
+            override_aviso = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ Entrega anterior:</strong> {ja_entregue["finalizada_em"]}. Confirmar irá sobrescrever.</div>'
+
+        preview_img = f'<img src="data:image/jpeg;base64,{result["preview_base64"]}" style="max-width:100%;border:1px solid var(--border);border-radius:6px;">' if result.get("preview_base64") else ""
+
+        content = f"""
+            <div class="page-header">
+                <h1>Revisão da leitura</h1>
+                <p class="subtitle">{sim['nome']} · <strong>{aluno['nome']}</strong></p>
+            </div>
+            {avisos_html}{override_aviso}
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:flex-start;">
+                <div><h2 style="margin-top:0;">Imagem processada</h2>{preview_img}</div>
+                <div>
+                    <h2 style="margin-top:0;">Respostas detectadas</h2>
+                    <form action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-confirmar" method="post">
+                        <input type="hidden" name="aluno_id" value="{aluno_id}">
+                        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                            <thead><tr style="background:var(--bg-subtle);">
+                                <th style="padding:4px;">Q</th>
+                                <th style="padding:4px;">A</th><th style="padding:4px;">B</th>
+                                <th style="padding:4px;">C</th><th style="padding:4px;">D</th>
+                                <th style="padding:4px;">∅</th><th style="padding:4px;">Status</th>
+                            </tr></thead>
+                            <tbody>{tabela_html}</tbody>
+                        </table>
+                        <div style="display:flex;gap:10px;margin-top:16px;">
+                            <button type="submit" class="btn btn-primary">✓ Confirmar e salvar</button>
+                            <a href="/escanear" class="btn">📷 Próximo cartão</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Revisão", content, active="aplicacoes"))
+
+    else:
+        return _render_erro(f"QR Code não reconhecido: '{qr_data[:40]}'")
