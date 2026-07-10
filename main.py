@@ -10350,30 +10350,59 @@ def escanear_universal_tela(request: Request):
             </ul>
         </div>
 
-        <form id="form-scan" action="/escanear" method="post" enctype="multipart/form-data">
-            <label style="font-size:15px;font-weight:600;">Foto do cartão resposta
-                <input type="file" name="foto" accept="image/*" capture="environment" required
-                       style="margin-top:8px;">
-            </label>
-            <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">No celular abre a câmera direto.</p>
-            <button type="submit" class="btn btn-primary" style="margin-top:12px;width:100%;font-size:16px;padding:12px;">
-                📤 Processar cartão
-            </button>
-        </form>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:8px;">
+
+            <!-- Individual -->
+            <form id="form-single" action="/escanear" method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle);padding:18px;border-radius:8px;">
+                <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
+                <p style="font-size:13px;color:var(--text-muted);">Recomendado para correção ao vivo. Exibe tela de revisão antes de salvar.</p>
+                <label>Foto
+                    <input type="file" name="foto" accept="image/*" capture="environment" required>
+                </label>
+                <p style="font-size:11px;color:var(--text-muted);">No celular abre a câmera direto.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px;">Processar 1 foto</button>
+            </form>
+
+            <!-- Lote -->
+            <form id="form-lote" action="/escanear/lote" method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle);padding:18px;border-radius:8px;">
+                <h3 style="margin-top:0;">📁 Lote (várias de uma vez)</h3>
+                <p style="font-size:13px;color:var(--text-muted);">Processa múltiplos cartões automaticamente. Ideal quando já tem todas as fotos.</p>
+                <label>Fotos ou PDF
+                    <input type="file" name="fotos" accept="image/*,.pdf" multiple required>
+                </label>
+                <p style="font-size:11px;color:var(--text-muted);">Selecione múltiplas imagens ou um PDF.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px;">Processar lote</button>
+            </form>
+
+        </div>
 
         <!-- Overlay de loading -->
         <div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);
              z-index:9999;flex-direction:column;align-items:center;justify-content:center;gap:20px;">
             <div style="width:64px;height:64px;border:6px solid rgba(255,255,255,0.2);
                  border-top-color:#fff;border-radius:50%;animation:spin 0.9s linear infinite;"></div>
-            <div style="color:#fff;font-size:18px;font-weight:600;">⏳ Identificando cartão…</div>
+            <div id="loading-msg" style="color:#fff;font-size:18px;font-weight:600;">⏳ Identificando cartão…</div>
             <div style="color:rgba(255,255,255,0.7);font-size:13px;">Aguarde, não feche esta página.</div>
         </div>
-        <style>@keyframes spin{to{transform:rotate(360deg);}}</style>
+        <style>@keyframes spin{{to{{transform:rotate(360deg);}}}}</style>
         <script>
-        document.getElementById('form-scan').addEventListener('submit', function() {
-            document.getElementById('loading-overlay').style.display = 'flex';
-        });
+        (function() {{
+            var overlay = document.getElementById('loading-overlay');
+            var msg = document.getElementById('loading-msg');
+            var fs = document.getElementById('form-single');
+            var fl = document.getElementById('form-lote');
+            if (fs) fs.addEventListener('submit', function() {{
+                msg.textContent = '⏳ Identificando cartão…';
+                overlay.style.display = 'flex';
+            }});
+            if (fl) fl.addEventListener('submit', function() {{
+                var n = fl.querySelector('input[type=file]').files.length;
+                msg.textContent = '⏳ Processando ' + n + ' cartão(ões)…';
+                overlay.style.display = 'flex';
+            }});
+        }})();
         </script>
     """
     return render_page("Digitalizar cartão", content, active="aplicacoes")
@@ -10660,3 +10689,193 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
 
     else:
         return _render_erro(f"QR Code não reconhecido: '{qr_data[:40]}'")
+
+
+@app.post("/escanear/lote", response_class=HTMLResponse)
+async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    import cv2, numpy as np, re as _re
+
+    # Expandir PDFs
+    all_files = []
+    for f in fotos:
+        data = await f.read()
+        if f.filename and f.filename.lower().endswith(".pdf"):
+            try:
+                from pdf2image import convert_from_bytes
+                pages = convert_from_bytes(data, dpi=200)
+                for i, page in enumerate(pages):
+                    buf = BytesIO()
+                    page.save(buf, format="JPEG", quality=90)
+                    all_files.append((f"{f.filename}_p{i+1}.jpg", buf.getvalue()))
+            except Exception:
+                all_files.append((f.filename or "arquivo", data))
+        else:
+            all_files.append((f.filename or "foto.jpg", data))
+
+    resultados = []
+    conn = get_db()
+    try:
+        for filename, image_bytes in all_files:
+            # Ler QR
+            img_arr = np.frombuffer(image_bytes, np.uint8)
+            img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                resultados.append({"filename": filename, "success": False, "error": "Imagem inválida."})
+                continue
+
+            qr_detector = cv2.QRCodeDetector()
+            qr_data = ""
+            try:
+                r = qr_detector.detectAndDecode(img)
+                qr_data = r[0] if r else ""
+            except Exception:
+                pass
+
+            if not qr_data:
+                resultados.append({"filename": filename, "success": False, "error": "QR Code não encontrado."})
+                continue
+
+            # === PROVA NORMAL ===
+            if qr_data.startswith("CR:"):
+                try:
+                    parts = qr_data.split(":")
+                    aluno_id = int(parts[1])
+                    aplicacao_id = int(parts[2])
+                except Exception as e:
+                    resultados.append({"filename": filename, "success": False, "error": f"QR inválido: {e}"})
+                    continue
+
+                apl = conn.execute("""
+                    SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome
+                    FROM aplicacoes a JOIN provas p ON p.id = a.prova_id
+                    JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+                """, (aplicacao_id,)).fetchone()
+                aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+                if not apl or not aluno:
+                    resultados.append({"filename": filename, "success": False, "error": f"Aplicação ou aluno não encontrado."})
+                    continue
+
+                questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+                n_q = conn.execute("SELECT COUNT(*) FROM prova_questoes WHERE prova_id = ?", (apl["prova_id"],)).fetchone()[0]
+                result = _processar_cartao_resposta(image_bytes, n_q, filename=filename, questoes_info=questoes_info)
+
+                if not result["success"]:
+                    resultados.append({"filename": filename, "success": False, "error": result.get("error", "Erro")})
+                    continue
+
+                ja_entregue = conn.execute("SELECT id FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id)).fetchone() is not None
+                answers = result["answers"]
+                conn.execute("DELETE FROM respostas WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id))
+                questoes = conn.execute("SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id=pq.questao_id WHERE pq.prova_id=? ORDER BY pq.ordem", (apl["prova_id"],)).fetchall()
+                for q_num, q in enumerate(questoes, start=1):
+                    letra = answers.get(q_num)
+                    if letra in ("A","B","C","D"):
+                        conn.execute("INSERT INTO respostas (aplicacao_id,aluno_id,questao_id,alternativa_letra) VALUES (?,?,?,?)", (aplicacao_id, aluno_id, q["id"], letra))
+                if ja_entregue:
+                    conn.execute("UPDATE entregas SET finalizada_em=CURRENT_TIMESTAMP WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id))
+                else:
+                    conn.execute("INSERT INTO entregas (aplicacao_id,aluno_id) VALUES (?,?)", (aplicacao_id, aluno_id))
+                conn.commit()
+                resultados.append({"filename": filename, "success": True, "aluno_nome": aluno["nome"],
+                                    "atividade": apl["prova_titulo"], "turma": apl["turma_nome"],
+                                    "n_respondidas": result["n_respondidas"], "n_total": n_q,
+                                    "warnings": result.get("warnings", []), "ja_entregue": ja_entregue})
+
+            # === SIMULADO ===
+            elif qr_data.startswith("SIM:"):
+                try:
+                    parts = qr_data.split(":")
+                    aluno_id = int(parts[1])
+                    sim_id = int(parts[2])
+                except Exception as e:
+                    resultados.append({"filename": filename, "success": False, "error": f"QR simulado inválido: {e}"})
+                    continue
+
+                sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+                aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+                if not sim or not aluno:
+                    resultados.append({"filename": filename, "success": False, "error": "Simulado ou aluno não encontrado."})
+                    continue
+
+                apl_sim = conn.execute("SELECT id FROM aplicacoes WHERE turma_id=? AND titulo LIKE ? ORDER BY id DESC LIMIT 1",
+                                       (aluno["turma_id"], f"%[SIM-{sim_id}]%")).fetchone()
+                if not apl_sim:
+                    resultados.append({"filename": filename, "success": False, "error": f"Aplicação do simulado não encontrada para a turma do aluno."})
+                    continue
+                app_id = apl_sim["id"]
+
+                blocos = conn.execute("SELECT b.numero, d.nome AS disciplina_nome FROM simulado_blocos b JOIN disciplinas d ON d.id=b.disciplina_id WHERE b.simulado_id=? ORDER BY b.numero", (sim_id,)).fetchall()
+                blocos_info = []
+                ng = 0
+                for b in blocos:
+                    blocos_info.append({"numero": b["numero"], "disciplina_nome": b["disciplina_nome"], "q_inicio": ng+1, "n_questoes": 10})
+                    ng += 10
+
+                result = _processar_cartao_simulado(image_bytes, blocos_info, filename)
+                if not result["success"]:
+                    resultados.append({"filename": filename, "success": False, "error": result.get("error", "Erro")})
+                    continue
+
+                questoes_ordem = conn.execute("SELECT sq.questao_id FROM simulado_questoes sq JOIN simulado_blocos b ON b.id=sq.bloco_id WHERE b.simulado_id=? ORDER BY b.numero, sq.ordem", (sim_id,)).fetchall()
+                questao_ids = [q["questao_id"] for q in questoes_ordem]
+                ja_entregue = conn.execute("SELECT id FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id)).fetchone() is not None
+                conn.execute("DELETE FROM respostas WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id))
+                for q_num, q_id in enumerate(questao_ids, start=1):
+                    letra = result["answers"].get(q_num)
+                    if letra in ("A","B","C","D"):
+                        conn.execute("INSERT INTO respostas (aplicacao_id,aluno_id,questao_id,alternativa_letra) VALUES (?,?,?,?)", (app_id, aluno_id, q_id, letra))
+                if ja_entregue:
+                    conn.execute("UPDATE entregas SET finalizada_em=CURRENT_TIMESTAMP WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id))
+                else:
+                    conn.execute("INSERT INTO entregas (aplicacao_id,aluno_id) VALUES (?,?)", (app_id, aluno_id))
+                conn.commit()
+                resultados.append({"filename": filename, "success": True, "aluno_nome": aluno["nome"],
+                                    "atividade": sim["nome"], "turma": "", "n_respondidas": result["n_respondidas"],
+                                    "n_total": 40, "warnings": result.get("warnings", []), "ja_entregue": ja_entregue})
+            else:
+                resultados.append({"filename": filename, "success": False, "error": f"QR não reconhecido: '{qr_data[:30]}'"})
+
+    finally:
+        conn.close()
+
+    n_ok = sum(1 for r in resultados if r["success"])
+    n_err = len(resultados) - n_ok
+
+    cards_html = ""
+    for r in resultados:
+        if r["success"]:
+            warn_html = ""
+            if r.get("warnings"):
+                warn_html = f' · <span style="color:var(--orange);">⚠️ {len(r["warnings"])} questão(ões) com dupla marcação</span>'
+            subst = " · ⚠️ substituiu entrega anterior" if r["ja_entregue"] else ""
+            cards_html += f"""
+            <div style="border:1px solid var(--green);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--green-bg);">
+                <div style="font-weight:600;">✅ {r['aluno_nome']}</div>
+                <div style="font-size:12px;color:var(--text-muted);">{r['atividade']} {f"· {r['turma']}" if r['turma'] else ""} · {r['n_respondidas']}/{r['n_total']} lidas{subst}{warn_html}</div>
+            </div>"""
+        else:
+            cards_html += f"""
+            <div style="border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--red-bg);">
+                <div style="font-weight:600;color:var(--red);">❌ {r['filename']}</div>
+                <div style="font-size:12px;">{r['error']}</div>
+            </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Resultado do lote</h1>
+            <p class="subtitle">{n_ok} processados · {n_err} erros · {len(resultados)} total</p>
+        </div>
+        <div style="display:flex;gap:10px;margin-bottom:16px;">
+            <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
+        </div>
+        {cards_html}
+        <div style="margin-top:20px;">
+            <a href="/escanear" class="btn btn-primary">📷 Digitalizar mais</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Resultado do lote", content, active="aplicacoes"))
