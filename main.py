@@ -6817,18 +6817,32 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
     answers = result["answers"]
 
     # Build tabela editável de respostas
+    # Mapear questões com aviso para destacar na tabela
+    qs_com_aviso = {}
+    for w in result.get("warnings", []):
+        import re as _re
+        m = _re.match(r"Q(\d+)", w)
+        if m:
+            qn = int(m.group(1))
+            qs_com_aviso[qn] = w
+
     rows_html = ""
     for q_num in range(1, n_questoes + 1):
         detected = answers.get(q_num)
+        tem_aviso = q_num in qs_com_aviso
+        row_style = ' style="background:var(--orange-bg);"' if tem_aviso else ""
         cells = ""
         for letra in ["A", "B", "C", "D"]:
             checked = " checked" if detected == letra else ""
             cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
-        # Em branco option
         em_branco_checked = " checked" if detected is None else ""
-        cells += f'<td style="text-align:center; background:var(--bg-muted);"><input type="radio" name="q_{q_num}" value=""{em_branco_checked}></td>'
-        marca_status = f"Detectado: <strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
-        rows_html += f'<tr><td style="padding:6px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px; color:var(--text-muted); padding:0 8px;">{marca_status}</td></tr>'
+        cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco_checked}></td>'
+        if tem_aviso:
+            aviso_txt = qs_com_aviso[q_num]
+            marca_status = f'<span style="color:var(--orange);font-weight:600;">⚠️ {aviso_txt}</span>'
+        else:
+            marca_status = f"Detectado: <strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
+        rows_html += f'<tr{row_style}><td style="padding:6px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 8px;">{marca_status}</td></tr>'
 
     avisos_html = ""
     if result["warnings"]:
@@ -9774,13 +9788,13 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
     THRESHOLD = 0.35  # fração da área da bolha que deve estar escura
 
     respostas = {}  # {q_num: letra_marcada}
-    votos = {}      # {q_num: {letra: media_escuridao}}
+    votos = {}      # {q_num: {letra: escuridao}}
+    warnings_sim = []  # avisos de dupla/fraca marcação
 
     for b in bolhas:
         bx = mm_x(b["x_mm"])
         by = mm_y(b["y_mm"])
         q = b["q_num"]
-        # Recortar região da bolha
         x1 = max(0, bx - bubble_r_px)
         x2 = min(canon_w, bx + bubble_r_px)
         y1 = max(0, by - bubble_r_px)
@@ -9788,17 +9802,22 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
         roi = warped_gray[y1:y2, x1:x2]
         if roi.size == 0:
             continue
-        # Escuridão média (0=preto, 255=branco → inverter)
         escuridao = 1.0 - float(roi.mean()) / 255.0
         if q not in votos:
             votos[q] = {}
         votos[q][b["label"]] = escuridao
 
-    # Para cada questão, marcar a letra mais escura (se acima do threshold)
+    THRESHOLD_DUPLA = 0.25  # segunda bolha acima disto = dupla marcação
     for q_num, letras_esc in votos.items():
-        melhor_letra = max(letras_esc, key=letras_esc.get)
-        if letras_esc[melhor_letra] >= THRESHOLD:
+        ordenadas = sorted(letras_esc.items(), key=lambda x: x[1], reverse=True)
+        melhor_letra, melhor_esc = ordenadas[0]
+        segunda_letra, segunda_esc = ordenadas[1] if len(ordenadas) > 1 else (None, 0)
+
+        if melhor_esc >= THRESHOLD:
             respostas[q_num] = melhor_letra
+            # Verificar dupla marcação
+            if segunda_letra and segunda_esc >= THRESHOLD_DUPLA:
+                warnings_sim.append(f"Q{q_num}: dupla marcação detectada — {melhor_letra} e {segunda_letra} (confira)")
         else:
             respostas[q_num] = None  # não marcado
 
@@ -9811,6 +9830,7 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
         "aluno_id": aluno_id,
         "sim_id": sim_id_qr,
         "answers": respostas,
+        "warnings": warnings_sim,
         "preview_base64": preview_b64,
         "n_respondidas": sum(1 for v in respostas.values() if v),
     }
@@ -10017,6 +10037,14 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
             bloco_num = ((q_num - 1) // 10) + 1
             rows_por_bloco[bloco_num].append(q_num)
 
+        # Mapear questões com aviso
+        qs_aviso = {}
+        for w in result.get("warnings", []):
+            import re as _re2
+            m = _re2.match(r"Q(\d+)", w)
+            if m:
+                qs_aviso[int(m.group(1))] = w
+
         tabela_html = ""
         for bloco in blocos:
             tabela_html += f"""
@@ -10027,14 +10055,24 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
             </tr>"""
             for q_num in rows_por_bloco.get(bloco["numero"], []):
                 detected = answers.get(q_num)
+                tem_aviso = q_num in qs_aviso
+                row_bg = ' style="background:var(--orange-bg);"' if tem_aviso else ""
                 cells = ""
                 for letra in ["A", "B", "C", "D"]:
                     checked = " checked" if detected == letra else ""
                     cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
                 em_branco = " checked" if detected is None else ""
                 cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco}></td>'
-                marca = f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
-                tabela_html += f'<tr><td style="padding:5px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;color:var(--text-muted);padding:0 8px;">{marca}</td></tr>'
+                if tem_aviso:
+                    marca = f'<span style="color:var(--orange);font-weight:600;">⚠️ {qs_aviso[q_num]}</span>'
+                else:
+                    marca = f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
+                tabela_html += f'<tr{row_bg}><td style="padding:5px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 8px;">{marca}</td></tr>'
+
+        avisos_html = ""
+        if result.get("warnings"):
+            items_w = "".join(f"<li>{w}</li>" for w in result["warnings"])
+            avisos_html = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin:0 0 16px;color:var(--orange);"><strong>⚠️ {len(result["warnings"])} questão(ões) com marcação dupla ou ambígua — verifique as linhas destacadas:</strong><ul style="margin:6px 0 0 18px;">{items_w}</ul></div>'
 
         override_aviso = ""
         if ja_entregue:
@@ -10047,6 +10085,7 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
                 <h1>Revisão da leitura</h1>
                 <p class="subtitle">{sim['nome']} · Aluno: <strong>{aluno['nome']}</strong></p>
             </div>
+            {avisos_html}
             {override_aviso}
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:flex-start;">
                 <div>
