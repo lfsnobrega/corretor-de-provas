@@ -4437,7 +4437,7 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
         <div class="card" style="margin-bottom:20px;">
             <h3 style="margin-top:0;">Composição da nota por disciplina</h3>
             <p class="muted-line" style="font-size:13px;">Nota total: <strong>{nota_10}</strong> (escala 0–10). Cada fatia mostra quantos pontos dessa nota vieram de cada disciplina.</p>
-            <div style="max-width:420px; margin:0 auto;">
+            <div style="max-width:420px; height:280px; margin:0 auto; position:relative;">
                 <canvas id="chart-composicao"></canvas>
             </div>
             <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:16px;">
@@ -4457,7 +4457,12 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
                     labels: [{labels_js}],
                     datasets: [{{ data: [{pontos_js}], backgroundColor: [{cores_js}] }}]
                 }},
-                options: {{ responsive: true, plugins: {{ legend: {{ position: 'bottom' }} }} }}
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {{ duration: 400 }},
+                    plugins: {{ legend: {{ position: 'bottom' }} }}
+                }}
             }});
         </script>
         """
@@ -4672,6 +4677,10 @@ def exportar_resultados_excel(aplicacao_id: int):
     buffer.seek(0)
     
     safe_title = (apl["titulo"] or f"resultados_aplicacao_{aplicacao_id}").lower().replace(" ", "_")
+    # Remove acentos e caracteres não-ASCII (Content-Disposition exige ASCII puro)
+    import unicodedata as _ud
+    safe_title = _ud.normalize('NFKD', safe_title).encode('ascii', 'ignore').decode('ascii')
+    safe_title = "".join(c for c in safe_title if c.isalnum() or c in "_-")[:40] or f"aplicacao_{aplicacao_id}"
     filename = f"resultados_{safe_title}.xlsx"
     
     return StreamingResponse(
@@ -8196,7 +8205,7 @@ def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
     <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
     <a href="javascript:history.back()">← Voltar</a>
   </div>
-  <div style="max-width:700px;">
+  <div style="max-width:700px; height:360px; position:relative;">
     <canvas id="chart"></canvas>
   </div>
   <table>
@@ -8215,6 +8224,8 @@ def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
       data: {{ labels: ['Dia 01', 'Dia 02'], datasets: [{datasets_js}] }},
       options: {{
         responsive: true,
+        maintainAspectRatio: false,
+        animation: {{ duration: 400 }},
         plugins: {{
           legend: {{ position: 'bottom' }},
           title: {{ display: true, text: 'Pontos obtidos por disciplina, por dia' }}
