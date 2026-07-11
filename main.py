@@ -4384,9 +4384,14 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
     score, total = _calcular_nota(conn, aplicacao_id, aluno_id)
 
     questoes_html = ""
+    composicao = {}  # disciplina_nome -> {"acertos": int, "total": int}
     for idx, q in enumerate(questoes, start=1):
         alts = conn.execute("SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
         marcada = respostas.get(q["id"])
+
+        disc = q["disciplina_nome"] or "—"
+        composicao.setdefault(disc, {"acertos": 0, "total": 0})
+        composicao[disc]["total"] += 1
 
         alts_html = ""
         for a in alts:
@@ -4395,6 +4400,7 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
             if a["letra"] == marcada and a["correta"]:
                 estilo += " background:var(--success-bg, var(--green-bg)); border-color:var(--success-text, var(--green));"
                 label = ' <span style="color:var(--success-text, var(--green)); font-weight:600;">✓ Marcada (correta)</span>'
+                composicao[disc]["acertos"] += 1
             elif a["letra"] == marcada and not a["correta"]:
                 estilo += " background:var(--red-bg); border-color:var(--red);"
                 label = ' <span style="color:var(--danger-text, var(--red)); font-weight:600;">✗ Marcada (incorreta)</span>'
@@ -4412,6 +4418,50 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
 
     conn.close()
 
+    # Composição da nota por disciplina (gráfico + tabela) — só quando há questões e nota em escala 0-10 faz sentido
+    composicao_html = ""
+    if total > 0 and composicao:
+        cores = ["#4C6EF5", "#F76707", "#2F9E44", "#E64980", "#0CA678", "#F59F00", "#7048E8"]
+        disciplinas_comp = sorted(composicao.keys())
+        labels_js = ", ".join(repr(d) for d in disciplinas_comp)
+        pontos_js = ", ".join(str(round(composicao[d]["acertos"] / total * 10, 2)) for d in disciplinas_comp)
+        cores_js = ", ".join(repr(cores[i % len(cores)]) for i in range(len(disciplinas_comp)))
+        linhas_comp = "".join(
+            f'<tr><td style="padding:6px;">{d}</td>'
+            f'<td style="padding:6px; text-align:center;">{composicao[d]["acertos"]}/{composicao[d]["total"]}</td>'
+            f'<td style="padding:6px; text-align:center; font-weight:600;">{round(composicao[d]["acertos"] / total * 10, 2)}</td></tr>'
+            for d in disciplinas_comp
+        )
+        nota_10 = round(score / total * 10, 2) if total else 0
+        composicao_html = f"""
+        <div class="card" style="margin-bottom:20px;">
+            <h3 style="margin-top:0;">Composição da nota por disciplina</h3>
+            <p class="muted-line" style="font-size:13px;">Nota total: <strong>{nota_10}</strong> (escala 0–10). Cada fatia mostra quantos pontos dessa nota vieram de cada disciplina.</p>
+            <div style="max-width:420px; margin:0 auto;">
+                <canvas id="chart-composicao"></canvas>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:16px;">
+                <thead><tr style="background:var(--bg);">
+                    <th style="padding:6px; text-align:left;">Disciplina</th>
+                    <th style="padding:6px;">Acertos</th>
+                    <th style="padding:6px;">Pontos (de 10)</th>
+                </tr></thead>
+                <tbody>{linhas_comp}</tbody>
+            </table>
+        </div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-composicao'), {{
+                type: 'doughnut',
+                data: {{
+                    labels: [{labels_js}],
+                    datasets: [{{ data: [{pontos_js}], backgroundColor: [{cores_js}] }}]
+                }},
+                options: {{ responsive: true, plugins: {{ legend: {{ position: 'bottom' }} }} }}
+            }});
+        </script>
+        """
+
     if entrega:
         status_badge = f'<span class="badge" style="background:var(--success-bg, var(--green-bg)); color:var(--success-text, var(--green));">Entregue · {score}/{total}</span>'
         status_data = f' · Entregue em {entrega["finalizada_em"]}'
@@ -4428,6 +4478,7 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
             <p class="subtitle">{apl["prova_titulo"]} · Turma: {aluno["turma_nome"]} · Código: <code>{aluno["codigo_unico"]}</code>{status_data}</p>
             <div class="page-actions">{status_badge}</div>
         </div>
+        {composicao_html}
         {questoes_html}
         <p style="margin-top:24px;"><a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar pra aplicação</a></p>
     """
@@ -7983,6 +8034,363 @@ def _turmas_do_ano(conn, ano_escolaridade: int):
     todas = conn.execute("SELECT * FROM turmas ORDER BY nome").fetchall()
     return [t for t in todas if str(t["nome"]).startswith(str(ano_escolaridade))]
 
+
+# ==========================================
+#  RELATÓRIO DE NOTAS DO SIMULADO
+# ==========================================
+
+def _prova_id_do_simulado(conn, sim_id: int) -> Optional[int]:
+    row = conn.execute("SELECT id FROM provas WHERE titulo LIKE ?", (f"%[SIM-{sim_id}]%",)).fetchone()
+    return row["id"] if row else None
+
+
+def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
+    """Calcula a nota simples de cada aluno da turma em um simulado específico:
+    soma de acertos × valor da questão (prova de valor 'x', cada questão vale 'y').
+    Retorna dict aluno_id -> {nome, numero, acertos, total_questoes, nota}."""
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        return {}
+    prova_id = _prova_id_do_simulado(conn, sim_id)
+    if not prova_id:
+        return {}
+    aplicacao = conn.execute(
+        "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)
+    ).fetchone()
+    if not aplicacao:
+        return {}
+    aplicacao_id = aplicacao["id"]
+
+    total_questoes = conn.execute(
+        """SELECT COUNT(*) AS c FROM simulado_questoes sq
+           JOIN simulado_blocos b ON b.id = sq.bloco_id
+           WHERE b.simulado_id = ?""", (sim_id,)
+    ).fetchone()["c"]
+    valor_questao = _valor_por_questao(sim["pontuacao_total"], n_blocos=1, n_questoes=total_questoes) if total_questoes else 0
+
+    alunos = conn.execute(
+        "SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)
+    ).fetchall()
+
+    resultado = {}
+    for aluno in alunos:
+        acertos = conn.execute(
+            """SELECT COUNT(*) AS c FROM respostas r
+               JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
+               WHERE r.aplicacao_id = ? AND r.aluno_id = ?""",
+            (aplicacao_id, aluno["id"])
+        ).fetchone()["c"]
+        resultado[aluno["id"]] = {
+            "nome": aluno["nome"], "numero": aluno["numero"],
+            "acertos": acertos, "total_questoes": total_questoes,
+            "nota": round(acertos * valor_questao, 2),
+        }
+    return resultado
+
+
+def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) -> dict:
+    """Composição da nota de um aluno em um simulado (um dia), por disciplina de cada bloco.
+    Retorna dict disciplina_nome -> pontos obtidos naquele bloco."""
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        return {}
+    prova_id = _prova_id_do_simulado(conn, sim_id)
+    if not prova_id:
+        return {}
+    aplicacao = conn.execute(
+        "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)
+    ).fetchone()
+    if not aplicacao:
+        return {}
+    aplicacao_id = aplicacao["id"]
+
+    total_questoes = conn.execute(
+        """SELECT COUNT(*) AS c FROM simulado_questoes sq
+           JOIN simulado_blocos b ON b.id = sq.bloco_id
+           WHERE b.simulado_id = ?""", (sim_id,)
+    ).fetchone()["c"]
+    valor_questao = _valor_por_questao(sim["pontuacao_total"], n_blocos=1, n_questoes=total_questoes) if total_questoes else 0
+
+    blocos = conn.execute(
+        """SELECT b.id AS bloco_id, d.nome AS disciplina_nome
+           FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+           WHERE b.simulado_id = ?""", (sim_id,)
+    ).fetchall()
+
+    composicao = {}
+    for b in blocos:
+        acertos = conn.execute(
+            """SELECT COUNT(*) AS c FROM respostas r
+               JOIN simulado_questoes sq ON sq.questao_id = r.questao_id AND sq.bloco_id = ?
+               JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
+               WHERE r.aplicacao_id = ? AND r.aluno_id = ?""",
+            (b["bloco_id"], aplicacao_id, aluno_id)
+        ).fetchone()["c"]
+        pontos = round(acertos * valor_questao, 2)
+        composicao[b["disciplina_nome"]] = composicao.get(b["disciplina_nome"], 0) + pontos
+    return composicao
+
+
+@app.get("/simulados/relatorio-notas/aluno", response_class=HTMLResponse)
+def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        sim1_id_str, sim2_id_str = par.split(":")
+        sim1_id, sim2_id = int(sim1_id_str), int(sim2_id_str)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    sim1 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim1_id,)).fetchone()
+    sim2 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim2_id,)).fetchone()
+    aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not turma or not sim1 or not sim2 or not aluno:
+        conn.close()
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    comp1 = _composicao_nota_aluno_dia(conn, sim1_id, turma_id, aluno_id)
+    comp2 = _composicao_nota_aluno_dia(conn, sim2_id, turma_id, aluno_id)
+    conn.close()
+
+    disciplinas = sorted(set(comp1.keys()) | set(comp2.keys()))
+    nota1_total = round(sum(comp1.values()), 2)
+    nota2_total = round(sum(comp2.values()), 2)
+    nota_total = round(nota1_total + nota2_total, 2)
+
+    cores = ["#4C6EF5", "#F76707", "#2F9E44", "#E64980", "#0CA678", "#F59F00", "#7048E8"]
+    datasets_js = ""
+    linhas_tabela = ""
+    for i, d in enumerate(disciplinas):
+        v1 = comp1.get(d, 0)
+        v2 = comp2.get(d, 0)
+        cor = cores[i % len(cores)]
+        datasets_js += f"{{label:{d!r}, data:[{v1},{v2}], borderColor:'{cor}', backgroundColor:'{cor}', tension:0.3, fill:false, pointRadius:5}},"
+        linhas_tabela += f"""<tr>
+            <td style="padding:6px;">{d}</td>
+            <td style="padding:6px; text-align:center;">{v1}</td>
+            <td style="padding:6px; text-align:center;">{v2}</td>
+            <td style="padding:6px; text-align:center; font-weight:600;">{round(v1 + v2, 2)}</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Composição da nota — {aluno['nome']}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
+  table {{ width:100%; border-collapse:collapse; font-size:13px; margin-top:20px; }}
+  th, td {{ border:1px solid #ccc; }}
+  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:20px; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head>
+<body>
+  <div class="header">
+    <img src="/static/imagens/logo_walmir.png" style="max-height:60px;" alt="Walmir">
+    <div>
+      <h2 style="margin:0;">Composição da nota — {aluno['nome']}</h2>
+      <div style="color:#555; font-size:13px;">{turma['nome']} · {sim1['trimestre']}º Trimestre · {sim1['ano']} · Nota total: <strong>{nota_total}</strong></div>
+    </div>
+  </div>
+  <div class="no-print" style="margin-bottom:16px;">
+    <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="javascript:history.back()">← Voltar</a>
+  </div>
+  <div style="max-width:700px;">
+    <canvas id="chart"></canvas>
+  </div>
+  <table>
+    <thead><tr style="background:#f0f0f0;">
+        <th style="padding:6px; text-align:left;">Disciplina</th>
+        <th style="padding:6px;">Dia 01</th>
+        <th style="padding:6px;">Dia 02</th>
+        <th style="padding:6px;">Total</th>
+    </tr></thead>
+    <tbody>{linhas_tabela}</tbody>
+  </table>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+  <script>
+    new Chart(document.getElementById('chart'), {{
+      type: 'line',
+      data: {{ labels: ['Dia 01', 'Dia 02'], datasets: [{datasets_js}] }},
+      options: {{
+        responsive: true,
+        plugins: {{
+          legend: {{ position: 'bottom' }},
+          title: {{ display: true, text: 'Pontos obtidos por disciplina, por dia' }}
+        }},
+        scales: {{ y: {{ beginAtZero: true }} }}
+      }}
+    }});
+  </script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.get("/simulados/relatorio-notas", response_class=HTMLResponse)
+def form_relatorio_notas_simulado():
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    sims = conn.execute(
+        "SELECT * FROM simulados WHERE status IN ('fechado', 'publicado') ORDER BY ano DESC, trimestre DESC, ano_escolaridade, dia"
+    ).fetchall()
+    grupos = {}
+    for s in sims:
+        chave = (s["trimestre"], s["ano"], s["ano_escolaridade"])
+        grupos.setdefault(chave, {})[s["dia"]] = s
+    turmas = conn.execute("SELECT * FROM turmas ORDER BY nome").fetchall()
+    conn.close()
+
+    opcoes_grupo = ""
+    for (tri, ano, ano_esc), dias in sorted(grupos.items(), reverse=True):
+        if 1 in dias and 2 in dias:
+            label = f"{_ano_esc_label(ano_esc or 0)} · {tri}º Trimestre · {ano} (Dia 01 + Dia 02)"
+            opcoes_grupo += f'<option value="{dias[1]["id"]}:{dias[2]["id"]}">{label}</option>'
+    if not opcoes_grupo:
+        opcoes_grupo = '<option value="">Nenhum par Dia 01 + Dia 02 fechado/publicado encontrado</option>'
+    opcoes_turma = "".join(f'<option value="{t["id"]}">{t["nome"]}</option>' for t in turmas)
+
+    content = f"""
+    <div class="page-header"><h1>📄 Relatório de Notas — Simulado</h1>
+        <p class="subtitle">Nota Dia 01 + Dia 02 = Total, por turma. Opcionalmente exibe a divisão de referência 70% (Gram/Alg) · 30% (Leit/Geom) da nota total.</p>
+    </div>
+    <div class="card">
+        <form method="get" action="/simulados/relatorio-notas/gerar" style="display:flex; flex-direction:column; gap:14px; max-width:480px;">
+            <label>Simulado (par Dia 01 + Dia 02)
+                <select name="par" required style="width:100%;">{opcoes_grupo}</select>
+            </label>
+            <label>Turma
+                <select name="turma_id" required style="width:100%;">{opcoes_turma}</select>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" name="ponderado" value="1" style="width:auto;"> Exibir divisão 70/30 (Gram/Alg · Leit/Geom)
+            </label>
+            <button type="submit" class="btn btn-primary">Gerar relatório</button>
+        </form>
+        <p class="muted-line" style="margin-top:10px; font-size:12px;">Apenas simulados com status <strong>fechado</strong> ou <strong>publicado</strong> aparecem aqui.</p>
+    </div>
+    """
+    return render_page("Relatório de Notas", content, active="simulados")
+
+
+@app.get("/simulados/relatorio-notas/gerar", response_class=HTMLResponse)
+def gerar_relatorio_notas_simulado(par: str, turma_id: int, ponderado: int = 0):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        sim1_id_str, sim2_id_str = par.split(":")
+        sim1_id, sim2_id = int(sim1_id_str), int(sim2_id_str)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    sim1 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim1_id,)).fetchone()
+    sim2 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim2_id,)).fetchone()
+    if not turma or not sim1 or not sim2:
+        conn.close()
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    notas1 = _coletar_notas_simulado_turma(conn, sim1_id, turma_id)
+    notas2 = _coletar_notas_simulado_turma(conn, sim2_id, turma_id)
+    conn.close()
+
+    alunos_ids = set(notas1.keys()) | set(notas2.keys())
+    if not alunos_ids:
+        content = '<div class="empty">Nenhum aluno com respostas registradas para este par de simulados nesta turma.</div>'
+        return render_page("Relatório de Notas", content, active="simulados")
+
+    alunos_ids = sorted(alunos_ids, key=lambda aid: ((notas1.get(aid) or notas2.get(aid))["numero"] or 999))
+
+    linhas = ""
+    for aid in alunos_ids:
+        d1 = notas1.get(aid)
+        d2 = notas2.get(aid)
+        base = d1 or d2
+        nome = base["nome"]
+        numero = base["numero"] if base["numero"] is not None else "—"
+        nota1 = d1["nota"] if d1 else 0
+        nota2 = d2["nota"] if d2 else 0
+        total_bruto = round(nota1 + nota2, 2)
+
+        link_detalhe = f'<a href="/simulados/relatorio-notas/aluno?par={par}&turma_id={turma_id}&aluno_id={aid}" target="_blank">👁 Ver</a>'
+
+        if ponderado:
+            col_setenta = round(total_bruto * 0.7, 1)
+            col_trinta = round(total_bruto * 0.3, 1)
+            linhas += f"""<tr>
+                <td style="padding:6px;">{numero}</td>
+                <td style="padding:6px;">{nome}</td>
+                <td style="padding:6px; text-align:center; font-weight:600;">{total_bruto}</td>
+                <td style="padding:6px; text-align:center;">{col_setenta}</td>
+                <td style="padding:6px; text-align:center;">{col_trinta}</td>
+                <td style="padding:6px; text-align:center;">{link_detalhe}</td>
+            </tr>"""
+        else:
+            linhas += f"""<tr>
+                <td style="padding:6px;">{numero}</td>
+                <td style="padding:6px;">{nome}</td>
+                <td style="padding:6px; text-align:center;">{nota1}</td>
+                <td style="padding:6px; text-align:center;">{nota2}</td>
+                <td style="padding:6px; text-align:center; font-weight:600;">{total_bruto}</td>
+                <td style="padding:6px; text-align:center;">{link_detalhe}</td>
+            </tr>"""
+
+    if ponderado:
+        cabecalho = """<tr style="background:#f0f0f0;">
+            <th style="padding:6px; text-align:left;">Nº</th>
+            <th style="padding:6px; text-align:left;">Nome</th>
+            <th style="padding:6px;">Nota</th>
+            <th style="padding:6px;">Gram/Alg</th>
+            <th style="padding:6px;">Leit/Geom</th>
+            <th style="padding:6px;">Composição</th>
+        </tr>"""
+    else:
+        cabecalho = """<tr style="background:#f0f0f0;">
+            <th style="padding:6px; text-align:left;">Nº</th>
+            <th style="padding:6px; text-align:left;">Aluno</th>
+            <th style="padding:6px;">Nota Dia 01</th>
+            <th style="padding:6px;">Nota Dia 02</th>
+            <th style="padding:6px;">Total</th>
+            <th style="padding:6px;">Composição</th>
+        </tr>"""
+
+    titulo_relatorio = "Relatório de Notas (70/30)" if ponderado else "Relatório de Notas — Dia 01 + Dia 02"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{titulo_relatorio} — {turma['nome']}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
+  table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+  th, td {{ border:1px solid #ccc; }}
+  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:20px; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head>
+<body>
+  <div class="header">
+    <img src="/static/imagens/logo_walmir.png" style="max-height:60px;" alt="Walmir">
+    <div>
+      <h2 style="margin:0;">{titulo_relatorio}</h2>
+      <div style="color:#555; font-size:13px;">{turma['nome']} · {sim1['trimestre']}º Trimestre · {sim1['ano']} · {_ano_esc_label(sim1['ano_escolaridade'] or 0)}</div>
+    </div>
+  </div>
+  <div class="no-print" style="margin-bottom:16px;">
+    <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="/simulados/relatorio-notas">← Voltar</a>
+  </div>
+  <table>
+    <thead>{cabecalho}</thead>
+    <tbody>{linhas}</tbody>
+  </table>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+
+
 @app.get("/simulados", response_class=HTMLResponse)
 def listar_simulados(request: Request):
     prof = _current_prof_ctx.get()
@@ -8067,10 +8475,12 @@ def listar_simulados(request: Request):
     if not cards:
         cards = '<div class="empty">Nenhum simulado encontrado.</div>'
 
+    btn_relatorio = '<a href="/simulados/relatorio-notas" class="btn">📄 Relatório de Notas</a>' if is_admin else ""
+
     content = f"""
         <div class="page-header" style="display:flex; justify-content:space-between; align-items:center;">
             <div><h1>📊 Simulados</h1><p class="subtitle">Provas multidisciplinares trimestrais</p></div>
-            {btn_novo}
+            <div style="display:flex; gap:8px;">{btn_relatorio}{btn_novo}</div>
         </div>
         {cards}
     """
