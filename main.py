@@ -12,6 +12,7 @@ import sqlite3
 import os
 import re
 import uuid
+import asyncio
 import qrcode
 import base64
 import html
@@ -6814,7 +6815,7 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
     n_questoes = len(questoes)
     questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
 
-    result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
+    result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
 
     if not result["success"]:
         conn.close()
@@ -7626,7 +7627,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
                 cards_html_parts.append(_render_card_erro(idx, nome_exib, "Arquivo vazio."))
             continue
 
-        result = _processar_cartao_resposta(image_bytes, n_questoes, filename=nome_exib or "", questoes_info=questoes_info)
+        result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_questoes, filename=nome_exib or "", questoes_info=questoes_info)
 
         if not result["success"]:
             n_erro += 1
@@ -10419,7 +10420,7 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
         if not image_bytes:
             return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p>', active="simulados"))
 
-        result = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
+        result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, foto.filename or "")
 
         if not result["success"]:
             content_err = f"""
@@ -10662,7 +10663,7 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
         alunos_no_lote = set()
 
         for filename, image_bytes in all_files:
-            resultado = _processar_cartao_simulado(image_bytes, blocos_info, filename)
+            resultado = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, filename)
             if not resultado["success"]:
                 resultados.append({"filename": filename, "success": False, "error": resultado.get("error", "Erro")})
                 continue
@@ -10906,7 +10907,7 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
             conn.close()
 
         # Processar com OMR normal
-        result = _processar_cartao_resposta(image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
+        result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
         if not result["success"]:
             return _render_erro(result.get("error", "Erro no processamento."))
 
@@ -11037,7 +11038,7 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
         finally:
             conn.close()
 
-        result = _processar_cartao_simulado(image_bytes, blocos_info, foto.filename or "")
+        result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, foto.filename or "")
         if not result["success"]:
             return _render_erro(result.get("error", "Erro no processamento."))
 
@@ -11182,7 +11183,7 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
 
                 questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
                 n_q = conn.execute("SELECT COUNT(*) FROM prova_questoes WHERE prova_id = ?", (apl["prova_id"],)).fetchone()[0]
-                result = _processar_cartao_resposta(image_bytes, n_q, filename=filename, questoes_info=questoes_info)
+                result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_q, filename=filename, questoes_info=questoes_info)
 
                 if not result["success"]:
                     resultados.append({"filename": filename, "success": False, "error": result.get("error", "Erro")})
@@ -11236,7 +11237,7 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
                     blocos_info.append({"numero": b["numero"], "disciplina_nome": b["disciplina_nome"], "q_inicio": ng+1, "n_questoes": 10})
                     ng += 10
 
-                result = _processar_cartao_simulado(image_bytes, blocos_info, filename)
+                result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, filename)
                 if not result["success"]:
                     resultados.append({"filename": filename, "success": False, "error": result.get("error", "Erro")})
                     continue
