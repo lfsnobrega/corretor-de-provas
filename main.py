@@ -6703,9 +6703,14 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
     # === STEP 3: Read QR code ===
     qr_detector = cv2.QRCodeDetector()
     qr_data = ""
+    qr_center = None
     try:
         result = qr_detector.detectAndDecode(warped)
         qr_data = result[0] if result else ""
+        if len(result) > 1 and result[1] is not None:
+            pts_arr = np.array(result[1]).reshape(-1, 2)
+            if len(pts_arr) > 0:
+                qr_center = pts_arr.mean(axis=0)
     except Exception:
         qr_data = ""
 
@@ -6719,6 +6724,16 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
 
     if not qr_data or not qr_data.startswith("CR:"):
         return {"success": False, "error": f"Não foi possível ler o QR Code do cartão. Tente uma foto mais nítida ou com mais resolução. (Dado lido: '{qr_data[:30]}')"}
+
+    # === STEP 3B: Detectar cartão de cabeça pra baixo (180°) e corrigir ===
+    # O QR é sempre impresso no canto superior-direito do cartão (ver _gerar_cartao_resposta_pdf).
+    # Se, na imagem já corrigida por perspectiva, o QR aparece no canto inferior-esquerdo,
+    # a folha foi escaneada/fotografada de cabeça pra baixo (comum em scanners de mesa, ex. Epson).
+    if qr_center is not None:
+        cx, cy = qr_center
+        if cx < canon_w * 0.5 and cy > canon_h * 0.5:
+            warped = cv2.rotate(warped, cv2.ROTATE_180)
+            warped_gray = cv2.rotate(warped_gray, cv2.ROTATE_180)
 
     try:
         parts = qr_data.split(":")
@@ -10476,9 +10491,14 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
     # Ler QR Code
     qr_detector = cv2.QRCodeDetector()
     qr_data = ""
+    qr_center = None
     try:
         r = qr_detector.detectAndDecode(warped)
         qr_data = r[0] if r else ""
+        if len(r) > 1 and r[1] is not None:
+            pts_arr = np.array(r[1]).reshape(-1, 2)
+            if len(pts_arr) > 0:
+                qr_center = pts_arr.mean(axis=0)
     except Exception:
         pass
     if not qr_data:
@@ -10490,6 +10510,14 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
 
     if not qr_data or not qr_data.startswith("SIM:"):
         return {"success": False, "error": f"QR Code inválido ou não encontrado. (lido: '{qr_data[:30]}')"}
+
+    # Cartão de cabeça pra baixo (180°)? O QR é impresso no canto superior-direito;
+    # se aparecer no inferior-esquerdo, a folha foi escaneada/fotografada invertida.
+    if qr_center is not None:
+        cx, cy = qr_center
+        if cx < canon_w * 0.5 and cy > canon_h * 0.5:
+            warped = cv2.rotate(warped, cv2.ROTATE_180)
+            warped_gray = cv2.rotate(warped_gray, cv2.ROTATE_180)
 
     try:
         parts = qr_data.split(":")
