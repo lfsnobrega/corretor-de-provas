@@ -6975,7 +6975,8 @@ def status_lote_json(lote_id: str):
     return JSONResponse(status)
 
 
-
+@app.get("/aplicacoes/{aplicacao_id}/escanear", response_class=HTMLResponse)
+def form_escanear(aplicacao_id: int):
     """Formulário pra upload de foto do cartão resposta."""
     conn = get_db()
     apl = conn.execute("""
