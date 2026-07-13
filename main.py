@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Form, UploadFile, File, Request, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional, List
 from datetime import datetime, date
@@ -13,6 +13,9 @@ import os
 import re
 import uuid
 import asyncio
+import time
+import math
+from collections import deque
 import qrcode
 import base64
 import html
@@ -600,6 +603,173 @@ def init_db():
 
 
 init_db()
+
+
+# ==========================================
+#  FILA GLOBAL DE ESCANEAMENTO (OMR EM SEGUNDO PLANO)
+# ==========================================
+# Processa os cartões de TODOS os professores em segundo plano, sem travar o
+# servidor. Cada foto vira um "item" numa fila global (FIFO); alguns
+# "trabalhadores" (workers) vão pegando item por item e processando em
+# threads separadas (usando a correção já aplicada com asyncio.to_thread).
+#
+# IMPORTANTE: essa fila fica em memória. Se o serviço for reiniciado
+# (systemctl restart) no meio de um processamento, os lotes em andamento se
+# perdem e precisam ser reenviados pelo professor.
+
+N_WORKERS_ESCANEAMENTO = 2  # processos "trabalhadores" simultâneos; pode subir para 3-4 numa VM maior (e2-medium+)
+
+FILAS_ESCANEAMENTO: dict = {}          # lote_id -> job (dict)
+FILA_GLOBAL_ESCANEAMENTO: "asyncio.Queue" = None  # criada no startup do app
+TEMPOS_GLOBAIS_ESCANEAMENTO = deque(maxlen=30)    # últimos tempos de processamento (segundos), pra estimar ETA
+
+
+def _novo_lote_escaneamento(tipo: str, contexto: dict, arquivos: list) -> str:
+    """Cria um lote de escaneamento e enfileira cada foto como um item.
+    arquivos: lista de tuplas (filename, image_bytes). Retorna o lote_id."""
+    lote_id = uuid.uuid4().hex[:12]
+    agora = time.monotonic()
+    itens = []
+    for i, (filename, image_bytes) in enumerate(arquivos):
+        itens.append({
+            "idx": i, "filename": filename, "bytes": image_bytes,
+            "status": "pendente", "resultado": None,
+            "seq": agora + i * 1e-6,
+        })
+    job = {
+        "id": lote_id, "tipo": tipo, "contexto": contexto,
+        "itens": itens, "total": len(itens), "processados": 0,
+        "criado_em": datetime.now(), "concluido": len(itens) == 0,
+    }
+    FILAS_ESCANEAMENTO[lote_id] = job
+    for item in itens:
+        FILA_GLOBAL_ESCANEAMENTO.put_nowait((lote_id, item["idx"]))
+    return lote_id
+
+
+async def _persistir_item_simulado(job: dict, item: dict):
+    """Para simulados, cada cartão já é salvo no banco assim que termina de ser lido
+    (mesmo comportamento que o fluxo síncrono anterior tinha)."""
+    resultado = item["resultado"]
+    ctx = job["contexto"]
+    if not resultado or not resultado.get("success"):
+        return
+    conn = get_db()
+    try:
+        aluno_id = resultado["aluno_id"]
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not aluno:
+            item["resultado"] = {"success": False, "error": f"Aluno {aluno_id} não encontrado.",
+                                  "filename": item["filename"]}
+            return
+        item["resultado"]["aluno_nome"] = aluno["nome"]
+        item["resultado"]["ja_entregue"] = conn.execute(
+            "SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+            (ctx["app_id"], aluno_id)
+        ).fetchone() is not None
+        item["resultado"]["duplicado"] = aluno_id in ctx.setdefault("_alunos_no_lote", set())
+        ctx["_alunos_no_lote"].add(aluno_id)
+
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (ctx["app_id"], aluno_id))
+        for q_num, q_id in enumerate(ctx["questao_ids"], start=1):
+            letra = resultado["answers"].get(q_num)
+            if letra in ("A", "B", "C", "D"):
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                    (ctx["app_id"], aluno_id, q_id, letra)
+                )
+        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+                                  (ctx["app_id"], aluno_id)).fetchone()
+        if not existente:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (ctx["app_id"], aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?",
+                          (ctx["app_id"], aluno_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _worker_escaneamento(worker_num: int):
+    """Loop infinito: pega o próximo item da fila global e processa (numa thread separada,
+    sem travar o servidor pros outros usuários)."""
+    while True:
+        lote_id, item_idx = await FILA_GLOBAL_ESCANEAMENTO.get()
+        job = FILAS_ESCANEAMENTO.get(lote_id)
+        if job is None:
+            FILA_GLOBAL_ESCANEAMENTO.task_done()
+            continue
+        item = job["itens"][item_idx]
+        item["status"] = "processando"
+        t0 = time.monotonic()
+        try:
+            if not item["bytes"]:
+                item["resultado"] = {"success": False, "error": "Arquivo vazio.", "filename": item["filename"]}
+            elif job["tipo"] == "prova":
+                ctx = job["contexto"]
+                item["resultado"] = await asyncio.to_thread(
+                    _processar_cartao_resposta, item["bytes"], ctx["n_questoes"],
+                    filename=item["filename"] or "", questoes_info=ctx["questoes_info"]
+                )
+            else:  # simulado
+                ctx = job["contexto"]
+                item["resultado"] = await asyncio.to_thread(
+                    _processar_cartao_simulado, item["bytes"], ctx["blocos_info"], item["filename"] or ""
+                )
+                await _persistir_item_simulado(job, item)
+        except Exception as e:
+            item["resultado"] = {"success": False, "error": f"Erro inesperado no processamento: {e}",
+                                  "filename": item["filename"]}
+        finally:
+            item["bytes"] = None  # libera a memória da foto assim que processa
+            item["status"] = "concluido"
+            dt = time.monotonic() - t0
+            TEMPOS_GLOBAIS_ESCANEAMENTO.append(dt)
+            job["processados"] += 1
+            if job["processados"] >= job["total"]:
+                job["concluido"] = True
+            FILA_GLOBAL_ESCANEAMENTO.task_done()
+
+
+@app.on_event("startup")
+async def _iniciar_workers_escaneamento():
+    global FILA_GLOBAL_ESCANEAMENTO
+    FILA_GLOBAL_ESCANEAMENTO = asyncio.Queue()
+    for i in range(N_WORKERS_ESCANEAMENTO):
+        asyncio.create_task(_worker_escaneamento(i))
+
+
+def _status_lote_escaneamento(lote_id: str) -> Optional[dict]:
+    """Monta o payload de status/progresso de um lote: quantos faltam, posição na
+    fila global (cartões de outros lotes ainda na frente) e tempo estimado."""
+    job = FILAS_ESCANEAMENTO.get(lote_id)
+    if not job:
+        return None
+
+    tempo_medio = (sum(TEMPOS_GLOBAIS_ESCANEAMENTO) / len(TEMPOS_GLOBAIS_ESCANEAMENTO)) if TEMPOS_GLOBAIS_ESCANEAMENTO else 2.5
+
+    pendentes_deste_lote = [it for it in job["itens"] if it["status"] == "pendente"]
+    posicao_fila_global = 0
+    if pendentes_deste_lote:
+        primeiro_seq = pendentes_deste_lote[0]["seq"]
+        for outro_job in FILAS_ESCANEAMENTO.values():
+            for it in outro_job["itens"]:
+                if it["status"] in ("pendente", "processando") and it["seq"] < primeiro_seq:
+                    posicao_fila_global += 1
+
+    itens_restantes = job["total"] - job["processados"]
+    eta_segundos = math.ceil((posicao_fila_global + itens_restantes) / N_WORKERS_ESCANEAMENTO * tempo_medio) if itens_restantes else 0
+
+    return {
+        "lote_id": lote_id,
+        "tipo": job["tipo"],
+        "total": job["total"],
+        "processados": job["processados"],
+        "concluido": job["concluido"],
+        "posicao_fila": posicao_fila_global,
+        "eta_segundos": eta_segundos,
+        "redirect_url": job["contexto"].get("revisar_url") if job["concluido"] else None,
+    }
 
 
 # ==========================================
@@ -6717,8 +6887,82 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
     }
 
 
-@app.get("/aplicacoes/{aplicacao_id}/escanear", response_class=HTMLResponse)
-def form_escanear(aplicacao_id: int):
+@app.get("/escanear/status/{lote_id}", response_class=HTMLResponse)
+def tela_status_lote(lote_id: str):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    job = FILAS_ESCANEAMENTO.get(lote_id)
+    if not job:
+        content = '<div class="empty">Lote não encontrado (pode ter expirado após um reinício do sistema). Volte e envie as fotos novamente.</div>'
+        return render_page("Processando", content, active="aplicacoes")
+
+    titulo_lote = job["contexto"].get("titulo_exibicao", "Digitalização")
+    content = f"""
+    <div class="page-header">
+        <h1>📷 Processando cartões...</h1>
+        <p class="subtitle">{titulo_lote}</p>
+    </div>
+    <div class="card" style="max-width:520px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span id="st-contagem" style="font-weight:600;">Carregando...</span>
+            <span id="st-posicao" style="color:var(--text-muted); font-size:13px;"></span>
+        </div>
+        <div style="height:14px; background:var(--border); border-radius:7px; overflow:hidden;">
+            <div id="st-barra" style="height:14px; width:0%; background:var(--primary, #4C6EF5); transition:width 0.4s;"></div>
+        </div>
+        <p id="st-eta" style="margin-top:14px; color:var(--text-muted); font-size:13px;"></p>
+        <p style="margin-top:14px; font-size:12px; color:var(--text-muted);">Pode fechar esta aba e voltar depois — o processamento continua em segundo plano. Essa mesma tela reabre no ponto em que parou.</p>
+    </div>
+    <script>
+        const loteId = {lote_id!r};
+        function formatarTempo(s) {{
+            if (s < 60) return s + 's';
+            const m = Math.floor(s / 60), r = s % 60;
+            return m + 'min ' + r + 's';
+        }}
+        async function checarStatus() {{
+            try {{
+                const resp = await fetch(`/escanear/status/${{loteId}}/json`);
+                const d = await resp.json();
+                if (d.erro) {{
+                    document.getElementById('st-contagem').textContent = 'Lote não encontrado.';
+                    return;
+                }}
+                const pct = d.total ? Math.round(d.processados / d.total * 100) : 100;
+                document.getElementById('st-contagem').textContent = `${{d.processados}} de ${{d.total}} cartões processados`;
+                document.getElementById('st-barra').style.width = pct + '%';
+                if (d.posicao_fila > 0) {{
+                    document.getElementById('st-posicao').textContent = `${{d.posicao_fila}} cartão(ões) de outros professores na sua frente`;
+                }} else {{
+                    document.getElementById('st-posicao').textContent = '';
+                }}
+                if (!d.concluido) {{
+                    document.getElementById('st-eta').textContent = `Tempo estimado: ~${{formatarTempo(d.eta_segundos)}}`;
+                    setTimeout(checarStatus, 1500);
+                }} else {{
+                    document.getElementById('st-eta').textContent = 'Concluído! Redirecionando...';
+                    window.location.href = d.redirect_url;
+                }}
+            }} catch (e) {{
+                setTimeout(checarStatus, 3000);
+            }}
+        }}
+        checarStatus();
+    </script>
+    """
+    return render_page("Processando", content, active="aplicacoes")
+
+
+@app.get("/escanear/status/{lote_id}/json")
+def status_lote_json(lote_id: str):
+    status = _status_lote_escaneamento(lote_id)
+    if not status:
+        return JSONResponse({"erro": "lote não encontrado"})
+    return JSONResponse(status)
+
+
+
     """Formulário pra upload de foto do cartão resposta."""
     conn = get_db()
     apl = conn.execute("""
@@ -7582,7 +7826,8 @@ def _extrair_imagens_de_arquivo(file_bytes: bytes, filename: str) -> list:
 
 @app.post("/aplicacoes/{aplicacao_id}/escanear-lote", response_class=HTMLResponse)
 async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile] = File(...)):
-    """Recebe N fotos ou PDF multipágina, processa cada uma, mostra tela de revisão com grid de cards."""
+    """Recebe N fotos ou PDF multipágina e enfileira o processamento em segundo plano
+    (não trava o servidor pros outros professores). Redireciona pra tela de progresso."""
     if not fotos:
         return HTMLResponse(render_page("Erro", '<div class="empty"><p>Nenhum arquivo enviado.</p></div>', active="aplicacoes"))
 
@@ -7602,6 +7847,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
     ).fetchall()
     n_questoes = len(questoes)
     questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+    conn.close()
 
     arquivos_expandidos = []
     for foto in fotos:
@@ -7611,27 +7857,61 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
             continue
         arquivos_expandidos.extend(_extrair_imagens_de_arquivo(raw, foto.filename or ""))
 
+    if not arquivos_expandidos:
+        return HTMLResponse(render_page("Lote vazio",
+            '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
+
+    lote_id = _novo_lote_escaneamento("prova", {
+        "aplicacao_id": aplicacao_id,
+        "n_questoes": n_questoes,
+        "questoes_info": questoes_info,
+        "titulo_exibicao": f"{apl['prova_titulo']} · {apl['turma_nome']}",
+        "revisar_url": "",  # preenchido abaixo, depois de saber o lote_id
+    }, arquivos_expandidos)
+    FILAS_ESCANEAMENTO[lote_id]["contexto"]["revisar_url"] = f"/aplicacoes/{aplicacao_id}/escanear-lote/{lote_id}/revisar"
+
+    return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+
+@app.get("/aplicacoes/{aplicacao_id}/escanear-lote/{lote_id}/revisar", response_class=HTMLResponse)
+async def revisar_lote_escaneado(aplicacao_id: int, lote_id: str):
+    """Depois que o lote terminou de processar em segundo plano, mostra a mesma
+    tela de revisão de sempre (editar/confirmar antes de salvar)."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    job = FILAS_ESCANEAMENTO.get(lote_id)
+    if not job or not job["concluido"]:
+        return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    n_questoes = job["contexto"]["n_questoes"]
+    questoes_info = job["contexto"]["questoes_info"]
+
     cards_html_parts = []
     n_ok = 0
     n_warn = 0
     n_erro = 0
     alunos_ja_no_lote = set()
 
-    for idx, (nome_exib, image_bytes) in enumerate(arquivos_expandidos):
-        if not image_bytes:
-            n_erro += 1
-            if (nome_exib or "").lower().endswith(".pdf"):
-                cards_html_parts.append(_render_card_erro(idx, nome_exib,
-                    "PDF recebido mas 'pdf2image' não está instalado. Execute: pip install pdf2image --break-system-packages"))
-            else:
-                cards_html_parts.append(_render_card_erro(idx, nome_exib, "Arquivo vazio."))
-            continue
+    for item in job["itens"]:
+        idx = item["idx"]
+        nome_exib = item["filename"]
+        result = item["resultado"]
 
-        result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_questoes, filename=nome_exib or "", questoes_info=questoes_info)
-
-        if not result["success"]:
+        if not result or not result.get("success"):
             n_erro += 1
-            cards_html_parts.append(_render_card_erro(idx, nome_exib, result.get("error", "Erro desconhecido")))
+            cards_html_parts.append(_render_card_erro(idx, nome_exib, (result or {}).get("error", "Erro desconhecido")))
             continue
 
         aluno = conn.execute("SELECT * FROM alunos WHERE id = ? AND turma_id = ?",
@@ -7673,6 +7953,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
         ))
 
     conn.close()
+    del FILAS_ESCANEAMENTO[lote_id]  # lote já foi consumido, libera a memória
 
     if not cards_html_parts:
         return HTMLResponse(render_page("Lote vazio",
@@ -7680,7 +7961,7 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
 
     resumo = f"""
         <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
-            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{len(arquivos_expandidos)}</div></div>
+            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{job["total"]}</div></div>
             <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
             <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
             <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
@@ -7731,6 +8012,8 @@ async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile]
         </script>
     """
     return render_page("Revisão do lote", content, active="aplicacoes")
+
+
 
 
 def _render_card_erro(idx, filename, mensagem_erro, preview_b64=None):
@@ -10607,6 +10890,8 @@ async def confirmar_escaneamento_simulado(sim_id: int, app_id: int, request: Req
 
 @app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote", response_class=HTMLResponse)
 async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFile] = File(...)):
+    """Enfileira as fotos do simulado pra processamento em segundo plano (não trava
+    o servidor pros outros professores) e redireciona pra tela de progresso."""
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
@@ -10658,91 +10943,90 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
                     all_files.append((f.filename or "arquivo", data))
             else:
                 all_files.append((f.filename or "foto.jpg", data))
-
-        resultados = []
-        alunos_no_lote = set()
-
-        for filename, image_bytes in all_files:
-            resultado = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, filename)
-            if not resultado["success"]:
-                resultados.append({"filename": filename, "success": False, "error": resultado.get("error", "Erro")})
-                continue
-
-            aluno_id = resultado["aluno_id"]
-            duplicado = aluno_id in alunos_no_lote
-            alunos_no_lote.add(aluno_id)
-
-            aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
-            if not aluno:
-                resultados.append({"filename": filename, "success": False, "error": f"Aluno {aluno_id} não encontrado."})
-                continue
-
-            ja_entregue = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone() is not None
-
-            conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
-            for q_num, q_id in enumerate(questao_ids, start=1):
-                letra = resultado["answers"].get(q_num)
-                if letra in ("A", "B", "C", "D"):
-                    conn.execute(
-                        "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
-                        (app_id, aluno_id, q_id, letra)
-                    )
-
-            existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone()
-            if not existente:
-                conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (app_id, aluno_id))
-            else:
-                conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
-            conn.commit()
-
-            resultados.append({
-                "filename": filename, "success": True,
-                "aluno_nome": aluno["nome"], "aluno_id": aluno_id,
-                "n_respondidas": resultado["n_respondidas"],
-                "ja_entregue": ja_entregue, "duplicado": duplicado,
-                "preview_b64": resultado.get("preview_base64", ""),
-            })
-
-        n_ok = sum(1 for r in resultados if r["success"])
-        n_err = len(resultados) - n_ok
-
-        cards_html = ""
-        for r in resultados:
-            if r["success"]:
-                warn = (" · ⚠️ substituiu entrega anterior" if r["ja_entregue"] else "") + (" · ⚠️ duplicado" if r["duplicado"] else "")
-                preview = f'<img src="data:image/jpeg;base64,{r["preview_b64"]}" style="max-width:100px;border-radius:4px;">' if r["preview_b64"] else ""
-                cards_html += f"""
-                <div style="border:1px solid var(--green);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--green-bg);display:flex;justify-content:space-between;align-items:center;">
-                    <div><div style="font-weight:600;">✅ {r['aluno_nome']}</div>
-                    <div style="font-size:12px;color:var(--text-muted);">{r['filename']} · {r['n_respondidas']}/40 lidas{warn}</div></div>
-                    {preview}
-                </div>"""
-            else:
-                cards_html += f"""
-                <div style="border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--red-bg);">
-                    <div style="font-weight:600;color:var(--red);">❌ {r['filename']}</div>
-                    <div style="font-size:12px;">{r['error']}</div>
-                </div>"""
-
-        content = f"""
-            <div class="page-header">
-                <h1>📋 Resultado do lote — {apl['turma_nome']}</h1>
-                <p class="subtitle">{sim['nome']} · {n_ok} processados · {n_err} erros</p>
-            </div>
-            <div style="display:flex;gap:10px;margin-bottom:16px;">
-                <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
-                <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
-            </div>
-            {cards_html}
-            <div style="display:flex;gap:10px;margin-top:20px;">
-                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Escanear mais</a>
-                <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
-            </div>
-        """
-        return HTMLResponse(render_page("Resultado do lote", content, active="simulados"))
-
     finally:
         conn.close()
+
+    if not all_files:
+        return HTMLResponse(render_page("Lote vazio",
+            '<div class="empty">Nenhuma foto foi processada.</div>', active="simulados"))
+
+    lote_id = _novo_lote_escaneamento("simulado", {
+        "sim_id": sim_id, "app_id": app_id,
+        "blocos_info": blocos_info, "questao_ids": questao_ids,
+        "titulo_exibicao": f"{sim['nome']} · {apl['turma_nome']}",
+        "revisar_url": "",
+    }, all_files)
+    FILAS_ESCANEAMENTO[lote_id]["contexto"]["revisar_url"] = f"/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/{lote_id}/revisar"
+
+    return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+
+@app.get("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/{lote_id}/revisar", response_class=HTMLResponse)
+def revisar_lote_simulado(sim_id: int, app_id: int, lote_id: str):
+    """Depois que o lote terminou de processar (e já foi salvo no banco automaticamente,
+    cartão por cartão), mostra o resultado final."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    job = FILAS_ESCANEAMENTO.get(lote_id)
+    if not job or not job["concluido"]:
+        return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    apl = conn.execute("SELECT a.*, t.nome AS turma_nome FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?", (app_id,)).fetchone()
+    conn.close()
+    if not sim or not apl:
+        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+    resultados = []
+    for item in job["itens"]:
+        r = item["resultado"] or {"success": False, "error": "Sem resultado."}
+        r.setdefault("filename", item["filename"])
+        resultados.append(r)
+
+    n_ok = sum(1 for r in resultados if r.get("success"))
+    n_err = len(resultados) - n_ok
+
+    cards_html = ""
+    for r in resultados:
+        if r.get("success"):
+            warn = (" · ⚠️ substituiu entrega anterior" if r.get("ja_entregue") else "") + (" · ⚠️ duplicado" if r.get("duplicado") else "")
+            preview_b64 = r.get("preview_base64", "")
+            preview = f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:100px;border-radius:4px;">' if preview_b64 else ""
+            cards_html += f"""
+            <div style="border:1px solid var(--green);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--green-bg);display:flex;justify-content:space-between;align-items:center;">
+                <div><div style="font-weight:600;">✅ {r.get('aluno_nome', '?')}</div>
+                <div style="font-size:12px;color:var(--text-muted);">{r['filename']} · {r.get('n_respondidas', '?')}/40 lidas{warn}</div></div>
+                {preview}
+            </div>"""
+        else:
+            cards_html += f"""
+            <div style="border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--red-bg);">
+                <div style="font-weight:600;color:var(--red);">❌ {r['filename']}</div>
+                <div style="font-size:12px;">{r.get('error', 'Erro desconhecido')}</div>
+            </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Resultado do lote — {apl['turma_nome']}</h1>
+            <p class="subtitle">{sim['nome']} · {n_ok} processados · {n_err} erros</p>
+        </div>
+        <div style="display:flex;gap:10px;margin-bottom:16px;">
+            <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
+        </div>
+        {cards_html}
+        <div style="display:flex;gap:10px;margin-top:20px;">
+            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Escanear mais</a>
+            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
+        </div>
+    """
+    del FILAS_ESCANEAMENTO[lote_id]  # já consumido, libera memória
+    return HTMLResponse(render_page("Resultado do lote", content, active="simulados"))
+
+
 
 
 
