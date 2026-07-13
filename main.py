@@ -11501,7 +11501,7 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
                 conn.commit()
                 resultados.append({"filename": filename, "success": True, "aluno_nome": aluno["nome"],
                                     "atividade": apl["prova_titulo"], "turma": apl["turma_nome"],
-                                    "n_respondidas": result["n_respondidas"], "n_total": n_q,
+                                    "n_respondidas": sum(1 for v in answers.values() if v), "n_total": n_q,
                                     "warnings": result.get("warnings", []), "ja_entregue": ja_entregue})
 
             # === SIMULADO ===
