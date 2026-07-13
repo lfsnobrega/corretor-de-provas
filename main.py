@@ -620,13 +620,29 @@ init_db()
 N_WORKERS_ESCANEAMENTO = 2  # processos "trabalhadores" simultâneos; pode subir para 3-4 numa VM maior (e2-medium+)
 
 FILAS_ESCANEAMENTO: dict = {}          # lote_id -> job (dict)
-FILA_GLOBAL_ESCANEAMENTO: "asyncio.Queue" = None  # criada no startup do app
+FILA_GLOBAL_ESCANEAMENTO: "asyncio.Queue" = None  # criada no startup do app (ou sob demanda, ver _garantir_fila_escaneamento)
 TEMPOS_GLOBAIS_ESCANEAMENTO = deque(maxlen=30)    # últimos tempos de processamento (segundos), pra estimar ETA
+_WORKERS_ESCANEAMENTO_INICIADOS = False
+
+
+def _garantir_fila_escaneamento():
+    """Cria a fila global e os workers se ainda não existirem. Serve tanto pro evento
+    de startup normal quanto como proteção: se por algum motivo o startup não tiver
+    rodado (ex.: variação de como o servidor foi iniciado), a fila se cria sozinha na
+    primeira vez que alguém tentar escanear, em vez de quebrar com 'internal server error'."""
+    global FILA_GLOBAL_ESCANEAMENTO, _WORKERS_ESCANEAMENTO_INICIADOS
+    if FILA_GLOBAL_ESCANEAMENTO is None:
+        FILA_GLOBAL_ESCANEAMENTO = asyncio.Queue()
+    if not _WORKERS_ESCANEAMENTO_INICIADOS:
+        _WORKERS_ESCANEAMENTO_INICIADOS = True
+        for i in range(N_WORKERS_ESCANEAMENTO):
+            asyncio.create_task(_worker_escaneamento(i))
 
 
 def _novo_lote_escaneamento(tipo: str, contexto: dict, arquivos: list) -> str:
     """Cria um lote de escaneamento e enfileira cada foto como um item.
     arquivos: lista de tuplas (filename, image_bytes). Retorna o lote_id."""
+    _garantir_fila_escaneamento()
     lote_id = uuid.uuid4().hex[:12]
     agora = time.monotonic()
     itens = []
@@ -733,10 +749,7 @@ async def _worker_escaneamento(worker_num: int):
 
 @app.on_event("startup")
 async def _iniciar_workers_escaneamento():
-    global FILA_GLOBAL_ESCANEAMENTO
-    FILA_GLOBAL_ESCANEAMENTO = asyncio.Queue()
-    for i in range(N_WORKERS_ESCANEAMENTO):
-        asyncio.create_task(_worker_escaneamento(i))
+    _garantir_fila_escaneamento()
 
 
 def _status_lote_escaneamento(lote_id: str) -> Optional[dict]:
