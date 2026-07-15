@@ -10533,7 +10533,14 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
     # Ler bolhas
     bolhas = _calcular_layout_cartao_simulado(blocos_info)
     bubble_r_px = int(3.0 / 210 * canon_w)
-    THRESHOLD = 0.35  # fração da área da bolha que deve estar escura
+
+    # Thresholds alinhados com os já usados (e validados) no OMR de prova normal
+    # (ver _processar_cartao_resposta, modo "normal"): mean<110 escuro confiante,
+    # mean<140 ainda conta (com aviso), mean>180 considerado em branco.
+    LIGHT_THRESHOLD_ESC = 1.0 - 180 / 255       # ~0.294 — abaixo disso, provável em branco
+    DARK_THRESHOLD_ESC = 1.0 - 110 / 255        # ~0.569 — acima disso, marca confiante
+    AMBIGUOUS_THRESHOLD_ESC = 1.0 - 140 / 255   # ~0.451
+    FRACA_MIN_ESC = 0.15  # piso absoluto abaixo do qual é provavelmente ruído do papel, não caneta
 
     respostas = {}  # {q_num: letra_marcada}
     votos = {}      # {q_num: {letra: escuridao}}
@@ -10555,17 +10562,22 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
             votos[q] = {}
         votos[q][b["label"]] = escuridao
 
-    THRESHOLD_DUPLA = 0.25  # segunda bolha acima disto = dupla marcação
     for q_num, letras_esc in votos.items():
         ordenadas = sorted(letras_esc.items(), key=lambda x: x[1], reverse=True)
         melhor_letra, melhor_esc = ordenadas[0]
-        segunda_letra, segunda_esc = ordenadas[1] if len(ordenadas) > 1 else (None, 0)
+        segunda_letra, segunda_esc = ordenadas[1] if len(ordenadas) > 1 else (None, 0.0)
 
-        if melhor_esc >= THRESHOLD:
+        if melhor_esc >= LIGHT_THRESHOLD_ESC:
             respostas[q_num] = melhor_letra
-            # Verificar dupla marcação
-            if segunda_letra and segunda_esc >= THRESHOLD_DUPLA:
+            if melhor_esc < DARK_THRESHOLD_ESC:
+                warnings_sim.append(f"Q{q_num}: marca fraca em {melhor_letra} (confira)")
+            if segunda_letra and segunda_letra != melhor_letra and segunda_esc >= AMBIGUOUS_THRESHOLD_ESC:
                 warnings_sim.append(f"Q{q_num}: dupla marcação detectada — {melhor_letra} e {segunda_letra} (confira)")
+        elif melhor_esc >= FRACA_MIN_ESC and (segunda_esc == 0 or melhor_esc >= segunda_esc * 2.0):
+            # Não chegou no piso padrão, mas é claramente mais escura que as outras 3 —
+            # marca de caneta fraca/desbotada, não ruído do papel.
+            respostas[q_num] = melhor_letra
+            warnings_sim.append(f"Q{q_num}: marca muito fraca em {melhor_letra} — confira com atenção")
         else:
             respostas[q_num] = None  # não marcado
 
