@@ -9159,7 +9159,10 @@ def simulado_aplicacoes(sim_id: int):
                 <h1>📋 Aplicações — {sim['nome']}</h1>
                 <p class="subtitle">{ano_label} · {sim['trimestre']}º Trimestre · {sim['ano']}</p>
             </div>
-            {btn_criar}
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <a href="/simulados/{sim_id}/diagnostico" class="btn" style="border-color:var(--orange); color:var(--orange);">🔍 Diagnóstico de respostas</a>
+                {btn_criar}
+            </div>
         </div>
         {turmas_html}
         <div style="margin-top:16px;"><a href="/simulados/{sim_id}" class="btn">← Voltar ao simulado</a></div>
@@ -9167,7 +9170,143 @@ def simulado_aplicacoes(sim_id: int):
     return render_page("Aplicações do simulado", content, active="simulados")
 
 
-@app.post("/simulados/{sim_id}/aplicacoes/criar-lote")
+@app.get("/simulados/{sim_id}/diagnostico", response_class=HTMLResponse)
+def diagnostico_respostas_simulado(sim_id: int):
+    """Relatório para achar rapidamente cartões com muitas questões não respondidas —
+    útil pra identificar cartões que podem ter tido problema na leitura OMR, sem precisar
+    abrir aluno por aluno."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    prova_vinculada = conn.execute(
+        "SELECT id FROM provas WHERE titulo LIKE ? ORDER BY id DESC LIMIT 1",
+        (f"%[SIM-{sim_id}]%",)
+    ).fetchone()
+    if not prova_vinculada:
+        conn.close()
+        content = '<div class="empty">Nenhuma prova/aplicação criada ainda para este simulado.</div>'
+        return render_page("Diagnóstico", content, active="simulados")
+    prova_id = prova_vinculada["id"]
+
+    total_questoes = conn.execute("SELECT COUNT(*) c FROM prova_questoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
+
+    # Mapear questao_id -> (numero_ordem, disciplina_nome) pra poder indicar em qual bloco estão os brancos
+    questoes_ordem = conn.execute("""
+        SELECT pq.questao_id, pq.ordem, d.nome AS disciplina_nome
+        FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE pq.prova_id = ? ORDER BY pq.ordem
+    """, (prova_id,)).fetchall()
+    disciplina_por_questao = {q["questao_id"]: q["disciplina_nome"] for q in questoes_ordem}
+
+    aplicacoes = conn.execute("""
+        SELECT a.id AS aplicacao_id, t.nome AS turma_nome
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+        WHERE a.prova_id = ? AND a.titulo LIKE ?
+        ORDER BY t.nome
+    """, (prova_id, f"%[SIM-{sim_id}]%")).fetchall()
+
+    linhas_dados = []
+    for apl in aplicacoes:
+        entregas = conn.execute("""
+            SELECT e.aluno_id, al.nome AS aluno_nome, al.numero
+            FROM entregas e JOIN alunos al ON al.id = e.aluno_id
+            WHERE e.aplicacao_id = ?
+        """, (apl["aplicacao_id"],)).fetchall()
+
+        for e in entregas:
+            respostas = conn.execute(
+                "SELECT questao_id FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?",
+                (apl["aplicacao_id"], e["aluno_id"])
+            ).fetchall()
+            respondidas_ids = {r["questao_id"] for r in respostas}
+            n_respondidas = len(respondidas_ids)
+            n_brancos = total_questoes - n_respondidas
+
+            # Contar brancos por disciplina/bloco
+            brancos_por_disc = {}
+            for q_id, disc in disciplina_por_questao.items():
+                if q_id not in respondidas_ids:
+                    brancos_por_disc[disc] = brancos_por_disc.get(disc, 0) + 1
+
+            linhas_dados.append({
+                "turma": apl["turma_nome"], "aluno": e["aluno_nome"], "numero": e["numero"],
+                "aluno_id": e["aluno_id"], "aplicacao_id": apl["aplicacao_id"],
+                "n_respondidas": n_respondidas, "n_brancos": n_brancos,
+                "pct": round(n_respondidas / total_questoes * 100) if total_questoes else 0,
+                "brancos_por_disc": brancos_por_disc,
+            })
+    conn.close()
+
+    if not linhas_dados:
+        content = '<div class="empty">Nenhuma entrega registrada ainda para este simulado.</div>'
+        return render_page("Diagnóstico", content, active="simulados")
+
+    linhas_dados.sort(key=lambda x: x["pct"])
+
+    n_criticos = sum(1 for l in linhas_dados if l["pct"] < 70)
+    n_atencao = sum(1 for l in linhas_dados if 70 <= l["pct"] < 90)
+    n_ok = sum(1 for l in linhas_dados if l["pct"] >= 90)
+
+    linhas_html = ""
+    for l in linhas_dados:
+        if l["pct"] < 70:
+            cor, bg = "var(--red)", "var(--red-bg)"
+        elif l["pct"] < 90:
+            cor, bg = "var(--orange)", "var(--orange-bg)"
+        else:
+            cor, bg = "var(--green)", "transparent"
+
+        detalhe_brancos = ""
+        if l["brancos_por_disc"]:
+            partes = [f"{disc}: {n} em branco" for disc, n in sorted(l["brancos_por_disc"].items(), key=lambda x: -x[1])]
+            detalhe_brancos = " · ".join(partes)
+
+        linhas_html += f"""<tr style="background:{bg};">
+            <td style="padding:6px 10px;">{l['turma']}</td>
+            <td style="padding:6px 10px;">{l['numero'] or '—'}</td>
+            <td style="padding:6px 10px;"><a href="/aplicacoes/{l['aplicacao_id']}/aluno/{l['aluno_id']}">{l['aluno']}</a></td>
+            <td style="padding:6px 10px; text-align:center; font-weight:700; color:{cor};">{l['n_respondidas']}/{total_questoes}</td>
+            <td style="padding:6px 10px; text-align:center; color:{cor};">{l['pct']}%</td>
+            <td style="padding:6px 10px; font-size:12px; color:var(--text-muted);">{detalhe_brancos}</td>
+        </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🔍 Diagnóstico de respostas — {sim['nome']}</h1>
+            <p class="subtitle">Cartões com mais questões em branco aparecem primeiro — use isso pra achar leituras suspeitas de OMR.</p>
+        </div>
+        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric" style="border-color:var(--red);"><div class="metric-label">Crítico (&lt;70% respondido)</div><div class="metric-value" style="color:var(--red);">{n_criticos}</div></div>
+            <div class="metric" style="border-color:var(--orange);"><div class="metric-label">Atenção (70–89%)</div><div class="metric-value" style="color:var(--orange);">{n_atencao}</div></div>
+            <div class="metric" style="border-color:var(--green);"><div class="metric-label">OK (≥90%)</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle); text-align:left;">
+                <th style="padding:6px 10px;">Turma</th>
+                <th style="padding:6px 10px;">Nº</th>
+                <th style="padding:6px 10px;">Aluno</th>
+                <th style="padding:6px 10px;">Respondidas</th>
+                <th style="padding:6px 10px;">%</th>
+                <th style="padding:6px 10px;">Onde estão os brancos</th>
+            </tr></thead>
+            <tbody>{linhas_html}</tbody>
+        </table>
+        <p class="muted-line" style="font-size:12px; margin-top:14px;">
+            Clique no nome do aluno pra ver as respostas em detalhe. Se "onde estão os brancos" concentrar tudo num bloco só, é sinal forte de problema de leitura (não de aluno que deixou em branco de propósito) — vale reescanear esse cartão específico.
+        </p>
+        <div style="margin-top:16px;"><a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a></div>
+    """
+    return render_page("Diagnóstico de respostas", content, active="simulados")
+
+
+
 def criar_aplicacoes_lote(sim_id: int):
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
