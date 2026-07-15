@@ -8495,6 +8495,89 @@ def _media_nota(registros):
     return round(sum(r["nota_10"] for r in registros) / len(registros), 2)
 
 
+def _analise_disciplinas_turma(conn, aplicacao_id: int, prova_id: int) -> list:
+    """Análise detalhada por disciplina de UMA turma/aplicação específica: % geral de
+    acerto, alunos sugeridos pra reforço (abaixo de 50%) e — quando as questões têm
+    habilidades BNCC cadastradas — as 2 habilidades com mais dificuldade e as 2 melhor
+    consolidadas."""
+    alunos = conn.execute("""
+        SELECT DISTINCT e.aluno_id, al.nome FROM entregas e
+        JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = ?
+    """, (aplicacao_id,)).fetchall()
+    aluno_nomes = {a["aluno_id"]: a["nome"] for a in alunos}
+    if not aluno_nomes:
+        return []
+
+    questoes = conn.execute("""
+        SELECT q.id AS questao_id, d.nome AS disciplina
+        FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE pq.prova_id = ?
+    """, (prova_id,)).fetchall()
+    questoes_por_disc = {}
+    for q in questoes:
+        questoes_por_disc.setdefault(q["disciplina"], []).append(q["questao_id"])
+
+    hab_por_questao = {}
+    rows_hab = conn.execute("""
+        SELECT qh.questao_id, h.codigo, h.descricao
+        FROM questao_habilidades qh JOIN habilidades_bncc h ON h.id = qh.habilidade_id
+    """).fetchall()
+    for r in rows_hab:
+        hab_por_questao.setdefault(r["questao_id"], []).append((r["codigo"], r["descricao"] or ""))
+
+    resultado = []
+    for disc, qids in questoes_por_disc.items():
+        total_por_aluno = len(qids)
+        acertos_por_aluno = {aid: 0 for aid in aluno_nomes}
+        acertos_total = 0
+        acertos_por_hab = {}
+
+        for qid in qids:
+            respostas_q = conn.execute("""
+                SELECT r.aluno_id, alt.correta FROM respostas r
+                JOIN alternativas alt ON alt.questao_id = r.questao_id AND alt.letra = r.alternativa_letra
+                WHERE r.questao_id = ? AND r.aplicacao_id = ?
+            """, (qid, aplicacao_id)).fetchall()
+            habs = hab_por_questao.get(qid, [])
+            for h in habs:
+                acertos_por_hab.setdefault(h, [0, 0])
+            for rr in respostas_q:
+                if rr["aluno_id"] not in acertos_por_aluno:
+                    continue
+                acertou = bool(rr["correta"])
+                if acertou:
+                    acertos_por_aluno[rr["aluno_id"]] += 1
+                    acertos_total += 1
+                for h in habs:
+                    acertos_por_hab[h][1] += 1
+                    if acertou:
+                        acertos_por_hab[h][0] += 1
+
+        pct_geral = round(acertos_total / (total_por_aluno * len(aluno_nomes)) * 100, 1) if total_por_aluno and aluno_nomes else 0
+        sugeridos = sorted(
+            aluno_nomes[aid] for aid, ac in acertos_por_aluno.items()
+            if total_por_aluno and (ac / total_por_aluno) < 0.5
+        )
+
+        ranking_hab = [
+            {"codigo": cod, "descricao": desc, "pct": round(ac / tot * 100, 1)}
+            for (cod, desc), (ac, tot) in acertos_por_hab.items() if tot
+        ]
+        ranking_hab.sort(key=lambda x: x["pct"])
+
+        resultado.append({
+            "disciplina": disc, "pct_geral": pct_geral,
+            "n_alunos": len(aluno_nomes), "total_questoes": total_por_aluno,
+            "sugeridos": sugeridos,
+            "piores_habilidades": ranking_hab[:2],
+            "melhores_habilidades": sorted(ranking_hab, key=lambda x: -x["pct"])[:2] if ranking_hab else [],
+            "tem_habilidades": bool(ranking_hab),
+        })
+
+    resultado.sort(key=lambda x: x["pct_geral"])
+    return resultado
+
+
 @app.get("/simulados/painel-global", response_class=HTMLResponse)
 def painel_global_seletor():
     prof = _current_prof_ctx.get()
@@ -8597,7 +8680,8 @@ def painel_global_ver(rodada: str):
             if tot_d and (ac_d / tot_d) < 0.5:
                 sugeridos.append(r["nome"])
         turma_diagnostico.append({
-            "turma": t, "disciplina_fraca": disc_fraca, "pct_fraca": pct_fraca,
+            "turma": t, "turma_id": regs_t[0]["turma_id"], "aplicacao_id": regs_t[0]["aplicacao_id"],
+            "disciplina_fraca": disc_fraca, "pct_fraca": pct_fraca,
             "sugeridos": sugeridos, "n_alunos": len(regs_t),
         })
     turma_diagnostico.sort(key=lambda x: x["pct_fraca"])
@@ -8667,9 +8751,14 @@ def painel_global_ver(rodada: str):
                     <div style="font-size:12px; color:{cor}; font-weight:600;">{td['pct_fraca']}% de acerto nessa disciplina</div>
                 </div>
             </div>
-            <button type="button" class="btn" style="font-size:11px; padding:3px 10px; margin-top:8px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
-                👥 {len(td['sugeridos'])} aluno(s) sugerido(s) pra reforço nessa disciplina (dentro da própria turma)
-            </button>
+            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+                <button type="button" class="btn" style="font-size:11px; padding:3px 10px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
+                    👥 {len(td['sugeridos'])} aluno(s) sugerido(s) pra reforço nessa disciplina
+                </button>
+                <a href="/simulados/painel-global/turma?rodada={rodada}&turma_id={td['turma_id']}&aplicacao_id={td['aplicacao_id']}" class="btn btn-primary" style="font-size:11px; padding:3px 10px;">
+                    📊 Ver todas as disciplinas dessa turma
+                </a>
+            </div>
             <ul id="{lista_id}" style="display:none; margin:8px 0 0 18px; font-size:13px;">{alunos_li}</ul>
         </div>"""
 
@@ -8743,6 +8832,140 @@ def painel_global_ver(rodada: str):
         </script>
     """
     return render_page("Painel Global da Escola", content, active="simulados")
+
+
+@app.get("/simulados/painel-global/turma", response_class=HTMLResponse)
+def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
+    """Visão detalhada de uma turma específica dentro de uma rodada de simulado:
+    dados gerais + análise disciplina por disciplina, com sugestão de agrupamento
+    e (quando cadastradas) as habilidades BNCC com mais e menos dificuldade."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, t.nome AS turma_nome, p.titulo AS prova_titulo
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id JOIN provas p ON p.id = a.prova_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse(f"/simulados/painel-global/ver?rodada={rodada}", status_code=303)
+
+    disciplinas = _analise_disciplinas_turma(conn, aplicacao_id, apl["prova_id"])
+
+    # Dados gerais da turma (reaproveita a coleta da rodada, filtrando por turma)
+    try:
+        trimestre_s, ano_s, dia_s = rodada.split(":")
+        trimestre, ano, dia = int(trimestre_s), int(ano_s), int(dia_s)
+        registros = _coletar_dados_painel_global(conn, trimestre, ano, dia)
+    except (ValueError, AttributeError):
+        registros = []
+    conn.close()
+
+    regs_turma = [r for r in registros if r["turma_id"] == turma_id]
+    media_turma = _media_nota(regs_turma)
+    dist_turma = _agregar_faixas(regs_turma)
+
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_turma.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+
+    disc_labels_js = ", ".join(f'"{d["disciplina"]}"' for d in disciplinas)
+    disc_pcts_js = ", ".join(str(d["pct_geral"]) for d in disciplinas)
+    disc_cores_js = ", ".join(
+        '"#dc2626"' if d["pct_geral"] < 50 else ('"#ea580c"' if d["pct_geral"] < 70 else '"#16a34a"')
+        for d in disciplinas
+    )
+
+    disciplinas_html = ""
+    for d in disciplinas:
+        cor = "var(--red)" if d["pct_geral"] < 50 else ("var(--orange)" if d["pct_geral"] < 70 else "var(--green)")
+        cor_bg = "var(--red-bg)" if d["pct_geral"] < 50 else ("var(--orange-bg)" if d["pct_geral"] < 70 else "var(--green-bg)")
+
+        if d["tem_habilidades"]:
+            piores_li = "".join(
+                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--red);">({h["pct"]}% de acerto)</span></li>'
+                for h in d["piores_habilidades"]
+            ) or "<li>—</li>"
+            melhores_li = "".join(
+                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--green);">({h["pct"]}% de acerto)</span></li>'
+                for h in d["melhores_habilidades"]
+            ) or "<li>—</li>"
+            habilidades_html = f"""
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:10px;">
+                    <div>
+                        <p style="font-size:12px; font-weight:600; color:var(--red); margin:0 0 4px 0;">🔴 Maior dificuldade</p>
+                        <ul style="margin:0 0 0 18px; font-size:12px;">{piores_li}</ul>
+                    </div>
+                    <div>
+                        <p style="font-size:12px; font-weight:600; color:var(--green); margin:0 0 4px 0;">🟢 Bem consolidado</p>
+                        <ul style="margin:0 0 0 18px; font-size:12px;">{melhores_li}</ul>
+                    </div>
+                </div>
+            """
+        else:
+            habilidades_html = '<p class="muted-line" style="font-size:12px; margin-top:8px;">Nenhuma habilidade BNCC cadastrada nas questões dessa disciplina — cadastre nas questões pra ver esse detalhamento aqui.</p>'
+
+        sugeridos_html = "".join(f"<li>{nome}</li>" for nome in d["sugeridos"]) or "<li>Nenhum abaixo de 50% de acerto.</li>"
+        lista_id = f"sug-disc-{re.sub(r'[^a-zA-Z0-9]', '', d['disciplina'])}"
+
+        disciplinas_html += f"""
+        <div style="border:2px solid {cor}; background:{cor_bg}; border-radius:8px; padding:14px; margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <strong style="font-size:15px;">{d['disciplina']}</strong>
+                <span style="font-weight:700; color:{cor}; font-size:15px;">{d['pct_geral']}% de acerto</span>
+            </div>
+            {habilidades_html}
+            <button type="button" class="btn" style="font-size:11px; padding:3px 10px; margin-top:10px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
+                👥 {len(d['sugeridos'])} aluno(s) sugerido(s) pra reforço em {d['disciplina']}
+            </button>
+            <ul id="{lista_id}" style="display:none; margin:8px 0 0 18px; font-size:13px;">{sugeridos_html}</ul>
+        </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📊 {apl['turma_nome']} — {apl['prova_titulo']}</h1>
+            <p class="subtitle">Visão detalhada por disciplina, pra saber rápido em quem focar.</p>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{len(regs_turma)}</div></div>
+            <div class="metric"><div class="metric-label">Nota média da turma</div><div class="metric-value">{media_turma}</div></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:18px; margin-bottom:18px;">
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">Distribuição de faixas SAEB</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-dist-turma"></canvas></div>
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">% de acerto por disciplina</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-disc-turma"></canvas></div>
+            </div>
+        </div>
+
+        <h3>Por disciplina — o que precisa de atenção</h3>
+        {disciplinas_html}
+
+        <div style="margin-top:16px;"><a href="/simulados/painel-global/ver?rodada={rodada}" class="btn">← Voltar ao painel global</a></div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-turma'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom', labels: {{ font: {{ size: 10 }} }} }} }} }}
+            }});
+            new Chart(document.getElementById('chart-disc-turma'), {{
+                type: 'bar',
+                data: {{ labels: [{disc_labels_js}], datasets: [{{ label: '% de acerto', data: [{disc_pcts_js}], backgroundColor: [{disc_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true, max: 100 }} }} }}
+            }});
+        </script>
+    """
+    return render_page(f"{apl['turma_nome']} — Análise por disciplina", content, active="simulados")
 
 
 
