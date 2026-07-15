@@ -8565,13 +8565,20 @@ def _analise_disciplinas_turma(conn, aplicacao_id: int, prova_id: int) -> list:
         ]
         ranking_hab.sort(key=lambda x: x["pct"])
 
+        piores_habilidades = ranking_hab[:2]
+        codigos_piores = {h["codigo"] for h in piores_habilidades}
+        # As "melhores" nunca repetem uma habilidade já listada como "pior" (evita mostrar
+        # a mesma habilidade nas duas colunas quando só existe 1 ou 2 cadastradas no total).
+        melhores_habilidades = [h for h in sorted(ranking_hab, key=lambda x: -x["pct"]) if h["codigo"] not in codigos_piores][:2]
+
         resultado.append({
             "disciplina": disc, "pct_geral": pct_geral,
             "n_alunos": len(aluno_nomes), "total_questoes": total_por_aluno,
             "sugeridos": sugeridos,
-            "piores_habilidades": ranking_hab[:2],
-            "melhores_habilidades": sorted(ranking_hab, key=lambda x: -x["pct"])[:2] if ranking_hab else [],
+            "piores_habilidades": piores_habilidades,
+            "melhores_habilidades": melhores_habilidades,
             "tem_habilidades": bool(ranking_hab),
+            "so_uma_habilidade": len(ranking_hab) == 1,
         })
 
     resultado.sort(key=lambda x: x["pct_geral"])
@@ -8884,7 +8891,16 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
         cor = "var(--red)" if d["pct_geral"] < 50 else ("var(--orange)" if d["pct_geral"] < 70 else "var(--green)")
         cor_bg = "var(--red-bg)" if d["pct_geral"] < 50 else ("var(--orange-bg)" if d["pct_geral"] < 70 else "var(--green-bg)")
 
-        if d["tem_habilidades"]:
+        if d["so_uma_habilidade"]:
+            unica = d["piores_habilidades"][0]
+            habilidades_html = f"""
+                <div style="margin-top:10px;">
+                    <p style="font-size:12px; font-weight:600; color:var(--text-muted); margin:0 0 4px 0;">📌 Única habilidade BNCC cadastrada nessa disciplina</p>
+                    <ul style="margin:0 0 0 18px; font-size:12px;"><li><strong>{unica['codigo']}</strong> — {unica['descricao'] or 'sem descrição'} ({unica['pct']}% de acerto)</li></ul>
+                    <p class="muted-line" style="font-size:11px; margin-top:4px;">Cadastre mais habilidades nas questões pra comparar dificuldade entre elas.</p>
+                </div>
+            """
+        elif d["tem_habilidades"]:
             piores_li = "".join(
                 f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--red);">({h["pct"]}% de acerto)</span></li>'
                 for h in d["piores_habilidades"]
@@ -8892,7 +8908,7 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
             melhores_li = "".join(
                 f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--green);">({h["pct"]}% de acerto)</span></li>'
                 for h in d["melhores_habilidades"]
-            ) or "<li>—</li>"
+            ) or "<li>Nenhuma outra habilidade se destacou.</li>"
             habilidades_html = f"""
                 <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:10px;">
                     <div>
