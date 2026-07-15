@@ -11001,7 +11001,6 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
     return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
 
 
-@app.get("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/{lote_id}/revisar", response_class=HTMLResponse)
 def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregue=None, duplicata_lote=False):
     """Card visual de um cartão de simulado lido com sucesso, com campos editáveis
     agrupados por bloco/disciplina, no mesmo padrão do lote de prova normal."""
