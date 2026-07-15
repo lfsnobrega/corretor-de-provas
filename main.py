@@ -7986,7 +7986,7 @@ async def revisar_lote_escaneado(aplicacao_id: int, lote_id: str):
     legenda = """
         <div class="tip" style="font-size:12px;">
             <strong>Como usar:</strong>
-            Verifique os cartões marcados em amarelo/vermelho (warnings/erros). Cada card permite editar manualmente as respostas marcadas. Os cards de erro NÃO serão salvos (sem checkbox de confirmar). Ao final, clique em <strong>"Salvar todos confirmados"</strong> e o sistema grava tudo de uma vez.
+            Cartões em <strong style="color:var(--red);">vermelho</strong> têm questão em branco ou marcação ambígua/dupla — confira com atenção. Cartões em <strong style="color:var(--orange);">laranja</strong> têm avisos mais leves. Cartões cinza (erro) NÃO serão salvos. Clique no nome pra expandir e ver a foto + corrigir. Ao final, clique em <strong>"Salvar todos confirmados"</strong>.
         </div>
     """
 
@@ -8004,6 +8004,10 @@ async def revisar_lote_escaneado(aplicacao_id: int, lote_id: str):
 
         <form action="/aplicacoes/{aplicacao_id}/escanear-lote/confirmar" method="post">
             <input type="hidden" name="n_questoes" value="{n_questoes}">
+            <div style="margin-bottom:10px; display:flex; gap:8px;">
+                <button type="button" id="btn-marcar-todos" class="btn" style="font-size:12px;">☑ Marcar todos</button>
+                <button type="button" id="btn-desmarcar-todos" class="btn" style="font-size:12px;">☐ Desmarcar todos</button>
+            </div>
             {cards_html}
             <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
                 <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
@@ -8014,6 +8018,12 @@ async def revisar_lote_escaneado(aplicacao_id: int, lote_id: str):
         </form>
 
         <script>
+        document.getElementById('btn-marcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = true);
+        }});
+        document.getElementById('btn-desmarcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = false);
+        }});
         // Expansão dos cards de revisão
         document.addEventListener('click', e => {{
             const btn = e.target.closest('[data-toggle-card]');
@@ -8056,23 +8066,46 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
     questoes_info: lista [{id, num, tipo, vf_count, assoc_a_count, assoc_b_count}] pra renderizar conforme tipo."""
     nome_seguro = (filename or f"foto_{idx+1}").replace("<", "&lt;")
     aluno_id = result["aluno_id"]
+    warnings_lista = result.get("warnings", []) or []
 
-    # Status: verde se sem warnings, amarelo se tem warning, ou amarelo se duplicata
-    tem_avisos = bool(result["warnings"]) or duplicata_lote or ja_entregue
-    if tem_avisos:
+    # Detecta questão em branco (considerando os 3 tipos) e marcação ambígua/dupla
+    answers_check = result["answers"]
+    info_by_num_check = {i["num"]: i for i in (questoes_info or [])}
+    tem_branco = False
+    for q_num in range(1, n_questoes + 1):
+        info_c = info_by_num_check.get(q_num, {"tipo": "multipla_escolha"})
+        tipo_c = info_c.get("tipo", "multipla_escolha")
+        val = answers_check.get(q_num)
+        if tipo_c == "multipla_escolha":
+            if val is None:
+                tem_branco = True
+                break
+        elif tipo_c in ("vf", "associacao"):
+            val_dict = val if isinstance(val, dict) else {}
+            n_sub = info_c.get("vf_count", 0) if tipo_c == "vf" else info_c.get("assoc_a_count", 0)
+            if any(not val_dict.get(str(k)) for k in range(n_sub)):
+                tem_branco = True
+                break
+    tem_dupla = any("marcação ambígua" in w or "dupla marcação" in w for w in warnings_lista)
+
+    tem_avisos = bool(warnings_lista) or duplicata_lote or ja_entregue
+    if tem_branco or tem_dupla:
+        border_color = "var(--red)"
+        bg = "var(--red-bg)"
+        status_icon = "✗"
+        status_color = "var(--red)"
+    elif tem_avisos:
         border_color = "var(--orange)"
         bg = "var(--orange-bg)"
         status_icon = "⚠"
         status_color = "var(--orange)"
-        body_default_display = "block"  # auto-expandido se tem aviso
-        toggle_label = "▲ Recolher"
     else:
         border_color = "var(--green)"
         bg = "var(--green-bg)"
         status_icon = "✓"
         status_color = "var(--green)"
-        body_default_display = "none"  # colapsado por padrão
-        toggle_label = "▼ Expandir"
+    body_default_display = "none"  # sempre colapsado por padrão
+    toggle_label = "▼ Expandir"
 
     # Avisos
     avisos = []
@@ -8080,7 +8113,7 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
         avisos.append("⚠ Foto repetida no lote: já apareceu um cartão deste aluno antes (a última marcação prevalece).")
     if ja_entregue:
         avisos.append(f"⚠ Aluno já tem entrega registrada ({ja_entregue['finalizada_em']}). Confirmar irá sobrescrever as respostas anteriores.")
-    avisos.extend(result.get("warnings", []) or [])
+    avisos.extend(warnings_lista)
     avisos_html = ""
     if avisos:
         items = "".join(f"<li>{w}</li>" for w in avisos)
@@ -8153,19 +8186,18 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
             <div style="flex:1; min-width:0;">
                 <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin:0; font-size:15px;">
-                    <input type="checkbox" name="card_{idx}_confirmar" value="1" checked style="width:auto; margin:0;">
+                    <input type="checkbox" name="card_{idx}_confirmar" value="1" checked class="card-confirmar-checkbox" style="width:auto; margin:0;">
                     <span style="color:{status_color}; font-size:18px;">{status_icon}</span>
                     <strong>{aluno["nome"]}</strong>
-                    <span style="font-size:12px; color:var(--text-muted);">· Nº {aluno["numero"] or "—"} · {aluno["codigo_unico"]} · foto: {nome_seguro}</span>
                 </label>
             </div>
             <button type="button" data-toggle-card class="btn" style="padding:4px 10px; font-size:12px; flex-shrink:0;">{toggle_label}</button>
         </div>
 
-        {avisos_html}
-
         <div class="lote-card-body" style="display:{body_default_display}; margin-top:12px;">
-            <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:14px;">
+            <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px 0;">Nº {aluno["numero"] or "—"} · {aluno["codigo_unico"]} · foto: {nome_seguro}</p>
+            {avisos_html}
+            <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:14px; margin-top:10px;">
                 <div>
                     <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Imagem processada (verde = detectado como marcado)</p>
                     <img src="data:image/jpeg;base64,{result['preview_base64']}" style="width:100%; border:1px solid var(--border); border-radius:4px;">
@@ -11204,21 +11236,27 @@ def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregu
     nome_seguro = (filename or f"foto_{idx+1}").replace("<", "&lt;")
     aluno_id = result["aluno_id"]
     answers = result.get("answers", {})
+    warnings_lista = result.get("warnings", []) or []
 
-    tem_avisos = bool(result.get("warnings")) or duplicata_lote or ja_entregue
-    if tem_avisos:
+    total_questoes_bloco = sum(b["n_questoes"] for b in blocos_info)
+    tem_branco = any(answers.get(bloco["q_inicio"] + qi) is None for bloco in blocos_info for qi in range(bloco["n_questoes"]))
+    tem_dupla = any("dupla marcação" in w for w in warnings_lista)
+    tem_avisos = bool(warnings_lista) or duplicata_lote or ja_entregue
+
+    if tem_branco or tem_dupla:
+        border_color, bg, status_icon, status_color = "var(--red)", "var(--red-bg)", "✗", "var(--red)"
+    elif tem_avisos:
         border_color, bg, status_icon, status_color = "var(--orange)", "var(--orange-bg)", "⚠", "var(--orange)"
-        body_default_display, toggle_label = "block", "▲ Recolher"
     else:
         border_color, bg, status_icon, status_color = "var(--green)", "var(--green-bg)", "✓", "var(--green)"
-        body_default_display, toggle_label = "none", "▼ Expandir"
+    body_default_display, toggle_label = "none", "▼ Expandir"
 
     avisos = []
     if duplicata_lote:
         avisos.append("⚠ Foto repetida no lote: já apareceu um cartão deste aluno antes (a última marcação prevalece).")
     if ja_entregue:
         avisos.append("⚠ Aluno já tem entrega registrada. Confirmar irá sobrescrever as respostas anteriores.")
-    avisos.extend(result.get("warnings", []) or [])
+    avisos.extend(warnings_lista)
     avisos_html = ""
     if avisos:
         items = "".join(f"<li>{w}</li>" for w in avisos)
@@ -11250,19 +11288,18 @@ def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregu
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
             <div style="flex:1; min-width:0;">
                 <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin:0; font-size:15px;">
-                    <input type="checkbox" name="card_{idx}_confirmar" value="1" checked style="width:auto; margin:0;">
+                    <input type="checkbox" name="card_{idx}_confirmar" value="1" checked class="card-confirmar-checkbox" style="width:auto; margin:0;">
                     <span style="color:{status_color}; font-size:18px;">{status_icon}</span>
                     <strong>{result.get('aluno_nome', '?')}</strong>
-                    <span style="font-size:12px; color:var(--text-muted);">· Nº {result.get('aluno_numero') or '—'} · {result.get('aluno_codigo', '')} · foto: {nome_seguro}</span>
                 </label>
             </div>
             <button type="button" data-toggle-card class="btn" style="padding:4px 10px; font-size:12px; flex-shrink:0;">{toggle_label}</button>
         </div>
 
-        {avisos_html}
-
         <div class="lote-card-body" style="display:{body_default_display}; margin-top:12px;">
-            <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:14px;">
+            <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px 0;">Nº {result.get('aluno_numero') or '—'} · {result.get('aluno_codigo', '')} · foto: {nome_seguro}</p>
+            {avisos_html}
+            <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:14px; margin-top:10px;">
                 <div>
                     <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Imagem processada</p>
                     {preview_img}
@@ -11336,7 +11373,7 @@ def revisar_lote_simulado(sim_id: int, app_id: int, lote_id: str):
     legenda = """
         <div class="tip" style="font-size:12px;">
             <strong>Como usar:</strong>
-            Cartões em amarelo têm avisos (marca fraca, dupla marcação, entrega repetida) — confira a foto ao lado e corrija clicando na letra certa. Cartões em vermelho não serão salvos. Ao final, clique em <strong>"Salvar todos confirmados"</strong>.
+            Cartões em <strong style="color:var(--red);">vermelho</strong> têm questão em branco ou marcação dupla — confira com atenção. Cartões em <strong style="color:var(--orange);">laranja</strong> têm avisos mais leves (marca fraca, entrega repetida). Cartões cinza não serão salvos (erro de leitura). Clique no nome pra expandir e ver a foto + corrigir. Ao final, clique em <strong>"Salvar todos confirmados"</strong>.
         </div>
     """
     cards_html = "".join(cards_html_parts)
@@ -11350,6 +11387,10 @@ def revisar_lote_simulado(sim_id: int, app_id: int, lote_id: str):
         {legenda}
         <form action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/confirmar" method="post">
             <input type="hidden" name="n_questoes" value="{n_total_questoes}">
+            <div style="margin-bottom:10px; display:flex; gap:8px;">
+                <button type="button" id="btn-marcar-todos" class="btn" style="font-size:12px;">☑ Marcar todos</button>
+                <button type="button" id="btn-desmarcar-todos" class="btn" style="font-size:12px;">☐ Desmarcar todos</button>
+            </div>
             {cards_html}
             <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
                 <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
@@ -11359,6 +11400,12 @@ def revisar_lote_simulado(sim_id: int, app_id: int, lote_id: str):
             </div>
         </form>
         <script>
+        document.getElementById('btn-marcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = true);
+        }});
+        document.getElementById('btn-desmarcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = false);
+        }});
         document.addEventListener('click', e => {{
             const btn = e.target.closest('[data-toggle-card]');
             if (!btn) return;
