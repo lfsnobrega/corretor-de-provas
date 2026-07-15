@@ -7824,11 +7824,11 @@ def _extrair_imagens_de_arquivo(file_bytes: bytes, filename: str) -> list:
         try:
             from pdf2image import convert_from_bytes
             import io as _io
-            paginas = convert_from_bytes(file_bytes, dpi=200, fmt="jpeg")
+            paginas = convert_from_bytes(file_bytes, dpi=300, fmt="jpeg")
             resultado = []
             for i, pil_img in enumerate(paginas, start=1):
                 buf = _io.BytesIO()
-                pil_img.save(buf, format="JPEG", quality=90)
+                pil_img.save(buf, format="JPEG", quality=95)
                 resultado.append((f"{filename} — pág. {i}", buf.getvalue()))
             return resultado
         except ImportError:
@@ -8122,6 +8122,12 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
     # Grid de respostas editáveis — adapta conforme tipo
     answers = result["answers"]
     info_by_num = {i["num"]: i for i in (questoes_info or [])}
+    import re as _re_warn2
+    questoes_com_aviso = set()
+    for w in warnings_lista:
+        m = _re_warn2.match(r"Q(\d+)", w)
+        if m:
+            questoes_com_aviso.add(int(m.group(1)))
     tabela_html = ""
     for q_num in range(1, n_questoes + 1):
         info = info_by_num.get(q_num, {"tipo": "multipla_escolha"})
@@ -8129,13 +8135,19 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
         detected = answers.get(q_num)
 
         if tipo_q == "multipla_escolha":
+            if detected is None:
+                row_bg = ' style="background:var(--red-bg);"'
+            elif q_num in questoes_com_aviso:
+                row_bg = ' style="background:var(--orange-bg);"'
+            else:
+                row_bg = ""
             cells = ""
             for letra in ["A", "B", "C", "D"]:
                 checked = " checked" if detected == letra else ""
                 cells += f'<td style="text-align:center; padding:2px;"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value="{letra}"{checked} style="width:auto; margin:0;"> {letra}</label></td>'
             em_branco_checked = " checked" if detected is None else ""
             cells += f'<td style="text-align:center; padding:2px; background:var(--bg-subtle);"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value=""{em_branco_checked} style="width:auto; margin:0;"> ∅</label></td>'
-            tabela_html += f'<tr><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
+            tabela_html += f'<tr{row_bg}><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
         elif tipo_q == "vf":
             n_afirms = info.get("vf_count", 0)
             detected_dict = detected if isinstance(detected, dict) else {}
@@ -8376,8 +8388,364 @@ def _turmas_do_ano(conn, ano_escolaridade: int):
 
 
 # ==========================================
-#  RELATÓRIO DE NOTAS DO SIMULADO
+#  PAINEL GLOBAL DA ESCOLA (visão consolidada por rodada de simulado)
 # ==========================================
+
+def _calcular_idade_referencia(data_nasc_iso, ano_letivo):
+    """Calcula a idade do aluno em 1º de abril do ano letivo (referência padrão usada
+    em análises de distorção idade-série no Brasil). Retorna None se a data for inválida."""
+    if not data_nasc_iso:
+        return None
+    try:
+        nasc = datetime.fromisoformat(data_nasc_iso)
+    except (ValueError, TypeError):
+        return None
+    referencia = date(ano_letivo, 4, 1)
+    idade = referencia.year - nasc.year - ((referencia.month, referencia.day) < (nasc.month, nasc.day))
+    return idade
+
+
+def _coletar_dados_painel_global(conn, trimestre: int, ano: int, dia: int) -> list:
+    """Coleta um registro por (aluno × simulado) de uma rodada (trimestre+ano+dia),
+    cruzando todos os anos de escolaridade e turmas. Cada registro já vem com nota,
+    faixa SAEB, raça, idade/distorção idade-série e acertos por disciplina —
+    pronto pra qualquer agregação (global, por ano, por raça, por turma etc)."""
+    simulados = conn.execute(
+        "SELECT * FROM simulados WHERE trimestre = ? AND ano = ? AND dia = ?", (trimestre, ano, dia)
+    ).fetchall()
+
+    registros = []
+    for sim in simulados:
+        prova = conn.execute("SELECT id FROM provas WHERE titulo LIKE ?", (f"%[SIM-{sim['id']}]%",)).fetchone()
+        if not prova:
+            continue
+        prova_id = prova["id"]
+        total_questoes = conn.execute("SELECT COUNT(*) c FROM prova_questoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
+        if not total_questoes:
+            continue
+
+        qs = conn.execute("""
+            SELECT pq.questao_id, d.nome AS disciplina
+            FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id
+            WHERE pq.prova_id = ?
+        """, (prova_id,)).fetchall()
+        disc_por_questao = {q["questao_id"]: q["disciplina"] for q in qs}
+        total_por_disc = {}
+        for d in disc_por_questao.values():
+            total_por_disc[d] = total_por_disc.get(d, 0) + 1
+
+        aplicacoes = conn.execute("""
+            SELECT a.id, a.turma_id, t.nome AS turma_nome
+            FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.prova_id = ? AND a.titulo LIKE ?
+        """, (prova_id, f"%[SIM-{sim['id']}]%")).fetchall()
+
+        for apl in aplicacoes:
+            entregas = conn.execute("""
+                SELECT e.aluno_id, al.nome, al.raca, al.data_nascimento
+                FROM entregas e JOIN alunos al ON al.id = e.aluno_id
+                WHERE e.aplicacao_id = ?
+            """, (apl["id"],)).fetchall()
+
+            for e in entregas:
+                respostas = conn.execute("""
+                    SELECT r.questao_id, alt.correta
+                    FROM respostas r JOIN alternativas alt ON alt.questao_id = r.questao_id AND alt.letra = r.alternativa_letra
+                    WHERE r.aplicacao_id = ? AND r.aluno_id = ?
+                """, (apl["id"], e["aluno_id"])).fetchall()
+
+                acertos_por_disc = {}
+                total_acertos = 0
+                for r in respostas:
+                    if r["correta"]:
+                        total_acertos += 1
+                        d = disc_por_questao.get(r["questao_id"])
+                        if d:
+                            acertos_por_disc[d] = acertos_por_disc.get(d, 0) + 1
+
+                nota_10 = round(total_acertos / total_questoes * 10, 2)
+                idade = _calcular_idade_referencia(e["data_nascimento"], ano)
+                idade_esperada = (sim["ano_escolaridade"] or 0) + 5
+                defasagem = bool(idade is not None and idade > idade_esperada)
+
+                registros.append({
+                    "aluno_id": e["aluno_id"], "nome": e["nome"],
+                    "raca": e["raca"] or "Não informada",
+                    "turma": apl["turma_nome"], "turma_id": apl["turma_id"],
+                    "aplicacao_id": apl["id"],
+                    "ano_escolaridade": sim["ano_escolaridade"],
+                    "nota_10": nota_10, "faixa": _faixa_saeb(nota_10)["nome"],
+                    "idade": idade, "defasagem_idade_serie": defasagem,
+                    "acertos_por_disc": acertos_por_disc, "total_por_disc": total_por_disc,
+                })
+    return registros
+
+
+def _agregar_faixas(registros):
+    """Retorna dict {faixa_nome: contagem} pra uma lista de registros."""
+    dist = {f["nome"]: 0 for f in FAIXAS_SAEB}
+    for r in registros:
+        dist[r["faixa"]] = dist.get(r["faixa"], 0) + 1
+    return dist
+
+
+def _media_nota(registros):
+    if not registros:
+        return 0.0
+    return round(sum(r["nota_10"] for r in registros) / len(registros), 2)
+
+
+@app.get("/simulados/painel-global", response_class=HTMLResponse)
+def painel_global_seletor():
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    rodadas = conn.execute("""
+        SELECT trimestre, ano, dia, GROUP_CONCAT(DISTINCT ano_escolaridade) AS anos_lista
+        FROM simulados GROUP BY trimestre, ano, dia ORDER BY ano DESC, trimestre DESC, dia
+    """).fetchall()
+    conn.close()
+
+    opcoes = ""
+    for r in rodadas:
+        anos_vals = sorted(set(int(a) for a in (r["anos_lista"] or "").split(",") if a))
+        anos_fmt = ", ".join(_ano_esc_label(a) for a in anos_vals)
+        label = f"{r['trimestre']}º Trimestre {r['ano']} · Dia {r['dia']} ({anos_fmt})"
+        opcoes += f'<option value="{r["trimestre"]}:{r["ano"]}:{r["dia"]}">{label}</option>'
+
+    if not opcoes:
+        content = '<div class="empty">Nenhum simulado cadastrado ainda.</div>'
+        return render_page("Painel Global", content, active="simulados")
+
+    content = f"""
+    <div class="page-header"><h1>🏫 Painel Global da Escola</h1>
+        <p class="subtitle">Visão consolidada de todos os anos de escolaridade e turmas numa mesma rodada de simulado — por raça, distorção idade-série e sugestões de agrupamento por disciplina.</p>
+    </div>
+    <div class="card" style="max-width:520px;">
+        <form method="get" action="/simulados/painel-global/ver">
+            <label>Rodada do simulado
+                <select name="rodada" required style="width:100%;">{opcoes}</select>
+            </label>
+            <button type="submit" class="btn btn-primary" style="margin-top:14px;">Ver painel</button>
+        </form>
+    </div>
+    """
+    return render_page("Painel Global", content, active="simulados")
+
+
+@app.get("/simulados/painel-global/ver", response_class=HTMLResponse)
+def painel_global_ver(rodada: str):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        trimestre_s, ano_s, dia_s = rodada.split(":")
+        trimestre, ano, dia = int(trimestre_s), int(ano_s), int(dia_s)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    conn = get_db()
+    registros = _coletar_dados_painel_global(conn, trimestre, ano, dia)
+    conn.close()
+
+    if not registros:
+        content = '<div class="empty">Nenhum dado encontrado pra essa rodada — verifique se já há entregas escaneadas e confirmadas.</div>'
+        return render_page("Painel Global", content, active="simulados")
+
+    dist_global = _agregar_faixas(registros)
+    media_global = _media_nota(registros)
+    n_total = len(registros)
+    pct_insuf_global = round(dist_global.get("Insuficiente", 0) / n_total * 100, 1) if n_total else 0
+
+    anos = sorted(set(r["ano_escolaridade"] for r in registros if r["ano_escolaridade"]))
+    por_ano = {a: {"media": _media_nota([r for r in registros if r["ano_escolaridade"] == a]),
+                   "n": len([r for r in registros if r["ano_escolaridade"] == a])} for a in anos}
+
+    racas_presentes = sorted(set(r["raca"] for r in registros))
+    por_raca = []
+    for rc in racas_presentes:
+        regs_r = [r for r in registros if r["raca"] == rc]
+        dist_r = _agregar_faixas(regs_r)
+        pct_insuf = round(dist_r.get("Insuficiente", 0) / len(regs_r) * 100, 1) if regs_r else 0
+        por_raca.append({"raca": rc, "n": len(regs_r), "media": _media_nota(regs_r), "pct_insuf": pct_insuf})
+    por_raca.sort(key=lambda x: -x["n"])
+
+    com_idade = [r for r in registros if r["idade"] is not None]
+    sem_defasagem = [r for r in com_idade if not r["defasagem_idade_serie"]]
+    com_defasagem = [r for r in com_idade if r["defasagem_idade_serie"]]
+    n_sem_idade = n_total - len(com_idade)
+
+    turmas_nomes = sorted(set(r["turma"] for r in registros))
+    turma_diagnostico = []
+    for t in turmas_nomes:
+        regs_t = [r for r in registros if r["turma"] == t]
+        disc_acertos, disc_totais = {}, {}
+        for r in regs_t:
+            for d, tot in r["total_por_disc"].items():
+                disc_totais[d] = disc_totais.get(d, 0) + tot
+                disc_acertos[d] = disc_acertos.get(d, 0) + r["acertos_por_disc"].get(d, 0)
+        percentuais = {d: (disc_acertos[d] / disc_totais[d] * 100 if disc_totais[d] else 0) for d in disc_totais}
+        if not percentuais:
+            continue
+        disc_fraca = min(percentuais, key=percentuais.get)
+        pct_fraca = round(percentuais[disc_fraca], 1)
+        sugeridos = []
+        for r in regs_t:
+            tot_d = r["total_por_disc"].get(disc_fraca, 0)
+            ac_d = r["acertos_por_disc"].get(disc_fraca, 0)
+            if tot_d and (ac_d / tot_d) < 0.5:
+                sugeridos.append(r["nome"])
+        turma_diagnostico.append({
+            "turma": t, "disciplina_fraca": disc_fraca, "pct_fraca": pct_fraca,
+            "sugeridos": sugeridos, "n_alunos": len(regs_t),
+        })
+    turma_diagnostico.sort(key=lambda x: x["pct_fraca"])
+
+    # ---- HTML: KPIs + gráfico de distribuição global ----
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_global.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+
+    kpis_html = f"""
+        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{n_total}</div></div>
+            <div class="metric"><div class="metric-label">Nota média da escola</div><div class="metric-value">{media_global}</div></div>
+            <div class="metric" style="border-color:var(--red);"><div class="metric-label">% Insuficiente (geral)</div><div class="metric-value" style="color:var(--red);">{pct_insuf_global}%</div></div>
+        </div>
+    """
+
+    # ---- Por ano de escolaridade ----
+    ano_labels_js = ", ".join(f'"{_ano_esc_label(a)}"' for a in anos)
+    ano_medias_js = ", ".join(str(por_ano[a]["media"]) for a in anos)
+    por_ano_tabela = "".join(
+        f"<tr><td style='padding:6px 10px;'>{_ano_esc_label(a)}</td><td style='padding:6px 10px;text-align:center;'>{por_ano[a]['n']}</td><td style='padding:6px 10px;text-align:center;font-weight:600;'>{por_ano[a]['media']}</td></tr>"
+        for a in anos
+    )
+
+    # ---- Por raça ----
+    raca_labels_js = ", ".join(f'"{r["raca"]}"' for r in por_raca)
+    raca_medias_js = ", ".join(str(r["media"]) for r in por_raca)
+    por_raca_tabela = "".join(
+        f"<tr><td style='padding:6px 10px;'>{r['raca']}</td><td style='padding:6px 10px;text-align:center;'>{r['n']}</td>"
+        f"<td style='padding:6px 10px;text-align:center;font-weight:600;'>{r['media']}</td>"
+        f"<td style='padding:6px 10px;text-align:center;color:var(--red);'>{r['pct_insuf']}%</td></tr>"
+        for r in por_raca
+    )
+
+    # ---- Distorção idade-série ----
+    media_sem_def = _media_nota(sem_defasagem)
+    media_com_def = _media_nota(com_defasagem)
+    pct_insuf_sem_def = round(_agregar_faixas(sem_defasagem).get("Insuficiente", 0) / len(sem_defasagem) * 100, 1) if sem_defasagem else 0
+    pct_insuf_com_def = round(_agregar_faixas(com_defasagem).get("Insuficiente", 0) / len(com_defasagem) * 100, 1) if com_defasagem else 0
+    idade_serie_html = f"""
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px 10px; text-align:left;">Grupo</th><th style="padding:6px 10px;">Alunos</th><th style="padding:6px 10px;">Nota média</th><th style="padding:6px 10px;">% Insuficiente</th></tr></thead>
+            <tbody>
+                <tr><td style="padding:6px 10px;">Idade adequada à série</td><td style="padding:6px 10px;text-align:center;">{len(sem_defasagem)}</td><td style="padding:6px 10px;text-align:center;font-weight:600;">{media_sem_def}</td><td style="padding:6px 10px;text-align:center;">{pct_insuf_sem_def}%</td></tr>
+                <tr style="background:var(--orange-bg);"><td style="padding:6px 10px;">Com distorção idade-série</td><td style="padding:6px 10px;text-align:center;">{len(com_defasagem)}</td><td style="padding:6px 10px;text-align:center;font-weight:600;">{media_com_def}</td><td style="padding:6px 10px;text-align:center;color:var(--red);">{pct_insuf_com_def}%</td></tr>
+            </tbody>
+        </table>
+        <p class="muted-line" style="font-size:11px; margin-top:6px;">{n_sem_idade} aluno(s) sem data de nascimento cadastrada, não entram nessa comparação. Distorção = idade acima da esperada pro ano de escolaridade em 1º de abril de {ano}.</p>
+    """
+
+    # ---- Por turma: disciplina mais fraca + sugestão de agrupamento ----
+    turma_html = ""
+    for i, td in enumerate(turma_diagnostico):
+        lista_id = f"sugeridos-{i}"
+        cor = "var(--red)" if td["pct_fraca"] < 50 else ("var(--orange)" if td["pct_fraca"] < 70 else "var(--green)")
+        alunos_li = "".join(f"<li>{nome}</li>" for nome in td["sugeridos"]) or "<li>Nenhum abaixo de 50% de acerto nessa disciplina.</li>"
+        turma_html += f"""
+        <div style="border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <strong>{td['turma']}</strong>
+                    <span style="font-size:12px; color:var(--text-muted);"> · {td['n_alunos']} alunos avaliados</span>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:13px;">Disciplina mais fraca: <strong>{td['disciplina_fraca']}</strong></div>
+                    <div style="font-size:12px; color:{cor}; font-weight:600;">{td['pct_fraca']}% de acerto nessa disciplina</div>
+                </div>
+            </div>
+            <button type="button" class="btn" style="font-size:11px; padding:3px 10px; margin-top:8px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
+                👥 {len(td['sugeridos'])} aluno(s) sugerido(s) pra reforço nessa disciplina (dentro da própria turma)
+            </button>
+            <ul id="{lista_id}" style="display:none; margin:8px 0 0 18px; font-size:13px;">{alunos_li}</ul>
+        </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🏫 Painel Global da Escola</h1>
+            <p class="subtitle">{trimestre}º Trimestre {ano} · Dia {dia} · {len(anos)} ano(s) de escolaridade · {len(turmas_nomes)} turma(s)</p>
+        </div>
+
+        {kpis_html}
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Distribuição de faixas SAEB — Escola toda</h3>
+            <div style="max-width:380px; height:260px; margin:0 auto; position:relative;">
+                <canvas id="chart-dist-global"></canvas>
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Por ano de escolaridade</h3>
+            <div style="height:260px; position:relative; margin-bottom:14px;">
+                <canvas id="chart-por-ano"></canvas>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px 10px; text-align:left;">Ano</th><th style="padding:6px 10px;">Alunos</th><th style="padding:6px 10px;">Nota média</th></tr></thead>
+                <tbody>{por_ano_tabela}</tbody>
+            </table>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Por raça</h3>
+            <div style="height:260px; position:relative; margin-bottom:14px;">
+                <canvas id="chart-por-raca"></canvas>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px 10px; text-align:left;">Raça</th><th style="padding:6px 10px;">Alunos</th><th style="padding:6px 10px;">Nota média</th><th style="padding:6px 10px;">% Insuficiente</th></tr></thead>
+                <tbody>{por_raca_tabela}</tbody>
+            </table>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Distorção idade-série</h3>
+            {idade_serie_html}
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Por turma — disciplina que mais precisa de atenção</h3>
+            <p class="muted-line" style="font-size:12px;">Ordenado da turma com maior dificuldade pra menor. Clique no botão pra ver os alunos sugeridos pra um grupo de reforço (intra-turma).</p>
+            {turma_html}
+        </div>
+
+        <div style="margin-top:16px;"><a href="/simulados/painel-global" class="btn">← Trocar rodada</a></div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-global'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom' }} }} }}
+            }});
+            new Chart(document.getElementById('chart-por-ano'), {{
+                type: 'bar',
+                data: {{ labels: [{ano_labels_js}], datasets: [{{ label: 'Nota média (de 10)', data: [{ano_medias_js}], backgroundColor: '#0284c7' }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true, max: 10 }} }} }}
+            }});
+            new Chart(document.getElementById('chart-por-raca'), {{
+                type: 'bar',
+                data: {{ labels: [{raca_labels_js}], datasets: [{{ label: 'Nota média (de 10)', data: [{raca_medias_js}], backgroundColor: '#7048E8' }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true, max: 10 }} }} }}
+            }});
+        </script>
+    """
+    return render_page("Painel Global da Escola", content, active="simulados")
+
+
+
 
 def _prova_id_do_simulado(conn, sim_id: int) -> Optional[int]:
     row = conn.execute("SELECT id FROM provas WHERE titulo LIKE ?", (f"%[SIM-{sim_id}]%",)).fetchone()
@@ -8817,7 +9185,7 @@ def listar_simulados(request: Request):
     if not cards:
         cards = '<div class="empty">Nenhum simulado encontrado.</div>'
 
-    btn_relatorio = '<a href="/simulados/relatorio-notas" class="btn">📄 Relatório de Notas</a>' if is_admin else ""
+    btn_relatorio = '<a href="/simulados/relatorio-notas" class="btn">📄 Relatório de Notas</a><a href="/simulados/painel-global" class="btn" style="border-color:var(--accent); color:var(--accent);">🏫 Painel Global</a>' if is_admin else ""
 
     content = f"""
         <div class="page-header" style="display:flex; justify-content:space-between; align-items:center;">
@@ -11203,10 +11571,10 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
             if f.filename and f.filename.lower().endswith(".pdf"):
                 try:
                     from pdf2image import convert_from_bytes
-                    pages = convert_from_bytes(data, dpi=200)
+                    pages = convert_from_bytes(data, dpi=300)
                     for i, page in enumerate(pages):
                         buf = BytesIO()
-                        page.save(buf, format="JPEG", quality=90)
+                        page.save(buf, format="JPEG", quality=95)
                         all_files.append((f"{f.filename}_p{i+1}.jpg", buf.getvalue()))
                 except Exception:
                     all_files.append((f.filename or "arquivo", data))
@@ -11263,6 +11631,13 @@ def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregu
         avisos_html = f'<ul style="margin:8px 0 0 18px; font-size:12px; color:var(--orange);">{items}</ul>'
 
     tabela_html = ""
+    import re as _re_warn
+    questoes_com_aviso = set()
+    for w in warnings_lista:
+        m = _re_warn.match(r"Q(\d+)", w)
+        if m:
+            questoes_com_aviso.add(int(m.group(1)))
+
     for bloco in blocos_info:
         tabela_html += f"""<tr style="background:var(--accent-bg);">
             <td colspan="6" style="padding:5px 8px;font-weight:700;color:var(--accent);">Bloco {bloco['numero']} — {bloco['disciplina_nome']}</td>
@@ -11270,13 +11645,19 @@ def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregu
         for qi in range(bloco["n_questoes"]):
             q_num = bloco["q_inicio"] + qi
             detected = answers.get(q_num)
+            if detected is None:
+                row_bg = ' style="background:var(--red-bg);"'
+            elif q_num in questoes_com_aviso:
+                row_bg = ' style="background:var(--orange-bg);"'
+            else:
+                row_bg = ""
             cells = ""
             for letra in ["A", "B", "C", "D"]:
                 checked = " checked" if detected == letra else ""
                 cells += f'<td style="text-align:center; padding:2px;"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value="{letra}"{checked} style="width:auto; margin:0;"> {letra}</label></td>'
             em_branco = " checked" if detected is None else ""
             cells += f'<td style="text-align:center; padding:2px; background:var(--bg-subtle);"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value=""{em_branco} style="width:auto; margin:0;"> ∅</label></td>'
-            tabela_html += f'<tr><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
+            tabela_html += f'<tr{row_bg}><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
 
     preview_b64 = result.get("preview_base64", "")
     preview_img = f'<img src="data:image/jpeg;base64,{preview_b64}" style="width:100%; border:1px solid var(--border); border-radius:4px;">' if preview_b64 else ""
@@ -11871,38 +12252,47 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
 
 @app.post("/escanear/lote", response_class=HTMLResponse)
 async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
+    """Detecta automaticamente se cada cartão é de prova normal ou simulado (via QR),
+    processa e monta uma tela de revisão única — igual às outras telas de lote, nada é
+    salvo até o professor clicar em confirmar."""
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
 
-    import cv2, numpy as np, re as _re
+    import cv2, numpy as np
 
-    # Expandir PDFs
     all_files = []
     for f in fotos:
         data = await f.read()
         if f.filename and f.filename.lower().endswith(".pdf"):
             try:
                 from pdf2image import convert_from_bytes
-                pages = convert_from_bytes(data, dpi=200)
+                pages = convert_from_bytes(data, dpi=300)
                 for i, page in enumerate(pages):
                     buf = BytesIO()
-                    page.save(buf, format="JPEG", quality=90)
+                    page.save(buf, format="JPEG", quality=95)
                     all_files.append((f"{f.filename}_p{i+1}.jpg", buf.getvalue()))
             except Exception:
                 all_files.append((f.filename or "arquivo", data))
         else:
             all_files.append((f.filename or "foto.jpg", data))
 
-    resultados = []
+    if not all_files:
+        return HTMLResponse(render_page("Lote vazio", '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
+
+    cards_html_parts = []
+    n_ok = n_warn = n_erro = 0
+    alunos_no_lote = set()
+    idx = 0
+
     conn = get_db()
     try:
         for filename, image_bytes in all_files:
-            # Ler QR
             img_arr = np.frombuffer(image_bytes, np.uint8)
             img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
             if img is None:
-                resultados.append({"filename": filename, "success": False, "error": "Imagem inválida."})
+                cards_html_parts.append(_render_card_erro(idx, filename, "Imagem inválida."))
+                n_erro += 1; idx += 1
                 continue
 
             qr_detector = cv2.QRCodeDetector()
@@ -11914,17 +12304,19 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
                 pass
 
             if not qr_data:
-                resultados.append({"filename": filename, "success": False, "error": "QR Code não encontrado."})
+                cards_html_parts.append(_render_card_erro(idx, filename, "QR Code não encontrado."))
+                n_erro += 1; idx += 1
                 continue
 
-            # === PROVA NORMAL ===
+            # === PROVA NORMAL: CR:aluno_id:aplicacao_id ===
             if qr_data.startswith("CR:"):
                 try:
                     parts = qr_data.split(":")
                     aluno_id = int(parts[1])
                     aplicacao_id = int(parts[2])
                 except Exception as e:
-                    resultados.append({"filename": filename, "success": False, "error": f"QR inválido: {e}"})
+                    cards_html_parts.append(_render_card_erro(idx, filename, f"QR inválido: {e}"))
+                    n_erro += 1; idx += 1
                     continue
 
                 apl = conn.execute("""
@@ -11934,7 +12326,8 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
                 """, (aplicacao_id,)).fetchone()
                 aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
                 if not apl or not aluno:
-                    resultados.append({"filename": filename, "success": False, "error": f"Aplicação ou aluno não encontrado."})
+                    cards_html_parts.append(_render_card_erro(idx, filename, "Aplicação ou aluno não encontrado."))
+                    n_erro += 1; idx += 1
                     continue
 
                 questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
@@ -11942,118 +12335,238 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
                 result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_q, filename=filename, questoes_info=questoes_info)
 
                 if not result["success"]:
-                    resultados.append({"filename": filename, "success": False, "error": result.get("error", "Erro")})
+                    cards_html_parts.append(_render_card_erro(idx, filename, result.get("error", "Erro"), result.get("preview_base64")))
+                    n_erro += 1; idx += 1
                     continue
 
-                ja_entregue = conn.execute("SELECT id FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id)).fetchone() is not None
-                answers = result["answers"]
-                conn.execute("DELETE FROM respostas WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id))
-                questoes = conn.execute("SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id=pq.questao_id WHERE pq.prova_id=? ORDER BY pq.ordem", (apl["prova_id"],)).fetchall()
-                for q_num, q in enumerate(questoes, start=1):
-                    letra = answers.get(q_num)
-                    if letra in ("A","B","C","D"):
-                        conn.execute("INSERT INTO respostas (aplicacao_id,aluno_id,questao_id,alternativa_letra) VALUES (?,?,?,?)", (aplicacao_id, aluno_id, q["id"], letra))
-                if ja_entregue:
-                    conn.execute("UPDATE entregas SET finalizada_em=CURRENT_TIMESTAMP WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id))
-                else:
-                    conn.execute("INSERT INTO entregas (aplicacao_id,aluno_id) VALUES (?,?)", (aplicacao_id, aluno_id))
-                conn.commit()
-                resultados.append({"filename": filename, "success": True, "aluno_nome": aluno["nome"],
-                                    "atividade": apl["prova_titulo"], "turma": apl["turma_nome"],
-                                    "n_respondidas": sum(1 for v in answers.values() if v), "n_total": n_q,
-                                    "warnings": result.get("warnings", []), "ja_entregue": ja_entregue})
+                ja_entregue_row = conn.execute("SELECT finalizada_em FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id)).fetchone()
+                duplicata = aluno_id in alunos_no_lote
+                alunos_no_lote.add(aluno_id)
 
-            # === SIMULADO ===
+                if result.get("warnings") or duplicata or ja_entregue_row:
+                    n_warn += 1
+                else:
+                    n_ok += 1
+
+                cards_html_parts.append(
+                    f'<input type="hidden" name="card_{idx}_tipo" value="prova">'
+                    f'<input type="hidden" name="card_{idx}_ctx_aplicacao_id" value="{aplicacao_id}">'
+                    + _render_card_revisao_lote(idx, filename, aluno, result, n_q,
+                                                 ja_entregue=ja_entregue_row, duplicata_lote=duplicata,
+                                                 questoes_info=questoes_info)
+                )
+                idx += 1
+
+            # === SIMULADO: SIM:aluno_id:sim_id ===
             elif qr_data.startswith("SIM:"):
                 try:
                     parts = qr_data.split(":")
                     aluno_id = int(parts[1])
                     sim_id = int(parts[2])
                 except Exception as e:
-                    resultados.append({"filename": filename, "success": False, "error": f"QR simulado inválido: {e}"})
+                    cards_html_parts.append(_render_card_erro(idx, filename, f"QR simulado inválido: {e}"))
+                    n_erro += 1; idx += 1
                     continue
 
                 sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
                 aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
                 if not sim or not aluno:
-                    resultados.append({"filename": filename, "success": False, "error": "Simulado ou aluno não encontrado."})
+                    cards_html_parts.append(_render_card_erro(idx, filename, "Simulado ou aluno não encontrado."))
+                    n_erro += 1; idx += 1
                     continue
 
                 apl_sim = conn.execute("SELECT id FROM aplicacoes WHERE turma_id=? AND titulo LIKE ? ORDER BY id DESC LIMIT 1",
                                        (aluno["turma_id"], f"%[SIM-{sim_id}]%")).fetchone()
                 if not apl_sim:
-                    resultados.append({"filename": filename, "success": False, "error": f"Aplicação do simulado não encontrada para a turma do aluno."})
+                    cards_html_parts.append(_render_card_erro(idx, filename, "Aplicação do simulado não encontrada para a turma do aluno."))
+                    n_erro += 1; idx += 1
                     continue
                 app_id = apl_sim["id"]
 
-                blocos = conn.execute("SELECT b.numero, d.nome AS disciplina_nome FROM simulado_blocos b JOIN disciplinas d ON d.id=b.disciplina_id WHERE b.simulado_id=? ORDER BY b.numero", (sim_id,)).fetchall()
+                blocos = conn.execute(
+                    "SELECT b.numero, d.nome AS disciplina_nome FROM simulado_blocos b JOIN disciplinas d ON d.id=b.disciplina_id WHERE b.simulado_id=? ORDER BY b.numero",
+                    (sim_id,)
+                ).fetchall()
                 blocos_info = []
                 ng = 0
                 for b in blocos:
-                    blocos_info.append({"numero": b["numero"], "disciplina_nome": b["disciplina_nome"], "q_inicio": ng+1, "n_questoes": 10})
+                    blocos_info.append({"numero": b["numero"], "disciplina_nome": b["disciplina_nome"], "q_inicio": ng + 1, "n_questoes": 10})
                     ng += 10
 
                 result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, filename)
                 if not result["success"]:
-                    resultados.append({"filename": filename, "success": False, "error": result.get("error", "Erro")})
+                    cards_html_parts.append(_render_card_erro(idx, filename, result.get("error", "Erro"), result.get("preview_base64")))
+                    n_erro += 1; idx += 1
                     continue
 
-                questoes_ordem = conn.execute("SELECT sq.questao_id FROM simulado_questoes sq JOIN simulado_blocos b ON b.id=sq.bloco_id WHERE b.simulado_id=? ORDER BY b.numero, sq.ordem", (sim_id,)).fetchall()
-                questao_ids = [q["questao_id"] for q in questoes_ordem]
-                ja_entregue = conn.execute("SELECT id FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id)).fetchone() is not None
-                conn.execute("DELETE FROM respostas WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id))
-                for q_num, q_id in enumerate(questao_ids, start=1):
-                    letra = result["answers"].get(q_num)
-                    if letra in ("A","B","C","D"):
-                        conn.execute("INSERT INTO respostas (aplicacao_id,aluno_id,questao_id,alternativa_letra) VALUES (?,?,?,?)", (app_id, aluno_id, q_id, letra))
-                if ja_entregue:
-                    conn.execute("UPDATE entregas SET finalizada_em=CURRENT_TIMESTAMP WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id))
-                else:
-                    conn.execute("INSERT INTO entregas (aplicacao_id,aluno_id) VALUES (?,?)", (app_id, aluno_id))
-                conn.commit()
-                resultados.append({"filename": filename, "success": True, "aluno_nome": aluno["nome"],
-                                    "atividade": sim["nome"], "turma": "", "n_respondidas": result["n_respondidas"],
-                                    "n_total": 40, "warnings": result.get("warnings", []), "ja_entregue": ja_entregue})
-            else:
-                resultados.append({"filename": filename, "success": False, "error": f"QR não reconhecido: '{qr_data[:30]}'"})
+                ja_entregue_row = conn.execute("SELECT id FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id)).fetchone()
+                duplicata = aluno_id in alunos_no_lote
+                alunos_no_lote.add(aluno_id)
 
+                result["aluno_nome"] = aluno["nome"]
+                result["aluno_numero"] = aluno["numero"]
+                result["aluno_codigo"] = aluno["codigo_unico"]
+
+                if result.get("warnings") or duplicata or ja_entregue_row:
+                    n_warn += 1
+                else:
+                    n_ok += 1
+
+                cards_html_parts.append(
+                    f'<input type="hidden" name="card_{idx}_tipo" value="simulado">'
+                    f'<input type="hidden" name="card_{idx}_ctx_aplicacao_id" value="{app_id}">'
+                    f'<input type="hidden" name="card_{idx}_ctx_sim_id" value="{sim_id}">'
+                    + _render_card_revisao_simulado(idx, filename, result, blocos_info,
+                                                     ja_entregue=ja_entregue_row, duplicata_lote=duplicata)
+                )
+                idx += 1
+            else:
+                cards_html_parts.append(_render_card_erro(idx, filename, f"QR não reconhecido: '{qr_data[:30]}'"))
+                n_erro += 1; idx += 1
     finally:
         conn.close()
 
-    n_ok = sum(1 for r in resultados if r["success"])
-    n_err = len(resultados) - n_ok
+    if not cards_html_parts:
+        return HTMLResponse(render_page("Lote vazio", '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
 
-    cards_html = ""
-    for r in resultados:
-        if r["success"]:
-            warn_html = ""
-            if r.get("warnings"):
-                warn_html = f' · <span style="color:var(--orange);">⚠️ {len(r["warnings"])} questão(ões) com dupla marcação</span>'
-            subst = " · ⚠️ substituiu entrega anterior" if r["ja_entregue"] else ""
-            cards_html += f"""
-            <div style="border:1px solid var(--green);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--green-bg);">
-                <div style="font-weight:600;">✅ {r['aluno_nome']}</div>
-                <div style="font-size:12px;color:var(--text-muted);">{r['atividade']} {f"· {r['turma']}" if r['turma'] else ""} · {r['n_respondidas']}/{r['n_total']} lidas{subst}{warn_html}</div>
-            </div>"""
-        else:
-            cards_html += f"""
-            <div style="border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--red-bg);">
-                <div style="font-weight:600;color:var(--red);">❌ {r['filename']}</div>
-                <div style="font-size:12px;">{r['error']}</div>
-            </div>"""
+    resumo = f"""
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{idx}</div></div>
+            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
+            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
+        </div>
+    """
+    legenda = """
+        <div class="tip" style="font-size:12px;">
+            <strong>Como usar:</strong>
+            Essa tela detecta sozinha se cada cartão é de prova normal ou simulado. Cartões em <strong style="color:var(--red);">vermelho</strong> têm questão em branco ou marcação ambígua/dupla. Cartões em <strong style="color:var(--orange);">laranja</strong> têm avisos mais leves. Cartões cinza (erro) NÃO serão salvos. Clique no nome pra expandir e ver a foto + corrigir. Ao final, clique em <strong>"Salvar todos confirmados"</strong> — nada é gravado antes disso.
+        </div>
+    """
+    cards_html = "".join(cards_html_parts)
 
     content = f"""
         <div class="page-header">
-            <h1>📋 Resultado do lote</h1>
-            <p class="subtitle">{n_ok} processados · {n_err} erros · {len(resultados)} total</p>
+            <h1>📋 Revisão do lote (universal)</h1>
+            <p class="subtitle">Provas normais e simulados detectados automaticamente pelo QR Code</p>
         </div>
-        <div style="display:flex;gap:10px;margin-bottom:16px;">
-            <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
-            <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
-        </div>
-        {cards_html}
-        <div style="margin-top:20px;">
-            <a href="/escanear" class="btn btn-primary">📷 Digitalizar mais</a>
-        </div>
+        {resumo}
+        {legenda}
+        <form action="/escanear/lote/confirmar" method="post">
+            <div style="margin-bottom:10px; display:flex; gap:8px;">
+                <button type="button" id="btn-marcar-todos" class="btn" style="font-size:12px;">☑ Marcar todos</button>
+                <button type="button" id="btn-desmarcar-todos" class="btn" style="font-size:12px;">☐ Desmarcar todos</button>
+            </div>
+            {cards_html}
+            <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
+                <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
+                <a href="/escanear" class="btn">📷 Escanear mais</a>
+                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">Cards desmarcados NÃO serão salvos.</span>
+            </div>
+        </form>
+        <script>
+        document.getElementById('btn-marcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = true);
+        }});
+        document.getElementById('btn-desmarcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = false);
+        }});
+        document.addEventListener('click', e => {{
+            const btn = e.target.closest('[data-toggle-card]');
+            if (!btn) return;
+            const card = btn.closest('.lote-card');
+            const body = card.querySelector('.lote-card-body');
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'block';
+            btn.textContent = open ? '▼ Expandir' : '▲ Recolher';
+        }});
+        </script>
     """
-    return HTMLResponse(render_page("Resultado do lote", content, active="aplicacoes"))
+    return HTMLResponse(render_page("Revisão do lote", content, active="aplicacoes"))
+
+
+@app.post("/escanear/lote/confirmar", response_class=HTMLResponse)
+async def confirmar_lote_universal(request: Request):
+    """Salva no banco os cards confirmados do lote universal (mistura de provas e simulados)."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    form = await request.form()
+    confirmados_idx = set()
+    for key in form.keys():
+        if key.startswith("card_") and key.endswith("_confirmar"):
+            try:
+                confirmados_idx.add(int(key.split("_")[1]))
+            except (ValueError, IndexError):
+                continue
+
+    conn = get_db()
+    salvos = []
+    for idx in sorted(confirmados_idx):
+        tipo = form.get(f"card_{idx}_tipo")
+        aluno_id_str = form.get(f"card_{idx}_aluno_id")
+        aplicacao_id_str = form.get(f"card_{idx}_ctx_aplicacao_id")
+        if not tipo or not aluno_id_str or not aplicacao_id_str:
+            continue
+        try:
+            aluno_id = int(aluno_id_str)
+            aplicacao_id = int(aplicacao_id_str)
+        except ValueError:
+            continue
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not aluno:
+            continue
+
+        if tipo == "prova":
+            apl = conn.execute("SELECT prova_id FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
+            if not apl:
+                continue
+            questoes = conn.execute(
+                "SELECT questao_id FROM prova_questoes WHERE prova_id = ? ORDER BY ordem", (apl["prova_id"],)
+            ).fetchall()
+        else:
+            sim_id_str = form.get(f"card_{idx}_ctx_sim_id")
+            if not sim_id_str:
+                continue
+            questoes = conn.execute("""
+                SELECT sq.questao_id FROM simulado_questoes sq
+                JOIN simulado_blocos b ON b.id = sq.bloco_id
+                WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+            """, (int(sim_id_str),)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes]
+
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
+        n_ok = 0
+        for q_num, q_id in enumerate(questao_ids, start=1):
+            letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
+            if letra in ("A", "B", "C", "D"):
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                    (aplicacao_id, aluno_id, q_id, letra)
+                )
+                n_ok += 1
+
+        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id)).fetchone()
+        if not existente:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (aplicacao_id, aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
+        salvos.append({"nome": aluno["nome"], "n_respondidas": n_ok, "total": len(questao_ids)})
+
+    conn.commit()
+    conn.close()
+
+    linhas = "".join(
+        f"<tr><td style='padding:5px 8px;'>{s['nome']}</td><td style='padding:5px 8px;text-align:center;'>{s['n_respondidas']}/{s['total']}</td></tr>"
+        for s in salvos
+    )
+    content = f"""
+        <div class="page-header"><h1>✅ Lote salvo</h1><p class="subtitle">{len(salvos)} cartão(ões) confirmado(s) e salvo(s)</p></div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:5px 8px;text-align:left;">Aluno</th><th style="padding:5px 8px;">Respondidas</th></tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+        <div style="margin-top:20px;"><a href="/escanear" class="btn btn-primary">📷 Escanear mais</a></div>
+    """
+    return HTMLResponse(render_page("Lote salvo", content, active="aplicacoes"))
