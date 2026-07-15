@@ -663,9 +663,10 @@ def _novo_lote_escaneamento(tipo: str, contexto: dict, arquivos: list) -> str:
     return lote_id
 
 
-async def _persistir_item_simulado(job: dict, item: dict):
-    """Para simulados, cada cartão já é salvo no banco assim que termina de ser lido
-    (mesmo comportamento que o fluxo síncrono anterior tinha)."""
+async def _enriquecer_item_simulado(job: dict, item: dict):
+    """Para simulados: anota nome do aluno, se já tem entrega e se é duplicata dentro do
+    próprio lote — SEM gravar nada no banco ainda. A gravação só acontece quando o
+    professor revisa e confirma (igual já funciona na prova normal)."""
     resultado = item["resultado"]
     ctx = job["contexto"]
     if not resultado or not resultado.get("success"):
@@ -679,29 +680,14 @@ async def _persistir_item_simulado(job: dict, item: dict):
                                   "filename": item["filename"]}
             return
         item["resultado"]["aluno_nome"] = aluno["nome"]
+        item["resultado"]["aluno_numero"] = aluno["numero"]
+        item["resultado"]["aluno_codigo"] = aluno["codigo_unico"]
         item["resultado"]["ja_entregue"] = conn.execute(
             "SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
             (ctx["app_id"], aluno_id)
         ).fetchone() is not None
         item["resultado"]["duplicado"] = aluno_id in ctx.setdefault("_alunos_no_lote", set())
         ctx["_alunos_no_lote"].add(aluno_id)
-
-        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (ctx["app_id"], aluno_id))
-        for q_num, q_id in enumerate(ctx["questao_ids"], start=1):
-            letra = resultado["answers"].get(q_num)
-            if letra in ("A", "B", "C", "D"):
-                conn.execute(
-                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
-                    (ctx["app_id"], aluno_id, q_id, letra)
-                )
-        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
-                                  (ctx["app_id"], aluno_id)).fetchone()
-        if not existente:
-            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (ctx["app_id"], aluno_id))
-        else:
-            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?",
-                          (ctx["app_id"], aluno_id))
-        conn.commit()
     finally:
         conn.close()
 
@@ -732,7 +718,7 @@ async def _worker_escaneamento(worker_num: int):
                 item["resultado"] = await asyncio.to_thread(
                     _processar_cartao_simulado, item["bytes"], ctx["blocos_info"], item["filename"] or ""
                 )
-                await _persistir_item_simulado(job, item)
+                await _enriquecer_item_simulado(job, item)
         except Exception as e:
             item["resultado"] = {"success": False, "error": f"Erro inesperado no processamento: {e}",
                                   "filename": item["filename"]}
@@ -11016,9 +11002,92 @@ async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFil
 
 
 @app.get("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/{lote_id}/revisar", response_class=HTMLResponse)
+def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregue=None, duplicata_lote=False):
+    """Card visual de um cartão de simulado lido com sucesso, com campos editáveis
+    agrupados por bloco/disciplina, no mesmo padrão do lote de prova normal."""
+    nome_seguro = (filename or f"foto_{idx+1}").replace("<", "&lt;")
+    aluno_id = result["aluno_id"]
+    answers = result.get("answers", {})
+
+    tem_avisos = bool(result.get("warnings")) or duplicata_lote or ja_entregue
+    if tem_avisos:
+        border_color, bg, status_icon, status_color = "var(--orange)", "var(--orange-bg)", "⚠", "var(--orange)"
+        body_default_display, toggle_label = "block", "▲ Recolher"
+    else:
+        border_color, bg, status_icon, status_color = "var(--green)", "var(--green-bg)", "✓", "var(--green)"
+        body_default_display, toggle_label = "none", "▼ Expandir"
+
+    avisos = []
+    if duplicata_lote:
+        avisos.append("⚠ Foto repetida no lote: já apareceu um cartão deste aluno antes (a última marcação prevalece).")
+    if ja_entregue:
+        avisos.append("⚠ Aluno já tem entrega registrada. Confirmar irá sobrescrever as respostas anteriores.")
+    avisos.extend(result.get("warnings", []) or [])
+    avisos_html = ""
+    if avisos:
+        items = "".join(f"<li>{w}</li>" for w in avisos)
+        avisos_html = f'<ul style="margin:8px 0 0 18px; font-size:12px; color:var(--orange);">{items}</ul>'
+
+    tabela_html = ""
+    for bloco in blocos_info:
+        tabela_html += f"""<tr style="background:var(--accent-bg);">
+            <td colspan="6" style="padding:5px 8px;font-weight:700;color:var(--accent);">Bloco {bloco['numero']} — {bloco['disciplina_nome']}</td>
+        </tr>"""
+        for qi in range(bloco["n_questoes"]):
+            q_num = bloco["q_inicio"] + qi
+            detected = answers.get(q_num)
+            cells = ""
+            for letra in ["A", "B", "C", "D"]:
+                checked = " checked" if detected == letra else ""
+                cells += f'<td style="text-align:center; padding:2px;"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value="{letra}"{checked} style="width:auto; margin:0;"> {letra}</label></td>'
+            em_branco = " checked" if detected is None else ""
+            cells += f'<td style="text-align:center; padding:2px; background:var(--bg-subtle);"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value=""{em_branco} style="width:auto; margin:0;"> ∅</label></td>'
+            tabela_html += f'<tr><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
+
+    preview_b64 = result.get("preview_base64", "")
+    preview_img = f'<img src="data:image/jpeg;base64,{preview_b64}" style="width:100%; border:1px solid var(--border); border-radius:4px;">' if preview_b64 else ""
+
+    return f"""
+    <div class="lote-card" style="border:2px solid {border_color}; border-radius:8px; padding:14px; margin-bottom:10px; background:{bg};">
+        <input type="hidden" name="card_{idx}_aluno_id" value="{aluno_id}">
+
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+            <div style="flex:1; min-width:0;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin:0; font-size:15px;">
+                    <input type="checkbox" name="card_{idx}_confirmar" value="1" checked style="width:auto; margin:0;">
+                    <span style="color:{status_color}; font-size:18px;">{status_icon}</span>
+                    <strong>{result.get('aluno_nome', '?')}</strong>
+                    <span style="font-size:12px; color:var(--text-muted);">· Nº {result.get('aluno_numero') or '—'} · {result.get('aluno_codigo', '')} · foto: {nome_seguro}</span>
+                </label>
+            </div>
+            <button type="button" data-toggle-card class="btn" style="padding:4px 10px; font-size:12px; flex-shrink:0;">{toggle_label}</button>
+        </div>
+
+        {avisos_html}
+
+        <div class="lote-card-body" style="display:{body_default_display}; margin-top:12px;">
+            <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:14px;">
+                <div>
+                    <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Imagem processada</p>
+                    {preview_img}
+                </div>
+                <div>
+                    <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Respostas (corrija se necessário)</p>
+                    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                        <thead><tr style="background:var(--bg-subtle);"><th style="padding:3px;">Q</th><th style="padding:3px;">A</th><th style="padding:3px;">B</th><th style="padding:3px;">C</th><th style="padding:3px;">D</th><th style="padding:3px;">∅</th></tr></thead>
+                        <tbody>{tabela_html}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+
+
+@app.get("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/{lote_id}/revisar", response_class=HTMLResponse)
 def revisar_lote_simulado(sim_id: int, app_id: int, lote_id: str):
-    """Depois que o lote terminou de processar (e já foi salvo no banco automaticamente,
-    cartão por cartão), mostra o resultado final."""
+    """Depois que o lote termina de processar em segundo plano, mostra a tela de revisão
+    editável (igual à prova normal) — nada é salvo até o professor clicar em confirmar."""
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
@@ -11034,51 +11103,157 @@ def revisar_lote_simulado(sim_id: int, app_id: int, lote_id: str):
     if not sim or not apl:
         return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
 
-    resultados = []
-    for item in job["itens"]:
-        r = item["resultado"] or {"success": False, "error": "Sem resultado."}
+    blocos_info = job["contexto"]["blocos_info"]
+    n_total_questoes = sum(b["n_questoes"] for b in blocos_info)
+
+    cards_html_parts = []
+    n_ok = n_warn = n_erro = 0
+    for idx, item in enumerate(job["itens"]):
+        r = item["resultado"] or {"success": False, "error": "Sem resultado.", "filename": item["filename"]}
         r.setdefault("filename", item["filename"])
-        resultados.append(r)
-
-    n_ok = sum(1 for r in resultados if r.get("success"))
-    n_err = len(resultados) - n_ok
-
-    cards_html = ""
-    for r in resultados:
-        if r.get("success"):
-            warn = (" · ⚠️ substituiu entrega anterior" if r.get("ja_entregue") else "") + (" · ⚠️ duplicado" if r.get("duplicado") else "")
-            preview_b64 = r.get("preview_base64", "")
-            preview = f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:100px;border-radius:4px;">' if preview_b64 else ""
-            cards_html += f"""
-            <div style="border:1px solid var(--green);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--green-bg);display:flex;justify-content:space-between;align-items:center;">
-                <div><div style="font-weight:600;">✅ {r.get('aluno_nome', '?')}</div>
-                <div style="font-size:12px;color:var(--text-muted);">{r['filename']} · {r.get('n_respondidas', '?')}/40 lidas{warn}</div></div>
-                {preview}
-            </div>"""
+        if not r.get("success"):
+            n_erro += 1
+            cards_html_parts.append(_render_card_erro(idx, r["filename"], r.get("error", "Erro desconhecido"), r.get("preview_base64")))
         else:
-            cards_html += f"""
-            <div style="border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:8px;background:var(--red-bg);">
-                <div style="font-weight:600;color:var(--red);">❌ {r['filename']}</div>
-                <div style="font-size:12px;">{r.get('error', 'Erro desconhecido')}</div>
-            </div>"""
+            if r.get("warnings") or r.get("duplicado") or r.get("ja_entregue"):
+                n_warn += 1
+            else:
+                n_ok += 1
+            cards_html_parts.append(_render_card_revisao_simulado(
+                idx, r["filename"], r, blocos_info,
+                ja_entregue=r.get("ja_entregue"), duplicata_lote=r.get("duplicado")
+            ))
+
+    del FILAS_ESCANEAMENTO[lote_id]  # já consumido, libera memória
+
+    if not cards_html_parts:
+        return HTMLResponse(render_page("Lote vazio", '<div class="empty">Nenhuma foto foi processada.</div>', active="simulados"))
+
+    resumo = f"""
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{len(job["itens"])}</div></div>
+            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
+            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
+        </div>
+    """
+    legenda = """
+        <div class="tip" style="font-size:12px;">
+            <strong>Como usar:</strong>
+            Cartões em amarelo têm avisos (marca fraca, dupla marcação, entrega repetida) — confira a foto ao lado e corrija clicando na letra certa. Cartões em vermelho não serão salvos. Ao final, clique em <strong>"Salvar todos confirmados"</strong>.
+        </div>
+    """
+    cards_html = "".join(cards_html_parts)
 
     content = f"""
         <div class="page-header">
-            <h1>📋 Resultado do lote — {apl['turma_nome']}</h1>
-            <p class="subtitle">{sim['nome']} · {n_ok} processados · {n_err} erros</p>
+            <h1>📋 Revisão do lote — {apl['turma_nome']}</h1>
+            <p class="subtitle">{sim['nome']}</p>
         </div>
-        <div style="display:flex;gap:10px;margin-bottom:16px;">
-            <div class="metric"><div class="metric-label">Processados</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
-            <div class="metric"><div class="metric-label">Erros</div><div class="metric-value" style="color:var(--red);">{n_err}</div></div>
-        </div>
-        {cards_html}
+        {resumo}
+        {legenda}
+        <form action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/confirmar" method="post">
+            <input type="hidden" name="n_questoes" value="{n_total_questoes}">
+            {cards_html}
+            <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
+                <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
+                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn">📷 Escanear mais</a>
+                <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
+                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">Cards desmarcados NÃO serão salvos.</span>
+            </div>
+        </form>
+        <script>
+        document.addEventListener('click', e => {{
+            const btn = e.target.closest('[data-toggle-card]');
+            if (!btn) return;
+            const card = btn.closest('.lote-card');
+            const body = card.querySelector('.lote-card-body');
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'block';
+            btn.textContent = open ? '▼ Expandir' : '▲ Recolher';
+        }});
+        </script>
+    """
+    return HTMLResponse(render_page("Revisão do lote", content, active="simulados"))
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/confirmar", response_class=HTMLResponse)
+async def confirmar_lote_simulado(sim_id: int, app_id: int, request: Request):
+    """Salva no banco todos os cards confirmados (checkbox marcado) do lote de simulado."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    form = await request.form()
+
+    conn = get_db()
+    apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ?", (app_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+    questoes_ordem = conn.execute("""
+        SELECT sq.questao_id FROM simulado_questoes sq
+        JOIN simulado_blocos b ON b.id = sq.bloco_id
+        WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+    """, (sim_id,)).fetchall()
+    questao_ids = [q["questao_id"] for q in questoes_ordem]
+
+    confirmados_idx = set()
+    for key in form.keys():
+        if key.startswith("card_") and key.endswith("_confirmar"):
+            try:
+                confirmados_idx.add(int(key.split("_")[1]))
+            except (ValueError, IndexError):
+                continue
+
+    salvos = []
+    for idx in sorted(confirmados_idx):
+        aluno_id_str = form.get(f"card_{idx}_aluno_id")
+        if not aluno_id_str:
+            continue
+        try:
+            aluno_id = int(aluno_id_str)
+        except ValueError:
+            continue
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ? AND turma_id = ?", (aluno_id, apl["turma_id"])).fetchone()
+        if not aluno:
+            continue
+
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+        n_ok = 0
+        for q_num, q_id in enumerate(questao_ids, start=1):
+            letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
+            if letra in ("A", "B", "C", "D"):
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                    (app_id, aluno_id, q_id, letra)
+                )
+                n_ok += 1
+
+        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone()
+        if not existente:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (app_id, aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+        salvos.append({"nome": aluno["nome"], "n_respondidas": n_ok})
+
+    conn.commit()
+    conn.close()
+
+    linhas = "".join(f"<tr><td style='padding:5px 8px;'>{s['nome']}</td><td style='padding:5px 8px;text-align:center;'>{s['n_respondidas']}/{len(questao_ids)}</td></tr>" for s in salvos)
+    content = f"""
+        <div class="page-header"><h1>✅ Lote salvo</h1><p class="subtitle">{len(salvos)} cartão(ões) confirmado(s) e salvo(s)</p></div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:5px 8px;text-align:left;">Aluno</th><th style="padding:5px 8px;">Respondidas</th></tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
         <div style="display:flex;gap:10px;margin-top:20px;">
             <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Escanear mais</a>
             <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
         </div>
     """
-    del FILAS_ESCANEAMENTO[lote_id]  # já consumido, libera memória
-    return HTMLResponse(render_page("Resultado do lote", content, active="simulados"))
+    return HTMLResponse(render_page("Lote salvo", content, active="simulados"))
 
 
 
