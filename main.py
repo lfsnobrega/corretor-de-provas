@@ -10520,6 +10520,64 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
     bolhas = _calcular_layout_cartao_simulado(blocos_info)
     bubble_r_px = int(3.0 / 210 * canon_w)
 
+    # === CALIBRAÇÃO AUTOMÁTICA DA POSIÇÃO REAL DAS LINHAS ===
+    # A posição das bolhas calculada por fórmula (mm) pode não bater exatamente com o
+    # cartão impresso de verdade (variações de impressão/digitalização). Por isso, em vez
+    # de confiar cegamente na fórmula, detectamos a posição REAL das linhas de cada bloco
+    # via visão computacional (círculos impressos, coluna A), e corrigimos a leitura pra
+    # usar essa posição real. Se a detecção falhar, cai no cálculo por fórmula (mm) normal.
+    def _calibrar_linhas_bloco(x_col_a_px, y_min_esperado, y_max_esperado, n_questoes):
+        pad = 45
+        y0 = max(0, y_min_esperado - pad)
+        y1 = min(canon_h, y_max_esperado + pad)
+        x0 = max(0, x_col_a_px - 22)
+        x1 = min(canon_w, x_col_a_px + 22)
+        region = warped_gray[y0:y1, x0:x1]
+        if region.size == 0 or n_questoes < 2:
+            return None
+        region_blur = cv2.medianBlur(region, 5)
+        espac_esperado = (y_max_esperado - y_min_esperado) / (n_questoes - 1)
+        try:
+            circles = cv2.HoughCircles(
+                region_blur, cv2.HOUGH_GRADIENT, dp=1,
+                minDist=max(15, int(espac_esperado * 0.6)),
+                param1=50, param2=15, minRadius=8, maxRadius=22
+            )
+        except Exception:
+            return None
+        if circles is None:
+            return None
+        ys = sorted(float(c[1] + y0) for c in circles[0])
+        agrupadas = []
+        for y in ys:
+            if not agrupadas or y - agrupadas[-1] > 15:
+                agrupadas.append(y)
+        # Exige detecção de quase todas as linhas pra confiar na calibração
+        if len(agrupadas) < n_questoes - 2:
+            return None
+        espacamento = (agrupadas[-1] - agrupadas[0]) / (len(agrupadas) - 1)
+        if espacamento <= 0:
+            return None
+        y_primeira = agrupadas[0]
+        return [int(round(y_primeira + i * espacamento)) for i in range(n_questoes)]
+
+    bolhas_por_bloco = {}
+    for b in bolhas:
+        bolhas_por_bloco.setdefault(b["bloco_num"], []).append(b)
+
+    calibracao_y_por_q = {}  # q_num -> y_px calibrado
+    for bloco_num, itens in bolhas_por_bloco.items():
+        q_nums_bloco = sorted(set(it["q_num"] for it in itens))
+        col_a = [it for it in itens if it["label"] == "A"]
+        if not col_a or not q_nums_bloco:
+            continue
+        x_col_a_px = mm_x(col_a[0]["x_mm"])
+        y_vals = [mm_y(it["y_mm"]) for it in col_a]
+        y_calibrado = _calibrar_linhas_bloco(x_col_a_px, min(y_vals), max(y_vals), len(q_nums_bloco))
+        if y_calibrado:
+            for q_num, y_cal in zip(q_nums_bloco, y_calibrado):
+                calibracao_y_por_q[q_num] = y_cal
+
     # Thresholds alinhados com os já usados (e validados) no OMR de prova normal
     # (ver _processar_cartao_resposta, modo "normal"): mean<110 escuro confiante,
     # mean<140 ainda conta (com aviso), mean>180 considerado em branco.
@@ -10534,7 +10592,7 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
 
     for b in bolhas:
         bx = mm_x(b["x_mm"])
-        by = mm_y(b["y_mm"])
+        by = calibracao_y_por_q.get(b["q_num"], mm_y(b["y_mm"]))
         q = b["q_num"]
         x1 = max(0, bx - bubble_r_px)
         x2 = min(canon_w, bx + bubble_r_px)
