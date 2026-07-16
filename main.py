@@ -6675,6 +6675,17 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
     if len(pontos_set) < 4:
         return {"success": False, "error": "Marcadores de canto sobrepostos detectados. A folha pode estar parcialmente fora do enquadramento."}
 
+    # Validação geométrica: os 4 pontos precisam formar um quadrilátero que cobre quase
+    # a folha inteira. Sem isso, um marcador ausente (ex: foto cortada antes da margem de
+    # baixo) pode "casar" com um blob errado relativamente próximo, gerando leitura
+    # completamente errada em vez de um erro claro.
+    largura_topo = tr[0] - tl[0]
+    largura_base = br[0] - bl[0]
+    altura_esq = bl[1] - tl[1]
+    altura_dir = br[1] - tr[1]
+    if min(largura_topo, largura_base) < w * 0.6 or min(altura_esq, altura_dir) < h * 0.6:
+        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo plausível — a foto provavelmente não inclui a folha inteira (confira principalmente a margem de baixo)."}
+
     # === STEP 2: Perspective transform to canonical A4 ===
     # Canonical A4 at ~144 DPI: 1191 x 1684 px
     canon_w, canon_h = 1191, 1684
@@ -11256,6 +11267,17 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
     tl, tr, bl, br = closest(0,0), closest(w,0), closest(0,h), closest(w,h)
     if not all([tl, tr, bl, br]) or len({tl,tr,bl,br}) < 4:
         return {"success": False, "error": "Não foi possível identificar os 4 marcadores de canto."}
+
+    # Validação geométrica: os 4 pontos precisam formar um quadrilátero que realmente
+    # cobre quase a folha inteira. Sem isso, um marcador ausente (ex: foto cortada antes
+    # da margem de baixo) pode "casar" com um blob errado que está só relativamente perto,
+    # gerando uma leitura completamente errada em vez de um erro claro.
+    largura_topo = tr[0] - tl[0]
+    largura_base = br[0] - bl[0]
+    altura_esq = bl[1] - tl[1]
+    altura_dir = br[1] - tr[1]
+    if min(largura_topo, largura_base) < w * 0.6 or min(altura_esq, altura_dir) < h * 0.6:
+        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo plausível — a foto provavelmente não inclui a folha inteira (confira principalmente a margem de baixo)."}
 
     # Perspective transform → A4 canônico 1191×1684px
     canon_w, canon_h = 1191, 1684
