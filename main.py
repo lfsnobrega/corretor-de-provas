@@ -496,11 +496,17 @@ def init_db():
         conn.execute("ALTER TABLE questoes ADD COLUMN tipo TEXT DEFAULT 'multipla_escolha'")
         # Questões antigas viram múltipla escolha (que era o único tipo até agora)
         conn.execute("UPDATE questoes SET tipo = 'multipla_escolha' WHERE tipo IS NULL")
+    if "anulada" not in cols_q:
+        conn.execute("ALTER TABLE questoes ADD COLUMN anulada INTEGER DEFAULT 0")
+    if "gabarito_original" not in cols_q:
+        conn.execute("ALTER TABLE questoes ADD COLUMN gabarito_original TEXT")
 
     # Migração: respostas ganham coluna pra V/F e Associação (JSON)
     cols_resp = {row[1] for row in conn.execute("PRAGMA table_info(respostas)").fetchall()}
     if "dados_extra" not in cols_resp:
         conn.execute("ALTER TABLE respostas ADD COLUMN dados_extra TEXT")
+    if "credito_anulacao" not in cols_resp:
+        conn.execute("ALTER TABLE respostas ADD COLUMN credito_anulacao INTEGER DEFAULT 0")
 
     # Tabelas pra V ou F
     conn.execute("""CREATE TABLE IF NOT EXISTS vf_afirmacoes (
@@ -1362,12 +1368,31 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
     cabecalho = f'Questão {numero} · {q["disciplina_nome"]}' if numero else q["disciplina_nome"]
     ano_badge = f' · <span style="color:var(--text-muted); font-weight:400;">{ano_q}</span>' if ano_q else ""
     autor_badge_inline = f' · <span class="badge" style="background:var(--purple-bg); color:var(--purple); font-size:10px;">Por: {autor_nome}</span>' if autor_nome else ""
+    anulada = bool(q["anulada"]) if "anulada" in q.keys() else False
+    anulada_badge = ' · <span class="badge" style="background:var(--red-bg); color:var(--red); font-size:10px;">🚫 ANULADA — todas as alternativas contam como corretas</span>' if anulada else ""
 
     acoes_html = ""
     if mostrar_acoes and pode_editar:
+        botao_anular = ""
+        if tipo_q == "multipla_escolha":
+            if anulada:
+                botao_anular = (
+                    f'<form action="/questoes/{q["id"]}/anular" method="post" style="margin:0;" '
+                    f'onsubmit="return confirm(\'Reativar o gabarito original desta questão?\');">'
+                    f'<button type="submit" class="btn">✅ Reativar gabarito</button>'
+                    f'</form>'
+                )
+            else:
+                botao_anular = (
+                    f'<form action="/questoes/{q["id"]}/anular" method="post" style="margin:0;" '
+                    f'onsubmit="return confirm(\'Anular esta questão? Todas as alternativas passam a contar como corretas para todos os alunos, em todas as provas/simulados que já usam essa questão.\');">'
+                    f'<button type="submit" class="btn" style="background:var(--orange); color:white; border-color:var(--orange);">🚫 Anular questão</button>'
+                    f'</form>'
+                )
         acoes_html = (
             f'<div class="page-actions" style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">'
             f'<a href="/questoes/{q["id"]}/editar" class="btn">Editar</a>'
+            f'{botao_anular}'
             f'<form action="/questoes/{q["id"]}/deletar" method="post" style="margin:0;" '
             f'onsubmit="return confirm(\'Excluir esta questão? Se ela for usada em alguma prova, a exclusão será bloqueada.\');">'
             f'<button type="submit" class="btn" style="background:var(--red); color:white; border-color:var(--red);">Excluir</button>'
@@ -1392,7 +1417,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'<div class="question questao-card-preview" style="margin-bottom:8px; padding:12px 16px;">'
             f'<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">'
             f'<div style="flex:1; min-width:0;">'
-            f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{tipo_badge}{autor_badge_inline}{habs_inline}</div>'
+            f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{tipo_badge}{autor_badge_inline}{anulada_badge}{habs_inline}</div>'
             f'<div style="margin-top:6px; color:var(--text); font-size:14px; line-height:1.5;">{preview}</div>'
             f'</div>'
             f'<button type="button" onclick="toggleQuestao({q["id"]})" id="q-toggle-{q["id"]}" '
@@ -1408,7 +1433,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'</div>'
         )
 
-    return f'<div class="question questao-card-preview"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
+    return f'<div class="question questao-card-preview"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}{anulada_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -5283,6 +5308,90 @@ def deletar_questao(id: int, request: Request):
     conn.commit()
     conn.close()
     return RedirectResponse("/questoes", status_code=303)
+
+
+@app.post("/questoes/{id}/anular", response_class=HTMLResponse)
+def anular_questao(id: int, request: Request):
+    """Anula uma questão de múltipla escolha: todas as alternativas passam a valer como
+    corretas — quem marcou qualquer letra passa a acertar automaticamente (porque todos
+    os relatórios já leem 'alternativas.correta' pra decidir acerto) — e quem deixou a
+    questão em branco também ganha o ponto (já que o erro foi de cadastro da questão,
+    não do aluno): criamos uma resposta de crédito pra esses alunos, marcada com
+    credito_anulacao=1 pra poder ser desfeita direitinho se a questão for reativada.
+    Chamar de novo nessa mesma questão reativa o gabarito original."""
+    prof = get_current_professor(request)
+    conn = get_db()
+    q = conn.execute("SELECT * FROM questoes WHERE id = ?", (id,)).fetchone()
+    if not q:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_questao(prof, q["criada_por_professor_id"]):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem permissão",
+            '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
+            '<p>Apenas o autor da questão ou o administrador podem anulá-la.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ), status_code=403)
+
+    tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+    if tipo_q != "multipla_escolha":
+        conn.close()
+        return HTMLResponse(render_page(
+            "Não é possível anular",
+            '<div class="page-header"><h1>⚠ Não é possível anular</h1></div>'
+            '<div style="background:var(--orange-bg); color:var(--orange); border:1px solid var(--orange); padding:16px; border-radius:6px;">'
+            '<p>Anulação automática (todas as alternativas viram corretas) só está disponível pra questões de múltipla escolha por enquanto.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ))
+
+    if not q["anulada"]:
+        # Anular: guarda qual letra era a correta original, depois marca todas como corretas
+        correta_atual = conn.execute("SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1", (id,)).fetchone()
+        letra_original = correta_atual["letra"] if correta_atual else None
+        conn.execute("UPDATE questoes SET anulada = 1, gabarito_original = ? WHERE id = ?", (letra_original, id))
+        conn.execute("UPDATE alternativas SET correta = 1 WHERE questao_id = ?", (id,))
+
+        # Dar o ponto também pra quem deixou em branco: toda aplicação que usa essa
+        # questão (prova normal OU simulado — ambos passam pela mesma prova_questoes),
+        # todo aluno com entrega mas sem resposta registrada pra ela, ganha uma
+        # resposta de crédito (marcada como credito_anulacao=1, pra poder desfazer).
+        letra_credito = letra_original or "A"
+        aplicacoes_usando = conn.execute("""
+            SELECT DISTINCT a.id AS aplicacao_id
+            FROM prova_questoes pq JOIN aplicacoes a ON a.prova_id = pq.prova_id
+            WHERE pq.questao_id = ?
+        """, (id,)).fetchall()
+        n_creditados = 0
+        for apl in aplicacoes_usando:
+            sem_resposta = conn.execute("""
+                SELECT e.aluno_id FROM entregas e
+                WHERE e.aplicacao_id = ? AND e.aluno_id NOT IN (
+                    SELECT aluno_id FROM respostas WHERE aplicacao_id = ? AND questao_id = ?
+                )
+            """, (apl["aplicacao_id"], apl["aplicacao_id"], id)).fetchall()
+            for al in sem_resposta:
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra, credito_anulacao) VALUES (?,?,?,?,1)",
+                    (apl["aplicacao_id"], al["aluno_id"], id, letra_credito)
+                )
+                n_creditados += 1
+    else:
+        # Reativar: remove os créditos sintéticos dados a quem tinha deixado em branco,
+        # e restaura o gabarito original nas alternativas.
+        conn.execute("DELETE FROM respostas WHERE questao_id = ? AND credito_anulacao = 1", (id,))
+        conn.execute("UPDATE alternativas SET correta = 0 WHERE questao_id = ?", (id,))
+        if q["gabarito_original"]:
+            conn.execute("UPDATE alternativas SET correta = 1 WHERE questao_id = ? AND letra = ?", (id, q["gabarito_original"]))
+        conn.execute("UPDATE questoes SET anulada = 0, gabarito_original = NULL WHERE id = ?", (id,))
+
+    conn.commit()
+    conn.close()
+    referer = request.headers.get("referer", "/questoes")
+    return RedirectResponse(referer, status_code=303)
 
 
 @app.post("/textos_apoio/{id}/deletar")
