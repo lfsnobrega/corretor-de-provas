@@ -11477,14 +11477,40 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
         for y in ys:
             if not agrupadas or y - agrupadas[-1] > 15:
                 agrupadas.append(y)
-        # Exige detecção de quase todas as linhas pra confiar na calibração
-        if len(agrupadas) < n_questoes - 2:
+
+        # Posições esperadas por fórmula, uma por linha (0..n_questoes-1).
+        esperadas = [y_min_esperado + i * espac_esperado for i in range(n_questoes)]
+
+        # Casa cada círculo DETECTADO com a linha esperada mais próxima — em vez de
+        # assumir que o primeiro círculo encontrado É a linha 1. Isso importa porque,
+        # se a bolha da primeira ou última questão do bloco não for detectada (comum
+        # perto do título/divisória entre blocos), a suposição antiga deslocava TODO o
+        # bloco em cascata — o efeito prático era perder a leitura bem nas últimas
+        # questões de cada bloco. Com o casamento por proximidade, uma linha não
+        # detectada some sozinha (cai pro valor da fórmula só naquela linha), sem
+        # arrastar as outras.
+        tolerancia = espac_esperado * 0.5
+        resultado = [int(round(v)) for v in esperadas]  # fallback linha a linha: fórmula pura
+        usados = set()
+        for y_det in agrupadas:
+            melhor_i, melhor_d = None, tolerancia
+            for i, y_esp in enumerate(esperadas):
+                if i in usados:
+                    continue
+                d = abs(y_det - y_esp)
+                if d < melhor_d:
+                    melhor_i, melhor_d = i, d
+            if melhor_i is not None:
+                resultado[melhor_i] = int(round(y_det))
+                usados.add(melhor_i)
+
+        # Só confia na calibração se casou pelo menos metade das linhas — senão, os
+        # círculos detectados provavelmente não são confiáveis (ruído/página torta) e
+        # é mais seguro cair pro cálculo 100% por fórmula (comportamento anterior a
+        # essa calibração, já validado).
+        if len(usados) < max(3, n_questoes // 2):
             return None
-        espacamento = (agrupadas[-1] - agrupadas[0]) / (len(agrupadas) - 1)
-        if espacamento <= 0:
-            return None
-        y_primeira = agrupadas[0]
-        return [int(round(y_primeira + i * espacamento)) for i in range(n_questoes)]
+        return resultado
 
     bolhas_por_bloco = {}
     for b in bolhas:
