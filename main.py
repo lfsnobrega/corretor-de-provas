@@ -11461,11 +11461,11 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
         if region.size == 0 or n_questoes < 2:
             return None
         region_blur = cv2.medianBlur(region, 5)
-        espac_esperado = (y_max_esperado - y_min_esperado) / (n_questoes - 1)
+        espac_formula = (y_max_esperado - y_min_esperado) / (n_questoes - 1)
         try:
             circles = cv2.HoughCircles(
                 region_blur, cv2.HOUGH_GRADIENT, dp=1,
-                minDist=max(15, int(espac_esperado * 0.6)),
+                minDist=max(15, int(espac_formula * 0.6)),
                 param1=50, param2=15, minRadius=8, maxRadius=22
             )
         except Exception:
@@ -11478,26 +11478,58 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
             if not agrupadas or y - agrupadas[-1] > 15:
                 agrupadas.append(y)
 
-        # Posições esperadas por fórmula, uma por linha (0..n_questoes-1).
-        esperadas = [y_min_esperado + i * espac_esperado for i in range(n_questoes)]
+        if len(agrupadas) < max(3, n_questoes // 2):
+            return None
 
-        # Casa cada círculo DETECTADO com a linha esperada mais próxima — em vez de
-        # assumir que o primeiro círculo encontrado É a linha 1. Isso importa porque,
-        # se a bolha da primeira ou última questão do bloco não for detectada (comum
-        # perto do título/divisória entre blocos), a suposição antiga deslocava TODO o
-        # bloco em cascata — o efeito prático era perder a leitura bem nas últimas
-        # questões de cada bloco. Com o casamento por proximidade, uma linha não
-        # detectada some sozinha (cai pro valor da fórmula só naquela linha), sem
-        # arrastar as outras.
-        tolerancia = espac_esperado * 0.5
-        resultado = [int(round(v)) for v in esperadas]  # fallback linha a linha: fórmula pura
+        # O espaçamento TEÓRICO (fórmula) e o espaçamento REAL das bolhas impressas
+        # quase sempre divergem por menos de 1px — mas esse desvio se acumula linha a
+        # linha, e lá pela questão 3-4 já é grande o bastante pra fazer o sistema achar
+        # que uma bolha pertence à linha errada. Por isso usamos o espaçamento REAL
+        # medido (mediana das distâncias entre bolhas detectadas consecutivas) como
+        # base, em vez do espaçamento calculado pela fórmula.
+        diffs = sorted(agrupadas[i + 1] - agrupadas[i] for i in range(len(agrupadas) - 1))
+        espac_real = diffs[len(diffs) // 2] if diffs else espac_formula
+        if espac_real <= 0:
+            espac_real = espac_formula
+
+        # Encontra o melhor "ponto de partida" da grade: testa cada bolha detectada como
+        # candidata a cada linha possível (0..n_questoes-1) e escolhe a combinação que
+        # mais outras bolhas detectadas confirmam (tipo um RANSAC simples em 1D). Isso
+        # evita ter que assumir "a primeira bolha encontrada é a linha 1".
+        tolerancia_fina = espac_real * 0.35
+        melhor_inicio, melhor_votos = None, -1
+        for y_c in agrupadas:
+            for k in range(n_questoes):
+                inicio_candidato = y_c - k * espac_real
+                votos = 0
+                for y_outro in agrupadas:
+                    idx_estimado = round((y_outro - inicio_candidato) / espac_real)
+                    if 0 <= idx_estimado < n_questoes:
+                        esperado = inicio_candidato + idx_estimado * espac_real
+                        if abs(y_outro - esperado) < tolerancia_fina:
+                            votos += 1
+                if votos > melhor_votos:
+                    melhor_votos, melhor_inicio = votos, inicio_candidato
+
+        if melhor_inicio is None or melhor_votos < max(3, n_questoes // 2):
+            return None
+
+        grade = [melhor_inicio + i * espac_real for i in range(n_questoes)]
+        # Confere se a grade encontrada é plausível (perto da faixa que a fórmula esperava;
+        # senão, algo deu muito errado na detecção e é mais seguro não calibrar).
+        if abs(grade[0] - y_min_esperado) > espac_formula * 1.5:
+            return None
+
+        # Pra cada linha, usa a posição da bolha REALMENTE detectada quando houver uma
+        # correspondência próxima da grade (mais preciso); senão, usa a posição da grade.
+        resultado = [int(round(v)) for v in grade]
         usados = set()
         for y_det in agrupadas:
-            melhor_i, melhor_d = None, tolerancia
-            for i, y_esp in enumerate(esperadas):
+            melhor_i, melhor_d = None, tolerancia_fina
+            for i, y_g in enumerate(grade):
                 if i in usados:
                     continue
-                d = abs(y_det - y_esp)
+                d = abs(y_det - y_g)
                 if d < melhor_d:
                     melhor_i, melhor_d = i, d
             if melhor_i is not None:
