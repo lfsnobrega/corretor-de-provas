@@ -4596,6 +4596,10 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
         labels_js = ", ".join(repr(d) for d in disciplinas_comp)
         pontos_js = ", ".join(str(round(composicao[d]["acertos"] / total * 10, 2)) for d in disciplinas_comp)
         cores_js = ", ".join(repr(cores[i % len(cores)]) for i in range(len(disciplinas_comp)))
+        legenda_comp = "".join(
+            f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{cores[i % len(cores)]};"></span>{d} ({round(composicao[d]["acertos"] / total * 10, 2)})</span>'
+            for i, d in enumerate(disciplinas_comp)
+        )
         linhas_comp = "".join(
             f'<tr><td style="padding:6px;">{d}</td>'
             f'<td style="padding:6px; text-align:center;">{composicao[d]["acertos"]}/{composicao[d]["total"]}</td>'
@@ -4606,8 +4610,9 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
         composicao_html = f"""
         <div class="card" style="margin-bottom:20px;">
             <h3 style="margin-top:0;">Composição da nota por disciplina</h3>
-            <p class="muted-line" style="font-size:13px;">Nota total: <strong>{nota_10}</strong> (escala 0–10). Cada fatia mostra quantos pontos dessa nota vieram de cada disciplina.</p>
-            <div style="max-width:420px; height:280px; margin:0 auto; position:relative;">
+            <p class="muted-line" style="font-size:13px;">Nota total: <strong>{nota_10}</strong> (escala 0–10). Cada barra mostra quantos pontos dessa nota vieram de cada disciplina.</p>
+            <div style="display:flex; flex-wrap:wrap; gap:14px; margin-bottom:8px; font-size:12px; color:var(--text-muted);">{legenda_comp}</div>
+            <div style="max-width:520px; height:260px; margin:0 auto; position:relative;">
                 <canvas id="chart-composicao"></canvas>
             </div>
             <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:16px;">
@@ -4622,16 +4627,17 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
             new Chart(document.getElementById('chart-composicao'), {{
-                type: 'doughnut',
+                type: 'bar',
                 data: {{
                     labels: [{labels_js}],
-                    datasets: [{{ data: [{pontos_js}], backgroundColor: [{cores_js}] }}]
+                    datasets: [{{ data: [{pontos_js}], backgroundColor: [{cores_js}], borderRadius: 4, maxBarThickness: 56 }}]
                 }},
                 options: {{
                     responsive: true,
                     maintainAspectRatio: false,
                     animation: {{ duration: 400 }},
-                    plugins: {{ legend: {{ position: 'bottom' }} }}
+                    plugins: {{ legend: {{ display: false }} }},
+                    scales: {{ y: {{ beginAtZero: true, max: 10 }} }}
                 }}
             }});
         </script>
@@ -8697,6 +8703,10 @@ def painel_global_ver(rodada: str):
     dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
     dist_data_js = ", ".join(str(dist_global.get(f["nome"], 0)) for f in FAIXAS_SAEB)
     dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+    dist_legenda_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]} {round(dist_global.get(f["nome"], 0) / n_total * 100, 1) if n_total else 0}%</span>'
+        for f in FAIXAS_SAEB
+    )
 
     kpis_html = f"""
         <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-bottom:18px;">
@@ -8779,7 +8789,8 @@ def painel_global_ver(rodada: str):
 
         <div class="card" style="margin-bottom:18px;">
             <h3 style="margin-top:0;">Distribuição de faixas SAEB — Escola toda</h3>
-            <div style="max-width:380px; height:260px; margin:0 auto; position:relative;">
+            <div style="display:flex; flex-wrap:wrap; gap:14px; margin-bottom:8px; font-size:12px; color:var(--text-muted);">{dist_legenda_html}</div>
+            <div style="max-width:520px; height:260px; margin:0 auto; position:relative;">
                 <canvas id="chart-dist-global"></canvas>
             </div>
         </div>
@@ -8822,9 +8833,9 @@ def painel_global_ver(rodada: str):
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
             new Chart(document.getElementById('chart-dist-global'), {{
-                type: 'doughnut',
-                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
-                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom' }} }} }}
+                type: 'bar',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}], borderRadius: 4, maxBarThickness: 56 }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
             }});
             new Chart(document.getElementById('chart-por-ano'), {{
                 type: 'bar',
@@ -8878,6 +8889,11 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
     dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
     dist_data_js = ", ".join(str(dist_turma.get(f["nome"], 0)) for f in FAIXAS_SAEB)
     dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+    n_turma = len(regs_turma)
+    dist_legenda_turma_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]} {round(dist_turma.get(f["nome"], 0) / n_turma * 100, 1) if n_turma else 0}%</span>'
+        for f in FAIXAS_SAEB
+    )
 
     disc_labels_js = ", ".join(f'"{d["disciplina"]}"' for d in disciplinas)
     disc_pcts_js = ", ".join(str(d["pct_geral"]) for d in disciplinas)
@@ -8954,6 +8970,7 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:18px; margin-bottom:18px;">
             <div class="card">
                 <h3 style="margin-top:0; font-size:14px;">Distribuição de faixas SAEB</h3>
+                <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:6px; font-size:11px; color:var(--text-muted);">{dist_legenda_turma_html}</div>
                 <div style="height:220px; position:relative;"><canvas id="chart-dist-turma"></canvas></div>
             </div>
             <div class="card">
@@ -8970,9 +8987,9 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
             new Chart(document.getElementById('chart-dist-turma'), {{
-                type: 'doughnut',
-                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
-                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom', labels: {{ font: {{ size: 10 }} }} }} }} }}
+                type: 'bar',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}], borderRadius: 4, maxBarThickness: 44 }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
             }});
             new Chart(document.getElementById('chart-disc-turma'), {{
                 type: 'bar',
