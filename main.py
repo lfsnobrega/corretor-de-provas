@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,
 from fastapi.staticfiles import StaticFiles
 from typing import Optional, List
 from datetime import datetime, date
+from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side  # Adicionado estilos
@@ -8487,6 +8488,16 @@ def _valor_por_questao(pontuacao_total: float, n_blocos: int = 4, n_questoes: in
     return round(pontuacao_total / total_q, 4) if total_q else 0
 
 
+def _arredondar_comercial(valor: float, casas: int = 1) -> float:
+    """Arredonda 'pra cima' no meio do caminho (0,65 -> 0,7 | 0,35 -> 0,4) — arredondamento
+    comercial. O round() padrão do Python usa arredondamento bancário (half-to-even) e pode
+    dar resultado diferente do esperado numa planilha de notas (ex: round(0.65,1) pode dar
+    0.6). Convertemos pra string antes de virar Decimal pra evitar erro de ponto flutuante
+    binário (0.65 internamente não é exatamente 0.65)."""
+    quantizador = Decimal("1").scaleb(-casas)  # ex: casas=1 -> Decimal('0.1')
+    return float(Decimal(str(valor)).quantize(quantizador, rounding=ROUND_HALF_UP))
+
+
 def _status_bloco_badge(status: str) -> str:
     cores = {
         "aguardando":    ("var(--text-muted)",  "var(--bg-subtle)",  "⏳"),
@@ -8620,6 +8631,38 @@ def _media_nota(registros):
     return round(sum(r["nota_10"] for r in registros) / len(registros), 2)
 
 
+def _coletar_dados_painel_combinado(conn, trimestre: int, ano: int) -> list:
+    """Combina Dia 1 + Dia 2 de uma mesma rodada (trimestre+ano) por aluno: nota média
+    entre os dias que ele tiver feito (1 ou 2). Útil pra uma visão global por turma que
+    não fique presa a um único dia — mistura Língua Portuguesa/Inglesa (normalmente no
+    Dia 1) com as outras disciplinas do Dia 2, por exemplo."""
+    regs_dia1 = _coletar_dados_painel_global(conn, trimestre, ano, 1)
+    regs_dia2 = _coletar_dados_painel_global(conn, trimestre, ano, 2)
+
+    por_aluno = {}
+    for r in regs_dia1 + regs_dia2:
+        if r["aluno_id"] not in por_aluno:
+            por_aluno[r["aluno_id"]] = {
+                "aluno_id": r["aluno_id"], "nome": r["nome"], "raca": r["raca"],
+                "turma": r["turma"], "turma_id": r["turma_id"],
+                "ano_escolaridade": r["ano_escolaridade"],
+                "idade": r["idade"], "defasagem_idade_serie": r["defasagem_idade_serie"],
+                "notas": [],
+            }
+        por_aluno[r["aluno_id"]]["notas"].append(r["nota_10"])
+
+    registros = []
+    for dados in por_aluno.values():
+        notas = dados.pop("notas")
+        nota_media = round(sum(notas) / len(notas), 2)
+        dados["nota_10"] = nota_media
+        dados["faixa"] = _faixa_saeb(nota_media)["nome"]
+        dados["n_dias"] = len(notas)
+        dados["completo"] = len(notas) == 2
+        registros.append(dados)
+    return registros
+
+
 def _analise_disciplinas_turma(conn, aplicacao_id: int, prova_id: int) -> list:
     """Análise detalhada por disciplina de UMA turma/aplicação específica: % geral de
     acerto, alunos sugeridos pra reforço (abaixo de 50%) e — quando as questões têm
@@ -8720,6 +8763,11 @@ def painel_global_seletor():
         SELECT trimestre, ano, dia, GROUP_CONCAT(DISTINCT ano_escolaridade) AS anos_lista
         FROM simulados GROUP BY trimestre, ano, dia ORDER BY ano DESC, trimestre DESC, dia
     """).fetchall()
+    trimestres_anos = conn.execute("""
+        SELECT DISTINCT trimestre, ano FROM simulados
+        WHERE dia = 1 AND EXISTS (SELECT 1 FROM simulados s2 WHERE s2.trimestre = simulados.trimestre AND s2.ano = simulados.ano AND s2.dia = 2)
+        ORDER BY ano DESC, trimestre DESC
+    """).fetchall()
     conn.close()
 
     opcoes = ""
@@ -8729,15 +8777,36 @@ def painel_global_seletor():
         label = f"{r['trimestre']}º Trimestre {r['ano']} · Dia {r['dia']} ({anos_fmt})"
         opcoes += f'<option value="{r["trimestre"]}:{r["ano"]}:{r["dia"]}">{label}</option>'
 
+    opcoes_combinado = "".join(
+        f'<option value="{r["trimestre"]}:{r["ano"]}">{r["trimestre"]}º Trimestre {r["ano"]} (Dia 01 + Dia 02)</option>'
+        for r in trimestres_anos
+    )
+
     if not opcoes:
         content = '<div class="empty">Nenhum simulado cadastrado ainda.</div>'
         return render_page("Painel Global", content, active="simulados")
+
+    bloco_combinado = ""
+    if opcoes_combinado:
+        bloco_combinado = f"""
+        <div class="card" style="max-width:520px; margin-top:16px;">
+            <h3 style="margin-top:0; font-size:14px;">Visão combinada — Dia 01 + Dia 02</h3>
+            <p class="muted-line" style="font-size:12px;">Uma nota média por aluno juntando os dois dias, comparando as turmas de forma global (não só um dia isolado).</p>
+            <form method="get" action="/simulados/painel-global/combinado/ver">
+                <label>Trimestre
+                    <select name="trimestre_ano" required style="width:100%;">{opcoes_combinado}</select>
+                </label>
+                <button type="submit" class="btn btn-primary" style="margin-top:14px;">Ver visão combinada</button>
+            </form>
+        </div>
+        """
 
     content = f"""
     <div class="page-header"><h1>🏫 Painel Global da Escola</h1>
         <p class="subtitle">Visão consolidada de todos os anos de escolaridade e turmas numa mesma rodada de simulado — por raça, distorção idade-série e sugestões de agrupamento por disciplina.</p>
     </div>
     <div class="card" style="max-width:520px;">
+        <h3 style="margin-top:0; font-size:14px;">Um dia específico</h3>
         <form method="get" action="/simulados/painel-global/ver">
             <label>Rodada do simulado
                 <select name="rodada" required style="width:100%;">{opcoes}</select>
@@ -8745,8 +8814,129 @@ def painel_global_seletor():
             <button type="submit" class="btn btn-primary" style="margin-top:14px;">Ver painel</button>
         </form>
     </div>
+    {bloco_combinado}
     """
     return render_page("Painel Global", content, active="simulados")
+
+
+@app.get("/simulados/painel-global/combinado/ver", response_class=HTMLResponse)
+def painel_global_combinado_ver(trimestre_ano: str):
+    """Visão global por turma combinando Dia 1 + Dia 2 (nota média entre os dias que
+    o aluno tiver feito), pra comparar turmas sem depender de olhar um dia isolado."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        trimestre_s, ano_s = trimestre_ano.split(":")
+        trimestre, ano = int(trimestre_s), int(ano_s)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    conn = get_db()
+    registros = _coletar_dados_painel_combinado(conn, trimestre, ano)
+    conn.close()
+
+    if not registros:
+        content = '<div class="empty">Nenhum dado encontrado pra essa combinação de Dia 01 + Dia 02.</div>'
+        return render_page("Painel Global Combinado", content, active="simulados")
+
+    n_total = len(registros)
+    n_incompletos = sum(1 for r in registros if not r["completo"])
+    media_global = _media_nota(registros)
+    dist_global = _agregar_faixas(registros)
+    dist_legenda_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]}: {dist_global.get(f["nome"], 0)} ({round(dist_global.get(f["nome"], 0) / n_total * 100, 1) if n_total else 0}%)</span>'
+        for f in FAIXAS_SAEB
+    )
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_global.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+
+    turmas_nomes = sorted(set(r["turma"] for r in registros))
+    por_turma = []
+    for t in turmas_nomes:
+        regs_t = [r for r in registros if r["turma"] == t]
+        n_incompletos_t = sum(1 for r in regs_t if not r["completo"])
+        por_turma.append({
+            "turma": t, "n_alunos": len(regs_t), "media": _media_nota(regs_t),
+            "n_incompletos": n_incompletos_t,
+            "pct_insuf": round(_agregar_faixas(regs_t).get("Insuficiente", 0) / len(regs_t) * 100, 1) if regs_t else 0,
+        })
+    por_turma.sort(key=lambda x: x["media"])
+
+    turma_labels_js = ", ".join(f'"{t["turma"]}"' for t in por_turma)
+    turma_medias_js = ", ".join(str(t["media"]) for t in por_turma)
+
+    linhas_turma = ""
+    for t in por_turma:
+        cor = "var(--red)" if t["media"] < 5 else ("var(--orange)" if t["media"] < 7 else "var(--green)")
+        aviso_incompleto = f' <span style="color:var(--orange); font-size:11px;">⚠ {t["n_incompletos"]} só fizeram 1 dia</span>' if t["n_incompletos"] else ""
+        linhas_turma += f"""<tr>
+            <td style="padding:6px 10px;">{t['turma']}</td>
+            <td style="padding:6px 10px; text-align:center;">{t['n_alunos']}</td>
+            <td style="padding:6px 10px; text-align:center; font-weight:700; color:{cor};">{t['media']}</td>
+            <td style="padding:6px 10px; text-align:center; color:var(--red);">{t['pct_insuf']}%</td>
+            <td style="padding:6px 10px;">{aviso_incompleto}</td>
+        </tr>"""
+
+    aviso_incompletos_geral = ""
+    if n_incompletos:
+        aviso_incompletos_geral = f'<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ {n_incompletos} aluno(s) só têm nota de um dos dois dias (a média considera só o dia que ele fez).</p>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>🏫 Painel Global — Dia 01 + Dia 02</h1>
+            <p class="subtitle">{trimestre}º Trimestre {ano} · nota média combinando os dois dias, por turma</p>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{n_total}</div></div>
+            <div class="metric"><div class="metric-label">Nota média combinada</div><div class="metric-value">{media_global}</div></div>
+        </div>
+        {aviso_incompletos_geral}
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Distribuição de faixas SAEB — combinada</h3>
+            <div style="max-width:380px; height:260px; margin:0 auto; position:relative;">
+                <canvas id="chart-dist-comb"></canvas>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-top:10px; font-size:12px; color:var(--text-muted);">{dist_legenda_html}</div>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Nota média combinada por turma</h3>
+            <div style="height:280px; position:relative; margin-bottom:14px;">
+                <canvas id="chart-turma-comb"></canvas>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px 10px; text-align:left;">Turma</th>
+                    <th style="padding:6px 10px;">Alunos</th>
+                    <th style="padding:6px 10px;">Nota média</th>
+                    <th style="padding:6px 10px;">% Insuficiente</th>
+                    <th style="padding:6px 10px;"></th>
+                </tr></thead>
+                <tbody>{linhas_turma}</tbody>
+            </table>
+        </div>
+
+        <div style="margin-top:16px;"><a href="/simulados/painel-global" class="btn">← Voltar</a></div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-comb'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+            }});
+            new Chart(document.getElementById('chart-turma-comb'), {{
+                type: 'bar',
+                data: {{ labels: [{turma_labels_js}], datasets: [{{ label: 'Nota média', data: [{turma_medias_js}], backgroundColor: '#0284c7', borderRadius: 4 }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true, max: 10 }} }} }}
+            }});
+        </script>
+    """
+    return render_page("Painel Global Combinado", content, active="simulados")
 
 
 @app.get("/simulados/painel-global/ver", response_class=HTMLResponse)
@@ -9149,7 +9339,11 @@ def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
            JOIN simulado_blocos b ON b.id = sq.bloco_id
            WHERE b.simulado_id = ?""", (sim_id,)
     ).fetchone()["c"]
-    valor_questao = _valor_por_questao(sim["pontuacao_total"], n_blocos=1, n_questoes=total_questoes) if total_questoes else 0
+    # Cada simulado (por dia) vale sempre 1,0 ponto no total, dividido igualmente entre
+    # as questões — ex: 40 questões = 0,025 por questão. Não usamos o campo configurável
+    # "pontuacao_total" aqui porque essa é uma convenção fixa desse relatório específico
+    # (Dia 01 + Dia 02 = 2,0 pontos), não algo que varia por simulado.
+    valor_questao = (1.0 / total_questoes) if total_questoes else 0
 
     alunos = conn.execute(
         "SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)
@@ -9166,7 +9360,10 @@ def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
         resultado[aluno["id"]] = {
             "nome": aluno["nome"], "numero": aluno["numero"],
             "acertos": acertos, "total_questoes": total_questoes,
-            "nota": round(acertos * valor_questao, 2),
+            # Nota "crua" (não arredondada ainda) — o arredondamento pra 1 casa decimal
+            # (comercial, half-up) acontece só na hora de exibir, pra não perder precisão
+            # antes da soma dos dois dias.
+            "nota": round(acertos * valor_questao, 4),
         }
     return resultado
 
@@ -9192,7 +9389,7 @@ def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) 
            JOIN simulado_blocos b ON b.id = sq.bloco_id
            WHERE b.simulado_id = ?""", (sim_id,)
     ).fetchone()["c"]
-    valor_questao = _valor_por_questao(sim["pontuacao_total"], n_blocos=1, n_questoes=total_questoes) if total_questoes else 0
+    valor_questao = (1.0 / total_questoes) if total_questoes else 0
 
     blocos = conn.execute(
         """SELECT b.id AS bloco_id, d.nome AS disciplina_nome
@@ -9239,9 +9436,11 @@ def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
     conn.close()
 
     disciplinas = sorted(set(comp1.keys()) | set(comp2.keys()))
-    nota1_total = round(sum(comp1.values()), 2)
-    nota2_total = round(sum(comp2.values()), 2)
-    nota_total = round(nota1_total + nota2_total, 2)
+    nota1_total_bruta = sum(comp1.values())
+    nota2_total_bruta = sum(comp2.values())
+    nota1_total = _arredondar_comercial(nota1_total_bruta, 1)
+    nota2_total = _arredondar_comercial(nota2_total_bruta, 1)
+    nota_total = _arredondar_comercial(nota1_total_bruta + nota2_total_bruta, 1)
 
     cores = ["#4C6EF5", "#F76707", "#2F9E44", "#E64980", "#0CA678", "#F59F00", "#7048E8"]
     datasets_js = ""
@@ -9255,7 +9454,7 @@ def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
             <td style="padding:6px;">{d}</td>
             <td style="padding:6px; text-align:center;">{v1}</td>
             <td style="padding:6px; text-align:center;">{v2}</td>
-            <td style="padding:6px; text-align:center; font-weight:600;">{round(v1 + v2, 2)}</td>
+            <td style="padding:6px; text-align:center; font-weight:600;">{_arredondar_comercial(v1 + v2, 2)}</td>
         </tr>"""
 
     html = f"""<!DOCTYPE html>
@@ -9319,7 +9518,7 @@ def form_relatorio_notas_simulado():
         return RedirectResponse("/simulados", status_code=303)
     conn = get_db()
     sims = conn.execute(
-        "SELECT * FROM simulados WHERE status IN ('fechado', 'publicado') ORDER BY ano DESC, trimestre DESC, ano_escolaridade, dia"
+        "SELECT * FROM simulados ORDER BY ano DESC, trimestre DESC, ano_escolaridade, dia"
     ).fetchall()
     grupos = {}
     for s in sims:
@@ -9334,7 +9533,7 @@ def form_relatorio_notas_simulado():
             label = f"{_ano_esc_label(ano_esc or 0)} · {tri}º Trimestre · {ano} (Dia 01 + Dia 02)"
             opcoes_grupo += f'<option value="{dias[1]["id"]}:{dias[2]["id"]}">{label}</option>'
     if not opcoes_grupo:
-        opcoes_grupo = '<option value="">Nenhum par Dia 01 + Dia 02 fechado/publicado encontrado</option>'
+        opcoes_grupo = '<option value="">Nenhum par Dia 01 + Dia 02 encontrado</option>'
     opcoes_turma = "".join(f'<option value="{t["id"]}">{t["nome"]}</option>' for t in turmas)
 
     content = f"""
@@ -9354,7 +9553,7 @@ def form_relatorio_notas_simulado():
             </label>
             <button type="submit" class="btn btn-primary">Gerar relatório</button>
         </form>
-        <p class="muted-line" style="margin-top:10px; font-size:12px;">Apenas simulados com status <strong>fechado</strong> ou <strong>publicado</strong> aparecem aqui.</p>
+        <p class="muted-line" style="margin-top:10px; font-size:12px;">Mostra qualquer simulado com pelo menos um cartão já confirmado — não precisa estar fechado.</p>
     </div>
     """
     return render_page("Relatório de Notas", content, active="simulados")
@@ -9397,15 +9596,17 @@ def gerar_relatorio_notas_simulado(par: str, turma_id: int, ponderado: int = 0):
         base = d1 or d2
         nome = base["nome"]
         numero = base["numero"] if base["numero"] is not None else "—"
-        nota1 = d1["nota"] if d1 else 0
-        nota2 = d2["nota"] if d2 else 0
-        total_bruto = round(nota1 + nota2, 2)
+        nota1_bruta = d1["nota"] if d1 else 0
+        nota2_bruta = d2["nota"] if d2 else 0
+        nota1 = _arredondar_comercial(nota1_bruta, 1)
+        nota2 = _arredondar_comercial(nota2_bruta, 1)
+        total_bruto = _arredondar_comercial(nota1_bruta + nota2_bruta, 1)
 
         link_detalhe = f'<a href="/simulados/relatorio-notas/aluno?par={par}&turma_id={turma_id}&aluno_id={aid}" target="_blank">👁 Ver</a>'
 
         if ponderado:
-            col_setenta = round(total_bruto * 0.7, 1)
-            col_trinta = round(total_bruto * 0.3, 1)
+            col_setenta = _arredondar_comercial(total_bruto * 0.7, 1)
+            col_trinta = _arredondar_comercial(total_bruto * 0.3, 1)
             linhas += f"""<tr>
                 <td style="padding:6px;">{numero}</td>
                 <td style="padding:6px;">{nome}</td>
