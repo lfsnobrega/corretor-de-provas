@@ -9436,11 +9436,11 @@ def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
     conn.close()
 
     disciplinas = sorted(set(comp1.keys()) | set(comp2.keys()))
-    nota1_total_bruta = sum(comp1.values())
-    nota2_total_bruta = sum(comp2.values())
-    nota1_total = _arredondar_comercial(nota1_total_bruta, 1)
-    nota2_total = _arredondar_comercial(nota2_total_bruta, 1)
-    nota_total = _arredondar_comercial(nota1_total_bruta + nota2_total_bruta, 1)
+    nota1_total = _arredondar_comercial(sum(comp1.values()), 1)
+    nota2_total = _arredondar_comercial(sum(comp2.values()), 1)
+    # Total = soma exata do que aparece nas colunas do Dia 01 e Dia 02, já arredondadas
+    # (evita "0,4 + 0,4" parecer dar um total diferente na tela).
+    nota_total = _arredondar_comercial(nota1_total + nota2_total, 1)
 
     cores = ["#4C6EF5", "#F76707", "#2F9E44", "#E64980", "#0CA678", "#F59F00", "#7048E8"]
     datasets_js = ""
@@ -9600,7 +9600,11 @@ def gerar_relatorio_notas_simulado(par: str, turma_id: int, ponderado: int = 0):
         nota2_bruta = d2["nota"] if d2 else 0
         nota1 = _arredondar_comercial(nota1_bruta, 1)
         nota2 = _arredondar_comercial(nota2_bruta, 1)
-        total_bruto = _arredondar_comercial(nota1_bruta + nota2_bruta, 1)
+        # O Total precisa ser a soma exata do que aparece nas colunas Dia 01 e Dia 02
+        # (já arredondadas) — se somássemos as notas cruas antes de arredondar, o Total
+        # podia não bater com "Dia01 + Dia02" que a pessoa está vendo na tela (ex:
+        # 0,4 + 0,4 parecendo dar 0,7), mesmo sendo uma conta "tecnicamente" diferente.
+        total_bruto = _arredondar_comercial(nota1 + nota2, 1)
 
         link_detalhe = f'<a href="/simulados/relatorio-notas/aluno?par={par}&turma_id={turma_id}&aluno_id={aid}" target="_blank">👁 Ver</a>'
 
