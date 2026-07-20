@@ -8342,7 +8342,7 @@ def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entre
                 </div>
                 <div>
                     <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Respostas (corrija se necessário)</p>
-                    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                    <table style="width:100%; border-collapse:collapse; font-size:12px; background:var(--bg);">
                         <thead><tr style="background:var(--bg-subtle);"><th style="padding:3px;">Q</th><th style="padding:3px;">A</th><th style="padding:3px;">B</th><th style="padding:3px;">C</th><th style="padding:3px;">D</th><th style="padding:3px;">∅</th></tr></thead>
                         <tbody>{tabela_html}</tbody>
                     </table>
@@ -12336,7 +12336,7 @@ def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregu
                 </div>
                 <div>
                     <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Respostas (corrija se necessário)</p>
-                    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                    <table style="width:100%; border-collapse:collapse; font-size:12px; background:var(--bg);">
                         <thead><tr style="background:var(--bg-subtle);"><th style="padding:3px;">Q</th><th style="padding:3px;">A</th><th style="padding:3px;">B</th><th style="padding:3px;">C</th><th style="padding:3px;">D</th><th style="padding:3px;">∅</th></tr></thead>
                         <tbody>{tabela_html}</tbody>
                     </table>
