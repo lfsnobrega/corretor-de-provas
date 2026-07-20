@@ -11722,7 +11722,17 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
         grade = [melhor_inicio + i * espac_real for i in range(n_questoes)]
         # Confere se a grade encontrada é plausível (perto da faixa que a fórmula esperava;
         # senão, algo deu muito errado na detecção e é mais seguro não calibrar).
-        if abs(grade[0] - y_min_esperado) > espac_formula * 1.5:
+        # CORRIGIDO (bug Turma 706 / Bloco de Ciencias, 20/07/2026): a tolerancia era
+        # 1.5x o espacamento entre linhas -- maior que 1 linha inteira (1.0x). Isso deixava
+        # passar sem rejeitar uma calibracao deslocada em exatamente 1 linha inteira, que
+        # acontece quando 1 bolha da coluna A (geralmente a da primeira questao do bloco)
+        # nao e detectada pelo Hough Circles (comum quando essa marcacao esta mais fraca
+        # ou o contorno da bolha vazia tem pouco contraste no scan). Apertado para 0.6x:
+        # folgado o bastante pra aceitar calibracoes legitimas (desvios reais observados
+        # ficam em torno de 11-12px, bem abaixo do novo limite), mas apertado o bastante
+        # pra rejeitar um desvio de 1 linha inteira (que fica bem acima do novo limite) e
+        # cair no fallback seguro por formula nesse caso.
+        if abs(grade[0] - y_min_esperado) > espac_formula * 0.6:
             return None
 
         # Pra cada linha, usa a posição da bolha REALMENTE detectada quando houver uma
