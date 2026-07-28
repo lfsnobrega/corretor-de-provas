@@ -1209,6 +1209,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
+                {('<div class="sidebar-section">Análises</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análises pedagógicas")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
             {user_block}
@@ -10286,8 +10287,202 @@ def diagnostico_respostas_simulado(sim_id: int):
     return render_page("Diagnóstico de respostas", content, active="simulados")
 
 
+@app.get("/analises-pedagogicas", response_class=HTMLResponse)
+def analises_pedagogicas_hub():
+    """Página central que reúne links pra todos os relatórios/análises do sistema,
+    num só lugar. Não substitui os links que já existem dentro de Simulados e de
+    cada aplicação de prova — é só um atalho central a mais (ver conversa sobre
+    Opção 1 de organização, 28/07/2026)."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    def card(icone, titulo, desc, href, texto_btn="Abrir"):
+        return f"""
+            <div style="background:var(--bg-subtle); border-radius:8px; padding:18px; display:flex; flex-direction:column; gap:8px;">
+                <div style="font-size:28px;">{icone}</div>
+                <h3 style="margin:0;">{titulo}</h3>
+                <p style="font-size:13px; color:var(--text-muted); flex-grow:1; margin:0;">{desc}</p>
+                <a href="{href}" class="btn btn-primary" style="text-align:center; margin-top:6px;">{texto_btn}</a>
+            </div>
+        """
+
+    cards_html = "".join([
+        card("🌐", "Painel Global da Escola",
+             "Visão consolidada por rodada de simulado — quebra por ano de escolaridade, raça, distorção idade-série, turma/disciplina e habilidades BNCC de maior/menor dificuldade.",
+             "/simulados/painel-global"),
+        card("📄", "Relatório de Notas do Simulado",
+             "Notas combinadas de Dia 01 + Dia 02 por turma e por aluno, com composição da nota por disciplina.",
+             "/simulados/relatorio-notas"),
+        card("🔍", "Diagnóstico de Respostas (por simulado)",
+             "Acha rapidamente cartões com muitas questões em branco dentro de um simulado específico — útil pra achar leituras suspeitas de OMR. Escolha o simulado na lista pra acessar.",
+             "/simulados", "Escolher simulado"),
+        card("⚠️", "Auditoria de Calibração (todos os simulados)",
+             "Varredura em TODOS os simulados do banco atrás do padrão do bug de deslocamento de calibração (última questão do bloco em branco com o resto quase todo respondido). Rode antes de liberar qualquer resultado final.",
+             "/auditoria-calibracao"),
+        card("📊", "Análise Pedagógica de Provas",
+             "Faixas SAEB, ranking e estatística por questão/habilidade para provas normais (não-simulado). Escolha a aplicação na lista pra acessar.",
+             "/aplicacoes", "Escolher aplicação"),
+    ])
+
+    content = f"""
+        <div class="page-header">
+            <h1>📈 Análises pedagógicas</h1>
+            <p class="subtitle">Todos os relatórios e ferramentas de análise do sistema, num só lugar.</p>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:16px;">
+            {cards_html}
+        </div>
+    """
+    return render_page("Análises pedagógicas", content, active="analises-pedagogicas")
+
+
+@app.get("/auditoria-calibracao", response_class=HTMLResponse)
+def auditoria_calibracao_global():
+    """Varre TODOS os simulados com aplicações/entregas no banco (não só um) e sinaliza
+    cartões com um padrão específico: a ÚLTIMA questão de um bloco em branco, enquanto o
+    resto do bloco foi quase todo respondido. Esse é a "assinatura" do bug de deslocamento
+    de calibração de bolhas (a grade inteira desliza 1 linha, e a última questão "sobra"
+    como branco) — é diferente de um aluno que realmente deixou em branco por não saber a
+    resposta (nesse caso os brancos tendem a se espalhar pelo bloco, não a se concentrar só
+    na última questão com o resto quase tudo respondido).
+    Use esta tela ANTES de liberar qualquer resultado final."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+
+    conn = get_db()
+    simulados = conn.execute("SELECT id, nome FROM simulados ORDER BY ano DESC, trimestre DESC, dia").fetchall()
+
+    LIMIAR_RESTO_RESPONDIDO = 0.7  # pelo menos 70% do resto do bloco respondido
+
+    suspeitos = []
+    for sim in simulados:
+        sim_id = sim["id"]
+        prova_vinculada = conn.execute(
+            "SELECT id FROM provas WHERE titulo LIKE ? ORDER BY id DESC LIMIT 1",
+            (f"%[SIM-{sim_id}]%",)
+        ).fetchone()
+        if not prova_vinculada:
+            continue
+        prova_id = prova_vinculada["id"]
+
+        # Monta a ordem de questões por bloco usando simulado_blocos + simulado_questoes
+        # (a fonte da verdade de como o simulado foi montado) — não assume 10 questões
+        # fixas por bloco, respeita o que estiver de fato no schema.
+        blocos = conn.execute("""
+            SELECT b.id AS bloco_id, b.numero, d.nome AS disciplina_nome
+            FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+            WHERE b.simulado_id = ? ORDER BY b.numero
+        """, (sim_id,)).fetchall()
+        if not blocos:
+            continue
+
+        blocos_questoes = {}  # bloco_numero -> {"disciplina": ..., "ids": [questao_id em ordem]}
+        for b in blocos:
+            qs = conn.execute("""
+                SELECT sq.questao_id FROM simulado_questoes sq
+                WHERE sq.bloco_id = ? ORDER BY sq.ordem
+            """, (b["bloco_id"],)).fetchall()
+            blocos_questoes[b["numero"]] = {
+                "disciplina": b["disciplina_nome"],
+                "ids": [q["questao_id"] for q in qs],
+            }
+
+        aplicacoes = conn.execute("""
+            SELECT a.id AS aplicacao_id, t.nome AS turma_nome
+            FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.prova_id = ? AND a.titulo LIKE ?
+            ORDER BY t.nome
+        """, (prova_id, f"%[SIM-{sim_id}]%")).fetchall()
+
+        for apl in aplicacoes:
+            entregas = conn.execute("""
+                SELECT e.aluno_id, al.nome AS aluno_nome, al.numero
+                FROM entregas e JOIN alunos al ON al.id = e.aluno_id
+                WHERE e.aplicacao_id = ?
+            """, (apl["aplicacao_id"],)).fetchall()
+
+            for e in entregas:
+                respostas = conn.execute(
+                    "SELECT questao_id FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?",
+                    (apl["aplicacao_id"], e["aluno_id"])
+                ).fetchall()
+                respondidas_ids = {r["questao_id"] for r in respostas}
+
+                motivos = []
+                for bloco_num, info in blocos_questoes.items():
+                    ids_bloco = info["ids"]
+                    if len(ids_bloco) < 3:
+                        continue  # bloco pequeno demais pra esse teste fazer sentido
+                    ultima_qid = ids_bloco[-1]
+                    resto_ids = ids_bloco[:-1]
+                    ultima_em_branco = ultima_qid not in respondidas_ids
+                    n_resto_respondido = sum(1 for qid in resto_ids if qid in respondidas_ids)
+                    pct_resto = (n_resto_respondido / len(resto_ids)) if resto_ids else 0
+                    if ultima_em_branco and pct_resto >= LIMIAR_RESTO_RESPONDIDO:
+                        motivos.append(
+                            f"Bloco {bloco_num} ({info['disciplina']}): última questão em branco, "
+                            f"mas {n_resto_respondido}/{len(resto_ids)} das outras foram respondidas"
+                        )
+
+                if motivos:
+                    suspeitos.append({
+                        "sim_id": sim_id, "sim_nome": sim["nome"],
+                        "turma": apl["turma_nome"], "aluno": e["aluno_nome"], "numero": e["numero"],
+                        "aluno_id": e["aluno_id"], "aplicacao_id": apl["aplicacao_id"],
+                        "motivos": motivos,
+                    })
+    conn.close()
+
+    if not suspeitos:
+        content = """
+            <div class="page-header">
+                <h1>✅ Auditoria de calibração</h1>
+                <p class="subtitle">Varredura em todos os simulados do banco.</p>
+            </div>
+            <div class="empty">Nenhum cartão com o padrão suspeito encontrado. Tudo certo pra liberar os resultados.</div>
+        """
+        return render_page("Auditoria de calibração", content, active="analises-pedagogicas")
+
+    linhas_html = ""
+    for s in suspeitos:
+        motivos_html = "<br>".join(s["motivos"])
+        linhas_html += f"""<tr style="background:var(--orange-bg);">
+            <td style="padding:6px 10px;">{s['sim_nome']}</td>
+            <td style="padding:6px 10px;">{s['turma']}</td>
+            <td style="padding:6px 10px;">{s['numero'] or '—'}</td>
+            <td style="padding:6px 10px;"><a href="/aplicacoes/{s['aplicacao_id']}/aluno/{s['aluno_id']}">{s['aluno']}</a></td>
+            <td style="padding:6px 10px; font-size:12px; color:var(--orange);">{motivos_html}</td>
+        </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>⚠️ Auditoria de calibração — {len(suspeitos)} cartão(ões) suspeito(s)</h1>
+            <p class="subtitle">Varredura em TODOS os simulados do banco. Rode isso antes de liberar qualquer resultado final.</p>
+        </div>
+        <div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-bottom:16px;">
+            <strong>O que é sinalizado aqui:</strong> cartões onde a última questão de um bloco está em branco,
+            mas o resto do bloco foi quase todo respondido (≥70%). Esse é o padrão típico do bug de deslocamento
+            de calibração de bolhas — não é o mesmo que um aluno que realmente deixou em branco por não saber.
+            <br><small>Reescaneie esses cartões específicos antes de liberar os resultados. Depois de reescanear e confirmar de novo, o cartão sai desta lista.</small>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle); text-align:left;">
+                <th style="padding:6px 10px;">Simulado</th>
+                <th style="padding:6px 10px;">Turma</th>
+                <th style="padding:6px 10px;">Nº</th>
+                <th style="padding:6px 10px;">Aluno</th>
+                <th style="padding:6px 10px;">Motivo</th>
+            </tr></thead>
+            <tbody>{linhas_html}</tbody>
+        </table>
+    """
+    return render_page("Auditoria de calibração", content, active="analises-pedagogicas")
+
 
 def criar_aplicacoes_lote(sim_id: int):
+
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
@@ -11886,6 +12081,7 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
                 <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
                 <p style="font-size:13px; color:var(--text-muted);">Recomendado para correção ao vivo, durante a aplicação.</p>
                 <label>Foto<input type="file" name="foto" accept="image/*" capture="environment" required></label>
+                <div id="pre-check-status" style="font-size:12px; margin:6px 0 10px; min-height:16px; line-height:1.5;"></div>
                 <p style="font-size:11px; color:var(--text-muted);">No celular abre a câmera direto.</p>
                 <button type="submit" class="btn btn-primary" style="width:100%;">Processar 1 foto</button>
             </form>
@@ -11930,6 +12126,129 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
 
             // Individual
             var fs = document.getElementById('form-single');
+
+        function analisarFoto(file, statusEl) {{
+            statusEl.innerHTML = '🔄 Verificando foto...';
+            statusEl.style.color = 'var(--text-muted)';
+            var img = new Image();
+            var url = URL.createObjectURL(file);
+            img.onload = function() {{
+                try {{
+                    var maxDim = 900;
+                    var scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+                    var w = Math.round(img.width * scale);
+                    var h = Math.round(img.height * scale);
+                    var canvas = document.createElement('canvas');
+                    canvas.width = w; canvas.height = h;
+                    var ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, w, h);
+                    var data = ctx.getImageData(0, 0, w, h).data;
+
+                    var gray = new Uint8ClampedArray(w * h);
+                    for (var i = 0; i < w * h; i++) {{
+                        var r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+                        gray[i] = (0.299 * r + 0.587 * g + 0.114 * b);
+                    }}
+
+                    // 1) Brilho medio da foto inteira
+                    var soma = 0;
+                    for (var i2 = 0; i2 < gray.length; i2++) soma += gray[i2];
+                    var brilhoMedio = soma / gray.length;
+
+                    // 2) Nitidez aproximada (variancia de gradiente simples horizontal/vertical)
+                    var somaGrad = 0, nGrad = 0;
+                    for (var y = 1; y < h - 1; y += 2) {{
+                        for (var x = 1; x < w - 1; x += 2) {{
+                            var idx = y * w + x;
+                            var gx = gray[idx + 1] - gray[idx - 1];
+                            var gy = gray[idx + w] - gray[idx - w];
+                            somaGrad += gx * gx + gy * gy;
+                            nGrad++;
+                        }}
+                    }}
+                    var nitidez = nGrad > 0 ? (somaGrad / nGrad) : 0;
+
+                    // 3) Procura os 4 marcadores pretos dos cantos: pega o bloco mais escuro
+                    // dentro de uma faixa de 22% da largura/altura em cada canto da FOTO
+                    // (nao do cartao -- por isso e so uma checagem aproximada, o backend
+                    // continua sendo quem valida de verdade).
+                    function blocoMaisEscuro(x0, x1, y0, y1) {{
+                        var passo = 6;
+                        var melhor = 255;
+                        for (var by = y0; by < y1; by += passo) {{
+                            for (var bx = x0; bx < x1; bx += passo) {{
+                                var somaB = 0, nB = 0;
+                                var yMax = Math.min(by + 12, h);
+                                var xMax = Math.min(bx + 12, w);
+                                for (var yy = by; yy < yMax; yy++) {{
+                                    for (var xx = bx; xx < xMax; xx++) {{
+                                        somaB += gray[yy * w + xx];
+                                        nB++;
+                                    }}
+                                }}
+                                if (nB > 0) {{
+                                    var media = somaB / nB;
+                                    if (media < melhor) melhor = media;
+                                }}
+                            }}
+                        }}
+                        return melhor;
+                    }}
+
+                    var margX = Math.round(w * 0.22);
+                    var margY = Math.round(h * 0.22);
+                    var cantoTL = blocoMaisEscuro(0, margX, 0, margY);
+                    var cantoTR = blocoMaisEscuro(w - margX, w, 0, margY);
+                    var cantoBL = blocoMaisEscuro(0, margX, h - margY, h);
+                    var cantoBR = blocoMaisEscuro(w - margX, w, h - margY, h);
+
+                    var LIMIAR_MARCADOR = 90;
+                    var cantosFaltando = [];
+                    if (cantoTL > LIMIAR_MARCADOR) cantosFaltando.push('superior-esquerdo');
+                    if (cantoTR > LIMIAR_MARCADOR) cantosFaltando.push('superior-direito');
+                    if (cantoBL > LIMIAR_MARCADOR) cantosFaltando.push('inferior-esquerdo');
+                    if (cantoBR > LIMIAR_MARCADOR) cantosFaltando.push('inferior-direito');
+
+                    var problemas = [];
+                    if (brilhoMedio < 60) problemas.push('💡 Foto muito escura — tire com mais luz');
+                    if (brilhoMedio > 235) problemas.push('☀️ Foto muito clara/estourada — evite luz direta forte ou flash');
+                    if (nitidez < 25) problemas.push('🔍 Foto pode estar desfocada — segure firme e tire de novo');
+                    if (cantosFaltando.length > 0) {{
+                        problemas.push('📐 Não encontrei o marcador preto no canto ' + cantosFaltando.join(', ') + ' — inclua toda a folha no enquadramento');
+                    }}
+
+                    URL.revokeObjectURL(url);
+
+                    if (problemas.length === 0) {{
+                        statusEl.innerHTML = '✅ Cartão parece bem enquadrado e nítido — pode enviar.';
+                        statusEl.style.color = 'var(--green)';
+                    }} else {{
+                        statusEl.innerHTML = problemas.map(function(p) {{ return '⚠️ ' + p; }}).join('<br>') +
+                            '<br><small style="color:var(--text-muted);">Checagem rápida feita no celular — se achar que está tudo certo, pode enviar mesmo assim.</small>';
+                        statusEl.style.color = 'var(--orange)';
+                    }}
+                }} catch (err) {{
+                    statusEl.innerHTML = '';
+                }}
+            }};
+            img.onerror = function() {{
+                statusEl.innerHTML = '';
+                URL.revokeObjectURL(url);
+            }};
+            img.src = url;
+        }}
+
+        var inputFoto = fs ? fs.querySelector('input[name="foto"]') : null;
+        var statusFoto = document.getElementById('pre-check-status');
+        if (inputFoto && statusFoto) {{
+            inputFoto.addEventListener('change', function() {{
+                if (inputFoto.files && inputFoto.files[0]) {{
+                    analisarFoto(inputFoto.files[0], statusFoto);
+                }}
+            }});
+        }}
+
+
             if (fs) {{
                 fs.addEventListener('submit', function(e) {{
                     var btn = fs.querySelector('button[type="submit"]');
