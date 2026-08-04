@@ -1165,6 +1165,11 @@ function _walmirToggleSidebar() {
   html.setAttribute('data-sidebar', next);
   try { localStorage.setItem('walmir-sidebar', next); } catch(e) {}
 }
+function _walmirToggleMobileMenu() {
+  var html = document.documentElement;
+  var cur = html.getAttribute('data-mobile-menu') || 'closed';
+  html.setAttribute('data-mobile-menu', cur === 'open' ? 'closed' : 'open');
+}
 </script>"""
 
 
@@ -1243,6 +1248,11 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
 </head>
 <body>
     <div class="app">
+        <div class="mobile-topbar">
+            <button class="mobile-menu-btn" onclick="_walmirToggleMobileMenu()" type="button" aria-label="Abrir menu">☰</button>
+            <span class="mobile-topbar-title">Sistema Pedagógico</span>
+        </div>
+        <div class="mobile-backdrop" onclick="document.documentElement.setAttribute('data-mobile-menu','closed')"></div>
         <aside class="sidebar" style="display:flex; flex-direction:column;">
             <button class="sidebar-toggle" onclick="_walmirToggleSidebar()" type="button" title="Recolher/expandir menu" aria-label="Recolher menu">
                 <span class="sidebar-toggle-icon">≡</span>
@@ -1662,11 +1672,73 @@ def home(request: Request):
         </div>
     """
 
+    # Grid de atalhos tipo "badge" pra tela inicial no celular — só aparece em telas
+    # estreitas (via media query no <style> abaixo, escopado só nessa página, sem
+    # mexer no app.css principal). No desktop o menu lateral já funciona bem, então
+    # esse grid fica escondido lá. Mesmos destinos e ícones do menu lateral, respeitando
+    # as mesmas regras de permissão (admin/gestor).
+    is_gestor = bool(prof and prof.get("is_gestor"))
+    badges_config = [
+        ("✏️", "Nova questão", "/questoes/nova", True),
+        ("📝", "Atividades", "/provas", True),
+        ("📤", "Aplicar", "/aplicacoes/nova", True),
+        ("📋", "Minhas aplic.", "/minhas-aplicacoes", True),
+        ("📷", "Digitalizar", "/escanear", True),
+        ("📊", "Simulados", "/simulados", True),
+        ("📚", "Disciplinas", "/disciplinas", is_admin),
+        ("🎯", "Habilidades", "/habilidades", is_admin),
+        ("👥", "Turmas", "/turmas", is_admin),
+        ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
+        ("📈", "Análises", "/analises-pedagogicas", is_admin or is_gestor),
+        ("👤", "Usuários", "/admin/usuarios", is_admin),
+    ]
+    badges_html = "".join(
+        f'<a href="{href}" class="mobile-badge"><span class="mobile-badge-icon">{icone}</span><span class="mobile-badge-label">{label}</span></a>'
+        for icone, label, href, visivel in badges_config if visivel
+    )
+    mobile_launcher_html = f"""
+        <div class="mobile-launcher">
+            <div class="mobile-launcher-grid">
+                {badges_html}
+            </div>
+        </div>
+        <style>
+        .mobile-launcher {{ display: none; }}
+        @media (max-width: 768px) {{
+            .mobile-launcher {{
+                display: block;
+                margin: 4px 0 24px 0;
+            }}
+            .mobile-launcher-grid {{
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 10px;
+            }}
+            .mobile-badge {{
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                padding: 16px 6px;
+                background: var(--bg-subtle);
+                border-radius: 14px;
+                text-decoration: none;
+                color: inherit;
+                text-align: center;
+            }}
+            .mobile-badge-icon {{ font-size: 26px; line-height: 1; }}
+            .mobile-badge-label {{ font-size: 11px; font-weight: 600; line-height: 1.2; }}
+        }}
+        </style>
+    """
+
     content = f"""
         <div class="page-header">
             <h1 style="margin-bottom:4px;">Olá, {nome_prof} 👋</h1>
             <p class="subtitle" style="margin-top:0;">Veja seu panorama atualizado.</p>
         </div>
+        {mobile_launcher_html}
         {acervo_html}
         {painel_html}
         {acoes_html}

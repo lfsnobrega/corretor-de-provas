@@ -568,10 +568,74 @@ ul.clean li:hover { background: var(--bg-subtle); }
 .btn-link { background: transparent; border: none; color: var(--accent); cursor: pointer; padding: 0; font: inherit; }
 .btn-link:hover { text-decoration: underline; }
 
-/* ═══ FORMS (mobile básico) ═══ */
+/* ═══ MOBILE: menu vira gaveta (drawer) que desliza por cima, sem empurrar o
+   conteúdo pra baixo (correção 04/08/2026 — antes o menu inteiro empilhava
+   acima da tela) ═══ */
+.mobile-topbar, .mobile-menu-btn, .mobile-backdrop { display: none; }
+
 @media (max-width: 768px) {
   .app { flex-direction: column; }
-  .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); }
+
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 900;
+  }
+  .mobile-topbar-title { font-weight: 700; font-size: 14px; color: var(--text); }
+  .mobile-menu-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 38px;
+    height: 38px;
+    font-size: 18px;
+    cursor: pointer;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 260px;
+    max-width: 82vw;
+    z-index: 1000;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: var(--shadow-strong);
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    border-bottom: none;
+  }
+  [data-mobile-menu="open"] .sidebar { transform: translateX(0); }
+
+  .mobile-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 999;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+  [data-mobile-menu="open"] .mobile-backdrop { opacity: 1; pointer-events: auto; }
+
+  /* O botão de recolher (desktop, modo ícone-só) não faz sentido no mobile —
+     a gaveta já some inteira quando fechada. */
+  .sidebar .sidebar-toggle { display: none; }
+
   .main { padding: 18px; }
 }
 
