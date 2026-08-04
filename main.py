@@ -6782,11 +6782,26 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
     if h < 400 or w < 300:
         return {"success": False, "error": f"Imagem muito pequena ({w}×{h}px). Use uma foto com pelo menos 400×300px."}
 
-    # === STEP 1: Detect corner markers ===
+    # === STEP 1: Detect corner markers — VERSÃO ROBUSTA A DISTÂNCIA (28/07/2026) ===
+    # Antes usava um único limiar (Otsu) pra foto INTEIRA. Isso quebra assim que
+    # aparece bastante fundo (mesa, mão, chão) ao redor do cartão — comportamento
+    # normal de quem fotografa com margem de segurança — porque o Otsu passa a
+    # confundir "fundo" com "marcador escuro" e tudo vira um borrão só (contorno
+    # único). Trocado por threshold ADAPTATIVO (compara cada pixel só com sua
+    # vizinhança local, não a foto toda) — funciona igual não importa quanto fundo
+    # apareça na foto.
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    block_size = int(w * 0.025)
+    if block_size % 2 == 0:
+        block_size += 1
+    block_size = max(11, block_size)
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        block_size, 12
+    )
+    # RETR_LIST em vez de RETR_EXTERNAL: a moldura decorativa do cartão forma um
+    # contorno fechado que, com RETR_EXTERNAL, "esconde" tudo que está dentro dela.
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     candidates = []
     for cnt in contours:
@@ -6802,7 +6817,7 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
         rect_area = ww * hh
         if area / rect_area < 0.7:
             continue
-        if ww < 15 or ww > w * 0.15:
+        if ww < 8 or ww > w * 0.15:
             continue
         cx, cy = x + ww/2, y + hh/2
         candidates.append((cx, cy, area))
@@ -6810,49 +6825,49 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
     if len(candidates) < 4:
         return {"success": False, "error": f"Detectados apenas {len(candidates)} candidatos a marcador (esperados 4 ou mais). Verifique se a foto mostra a folha inteira, está bem iluminada e nítida."}
 
-    # Identificar o marcador mais próximo de cada canto da imagem.
-    # Os QR finder patterns ficam todos juntos perto do QR; nossos marcadores ficam
-    # nos cantos extremos da folha. Por isso, pra cada canto da imagem, pegar o
-    # candidato mais próximo (dentro de uma zona razoável) é mais robusto que pegar
-    # os 4 maiores.
-    max_corner_dist = (w * w + h * h) ** 0.5 * 0.30  # diagonal × 30%
+    # Acha os 4 EXTREMOS do grupo de candidatos (não mais "o mais perto de cada
+    # canto DA FOTO" — isso falhava quando havia muito fundo ao redor, porque a
+    # distância até o canto real da folha cresce e passa do limite de busca).
+    # Robusto a qualquer zoom/distância, desde que os 4 marcadores tenham sido
+    # detectados.
+    tl_c = min(candidates, key=lambda c: c[0] + c[1])
+    br_c = max(candidates, key=lambda c: c[0] + c[1])
+    tr_c = max(candidates, key=lambda c: c[0] - c[1])
+    bl_c = min(candidates, key=lambda c: c[0] - c[1])
+    tl, tr, bl, br = (tl_c[0], tl_c[1]), (tr_c[0], tr_c[1]), (bl_c[0], bl_c[1]), (br_c[0], br_c[1])
 
-    def closest_in_zone(corner_x, corner_y):
-        best = None
-        best_d = float("inf")
-        for cx, cy, a in candidates:
-            d = ((cx - corner_x) ** 2 + (cy - corner_y) ** 2) ** 0.5
-            if d > max_corner_dist:
-                continue
-            if d < best_d:
-                best = (cx, cy)
-                best_d = d
-        return best
-
-    tl = closest_in_zone(0, 0)
-    tr = closest_in_zone(w, 0)
-    bl = closest_in_zone(0, h)
-    br = closest_in_zone(w, h)
-
-    if not all([tl, tr, bl, br]):
-        found = sum(1 for m in [tl, tr, bl, br] if m)
+    if len({tl, tr, bl, br}) < 4:
+        found = len({tl, tr, bl, br})
         return {"success": False, "error": f"Não foi possível identificar os 4 marcadores de canto da folha. Encontrei {found} de 4. Verifique se a foto inclui os 4 cantos da folha, com boa iluminação."}
 
-    # Garantir que os 4 marcadores são distintos (não o mesmo candidato pego 2x)
-    pontos_set = {tl, tr, bl, br}
-    if len(pontos_set) < 4:
-        return {"success": False, "error": "Marcadores de canto sobrepostos detectados. A folha pode estar parcialmente fora do enquadramento."}
-
-    # Validação geométrica: os 4 pontos precisam formar um quadrilátero que cobre quase
-    # a folha inteira. Sem isso, um marcador ausente (ex: foto cortada antes da margem de
-    # baixo) pode "casar" com um blob errado relativamente próximo, gerando leitura
-    # completamente errada em vez de um erro claro.
+    # Validação de FORMA (substitui a antiga exigência de "ocupar 60% da FOTO", que
+    # obrigava fotografar bem de perto): lados opostos com comprimento parecido +
+    # proporção compatível com folha A4. Funciona em qualquer distância/zoom, e
+    # ainda pega o caso original que a checagem antiga tentava evitar (marcador
+    # ausente "casando" com um blob errado, gerando um retângulo torto).
     largura_topo = tr[0] - tl[0]
     largura_base = br[0] - bl[0]
     altura_esq = bl[1] - tl[1]
     altura_dir = br[1] - tr[1]
-    if min(largura_topo, largura_base) < w * 0.6 or min(altura_esq, altura_dir) < h * 0.6:
-        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo plausível — a foto provavelmente não inclui a folha inteira (confira principalmente a margem de baixo)."}
+
+    def _lado_valido(a, b, tolerancia=0.20):
+        if a <= 0 or b <= 0:
+            return False
+        menor, maior = min(a, b), max(a, b)
+        return (menor / maior) >= (1 - tolerancia)
+
+    if not _lado_valido(largura_topo, largura_base) or not _lado_valido(altura_esq, altura_dir):
+        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo consistente — pode ser que algum marcador tenha sido confundido com outra coisa na foto. Tente novamente com boa iluminação e o cartão sem dobras."}
+
+    ASPECT_A4 = 210 / 297
+    largura_media = (largura_topo + largura_base) / 2
+    altura_media = (altura_esq + altura_dir) / 2
+    proporcao = (largura_media / altura_media) if altura_media else 0
+    if not (ASPECT_A4 * 0.75 < proporcao < ASPECT_A4 * 1.25):
+        return {"success": False, "error": f"A proporção entre os marcadores não bate com uma folha A4 — pode ser que algum marcador tenha sido confundido com outra coisa na foto (proporção detectada: {proporcao:.2f}, esperado perto de {ASPECT_A4:.2f})."}
+
+    if largura_media < w * 0.10 or altura_media < h * 0.10:
+        return {"success": False, "error": "O cartão está pequeno demais na foto — aproxime um pouco mais e tente novamente."}
 
     # === STEP 2: Perspective transform to canonical A4 ===
     # Canonical A4 at ~144 DPI: 1191 x 1684 px
@@ -11835,10 +11850,29 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
     if h < 400 or w < 300:
         return {"success": False, "error": f"Imagem muito pequena ({w}×{h}px)."}
 
-    # Detectar marcadores de canto (mesmo algoritmo do OMR padrão)
+    # === Detectar marcadores de canto — VERSÃO ROBUSTA A DISTÂNCIA (28/07/2026) ===
+    # Antes usava um único limiar (Otsu) pra foto INTEIRA. Isso quebra assim que
+    # aparece bastante fundo (mesa, mão, chão) ao redor do cartão — comportamento
+    # normal de quem fotografa com margem de segurança — porque o Otsu passa a
+    # confundir "fundo" com "marcador escuro" e tudo vira um borrão só (contorno
+    # único). Trocado por threshold ADAPTATIVO (compara cada pixel só com sua
+    # vizinhança local, não a foto toda) — funciona igual não importa quanto fundo
+    # apareça na foto. Bug real relatado por Felipe: "só funciona se eu faço a foto
+    # bem de perto" — reproduzido e confirmado com foto sintética antes desse fix.
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    block_size = int(w * 0.025)
+    if block_size % 2 == 0:
+        block_size += 1
+    block_size = max(11, block_size)
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        block_size, 12
+    )
+    # RETR_LIST em vez de RETR_EXTERNAL: a moldura decorativa do cartão forma um
+    # contorno fechado que, com RETR_EXTERNAL, "esconde" tudo que está dentro dela
+    # (os marcadores, bolhas, texto) — RETR_LIST pega todos os contornos, não só o
+    # mais externo.
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     candidates = []
     for cnt in contours:
@@ -11848,35 +11882,53 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
         if ww == 0 or hh == 0: continue
         if not (0.7 < ww/hh < 1.3): continue
         if (ww * hh) == 0 or area / (ww * hh) < 0.7: continue
-        if ww < 15 or ww > w * 0.15: continue
+        if ww < 8 or ww > w * 0.15: continue
         candidates.append((x + ww/2, y + hh/2, area))
 
     if len(candidates) < 4:
-        return {"success": False, "error": f"Apenas {len(candidates)} marcadores detectados (esperados 4)."}
+        return {"success": False, "error": f"Apenas {len(candidates)} marcadores detectados (esperados 4 ou mais). Verifique se a foto mostra a folha inteira, está bem iluminada e nítida."}
 
-    max_d = (w*w + h*h)**0.5 * 0.30
-    def closest(cx, cy):
-        best, bd = None, float("inf")
-        for px, py, _ in candidates:
-            d = ((px-cx)**2 + (py-cy)**2)**0.5
-            if d < max_d and d < bd:
-                best, bd = (px, py), d
-        return best
+    # Acha os 4 EXTREMOS do grupo de candidatos (não mais "o mais perto de cada
+    # canto DA FOTO" — isso falhava quando havia muito fundo, porque a distância até
+    # o canto real da folha cresce e passa do limite de busca). Robusto a qualquer
+    # zoom/distância, desde que os 4 marcadores tenham sido detectados.
+    tl_c = min(candidates, key=lambda c: c[0] + c[1])
+    br_c = max(candidates, key=lambda c: c[0] + c[1])
+    tr_c = max(candidates, key=lambda c: c[0] - c[1])
+    bl_c = min(candidates, key=lambda c: c[0] - c[1])
+    tl, tr, bl, br = (tl_c[0], tl_c[1]), (tr_c[0], tr_c[1]), (bl_c[0], bl_c[1]), (br_c[0], br_c[1])
 
-    tl, tr, bl, br = closest(0,0), closest(w,0), closest(0,h), closest(w,h)
-    if not all([tl, tr, bl, br]) or len({tl,tr,bl,br}) < 4:
+    if len({tl, tr, bl, br}) < 4:
         return {"success": False, "error": "Não foi possível identificar os 4 marcadores de canto."}
 
-    # Validação geométrica: os 4 pontos precisam formar um quadrilátero que realmente
-    # cobre quase a folha inteira. Sem isso, um marcador ausente (ex: foto cortada antes
-    # da margem de baixo) pode "casar" com um blob errado que está só relativamente perto,
-    # gerando uma leitura completamente errada em vez de um erro claro.
+    # Validação de FORMA (substitui a antiga exigência de "ocupar 60% da FOTO", que
+    # obrigava fotografar bem de perto): lados opostos com comprimento parecido +
+    # proporção compatível com folha A4. Funciona em qualquer distância/zoom, e
+    # ainda pega o caso original que a checagem antiga tentava evitar (marcador
+    # ausente "casando" com um blob errado, gerando um retângulo torto).
     largura_topo = tr[0] - tl[0]
     largura_base = br[0] - bl[0]
     altura_esq = bl[1] - tl[1]
     altura_dir = br[1] - tr[1]
-    if min(largura_topo, largura_base) < w * 0.6 or min(altura_esq, altura_dir) < h * 0.6:
-        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo plausível — a foto provavelmente não inclui a folha inteira (confira principalmente a margem de baixo)."}
+
+    def _lado_valido(a, b, tolerancia=0.20):
+        if a <= 0 or b <= 0:
+            return False
+        menor, maior = min(a, b), max(a, b)
+        return (menor / maior) >= (1 - tolerancia)
+
+    if not _lado_valido(largura_topo, largura_base) or not _lado_valido(altura_esq, altura_dir):
+        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo consistente — pode ser que algum marcador tenha sido confundido com outra coisa na foto. Tente novamente com boa iluminação e o cartão sem dobras."}
+
+    ASPECT_A4 = 210 / 297
+    largura_media = (largura_topo + largura_base) / 2
+    altura_media = (altura_esq + altura_dir) / 2
+    proporcao = (largura_media / altura_media) if altura_media else 0
+    if not (ASPECT_A4 * 0.75 < proporcao < ASPECT_A4 * 1.25):
+        return {"success": False, "error": f"A proporção entre os marcadores não bate com uma folha A4 — pode ser que algum marcador tenha sido confundido com outra coisa na foto (proporção detectada: {proporcao:.2f}, esperado perto de {ASPECT_A4:.2f})."}
+
+    if largura_media < w * 0.10 or altura_media < h * 0.10:
+        return {"success": False, "error": "O cartão está pequeno demais na foto — aproxime um pouco mais e tente novamente."}
 
     # Perspective transform → A4 canônico 1191×1684px
     canon_w, canon_h = 1191, 1684
