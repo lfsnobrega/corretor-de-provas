@@ -1,0 +1,25 @@
+{
+  "name": "Sistema Pedagógico do Walmir",
+  "short_name": "Ped. Walmir",
+  "description": "Provas, simulados, escaneamento de cartões-resposta e análises pedagógicas — E.M. Walmir de Freitas Monteiro",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4C6EF5",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

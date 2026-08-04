@@ -699,6 +699,26 @@ async def _enriquecer_item_simulado(job: dict, item: dict):
         conn.close()
 
 
+async def _enriquecer_item_prova(job: dict, item: dict):
+    """Para prova normal: só anota o nome do aluno no resultado (não mexe em mais
+    nada — diferente do simulado, a prova normal já trata duplicata/entrega em
+    outro lugar). Serve pra mostrar o nome na lista ao vivo de progresso do
+    escaneamento, em vez de só um contador (28/07/2026)."""
+    resultado = item["resultado"]
+    if not resultado or not resultado.get("success"):
+        return
+    aluno_id = resultado.get("aluno_id")
+    if not aluno_id:
+        return
+    conn = get_db()
+    try:
+        aluno = conn.execute("SELECT nome FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if aluno:
+            item["resultado"]["aluno_nome"] = aluno["nome"]
+    finally:
+        conn.close()
+
+
 async def _worker_escaneamento(worker_num: int):
     """Loop infinito: pega o próximo item da fila global e processa (numa thread separada,
     sem travar o servidor pros outros usuários)."""
@@ -720,6 +740,7 @@ async def _worker_escaneamento(worker_num: int):
                     _processar_cartao_resposta, item["bytes"], ctx["n_questoes"],
                     filename=item["filename"] or "", questoes_info=ctx["questoes_info"]
                 )
+                await _enriquecer_item_prova(job, item)
             else:  # simulado
                 ctx = job["contexto"]
                 item["resultado"] = await asyncio.to_thread(
@@ -766,6 +787,21 @@ def _status_lote_escaneamento(lote_id: str) -> Optional[dict]:
     itens_restantes = job["total"] - job["processados"]
     eta_segundos = math.ceil((posicao_fila_global + itens_restantes) / N_WORKERS_ESCANEAMENTO * tempo_medio) if itens_restantes else 0
 
+    # Lista dos últimos cartões concluídos, pra mostrar um checklist ao vivo em vez
+    # de só uma porcentagem abstrata (melhoria de UX, 28/07/2026 — inspirado em como
+    # apps de mercado tipo ZipGrade mostram feedback item a item, não só um total).
+    concluidos = [it for it in job["itens"] if it["status"] == "concluido"]
+    concluidos_recentes = []
+    for it in concluidos[-8:]:
+        r = it.get("resultado") or {}
+        ok = bool(r.get("success"))
+        nome = r.get("aluno_nome") or it.get("filename") or "cartão"
+        concluidos_recentes.append({
+            "nome": nome,
+            "ok": ok,
+            "erro": (r.get("error") or "não foi possível ler") if not ok else None,
+        })
+
     return {
         "lote_id": lote_id,
         "tipo": job["tipo"],
@@ -774,6 +810,7 @@ def _status_lote_escaneamento(lote_id: str) -> Optional[dict]:
         "concluido": job["concluido"],
         "posicao_fila": posicao_fila_global,
         "eta_segundos": eta_segundos,
+        "concluidos_recentes": concluidos_recentes,
         "redirect_url": job["contexto"].get("revisar_url") if job["concluido"] else None,
     }
 
@@ -1079,6 +1116,24 @@ def _css_version():
 CSS_VERSION = _css_version()
 CSS_LINK = f'<link rel="stylesheet" href="/static/css/app.css?v={CSS_VERSION}">'
 
+# Tags de PWA (Progressive Web App) — permitem "Adicionar à tela inicial" no
+# celular, abrindo em tela cheia (sem barra do navegador), com ícone próprio.
+# Não faz o site funcionar offline de propósito (ver nota em static/sw.js) —
+# só melhora a experiência de abrir o sistema no dia a dia.
+PWA_HEAD_TAGS = """<link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#4C6EF5">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Ped. Walmir">
+    <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('/static/sw.js').catch(function(){});
+      });
+    }
+    </script>"""
+
 # Script de tema (claro/escuro) — aplicado em todas as páginas via render_page.
 # Lê preferência do localStorage e aplica antes do render pra evitar flash.
 THEME_BOOT_SCRIPT = """<script>
@@ -1133,6 +1188,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     {INTER_FONT}
     {THEME_BOOT_SCRIPT}
     {CSS_LINK}
+    {PWA_HEAD_TAGS}
     {head_extra}
 </head>
 <body>
@@ -1182,6 +1238,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     {INTER_FONT}
     {THEME_BOOT_SCRIPT}
     {CSS_LINK}
+    {PWA_HEAD_TAGS}
     {head_extra}
 </head>
 <body>
@@ -7053,6 +7110,10 @@ def tela_status_lote(lote_id: str):
             <div id="st-barra" style="height:14px; width:0%; background:var(--primary, #4C6EF5); transition:width 0.4s;"></div>
         </div>
         <p id="st-eta" style="margin-top:14px; color:var(--text-muted); font-size:13px;"></p>
+        <div id="st-lista" style="margin-top:14px; border-top:1px solid var(--border); padding-top:10px; display:none;">
+            <p style="font-size:11px; color:var(--text-muted); margin:0 0 6px; text-transform:uppercase; letter-spacing:0.4px;">Últimos processados</p>
+            <ul id="st-lista-itens" style="list-style:none; margin:0; padding:0; font-size:13px; max-height:220px; overflow-y:auto;"></ul>
+        </div>
         <p style="margin-top:14px; font-size:12px; color:var(--text-muted);">Pode fechar esta aba e voltar depois — o processamento continua em segundo plano. Essa mesma tela reabre no ponto em que parou.</p>
     </div>
     <script>
@@ -7061,6 +7122,24 @@ def tela_status_lote(lote_id: str):
             if (s < 60) return s + 's';
             const m = Math.floor(s / 60), r = s % 60;
             return m + 'min ' + r + 's';
+        }}
+        function renderizarLista(itens) {{
+            const container = document.getElementById('st-lista');
+            const ul = document.getElementById('st-lista-itens');
+            if (!itens || itens.length === 0) {{
+                container.style.display = 'none';
+                return;
+            }}
+            container.style.display = 'block';
+            // Mostra os mais recentes primeiro (mais fácil ver o que acabou de rodar)
+            const ordenados = itens.slice().reverse();
+            ul.innerHTML = ordenados.map(function(it) {{
+                if (it.ok) {{
+                    return '<li style="padding:4px 0; border-bottom:1px solid var(--border);">✅ ' + it.nome + '</li>';
+                }} else {{
+                    return '<li style="padding:4px 0; border-bottom:1px solid var(--border); color:var(--orange, #E8590C);">⚠️ ' + it.nome + ' — ' + it.erro + '</li>';
+                }}
+            }}).join('');
         }}
         async function checarStatus() {{
             try {{
@@ -7073,6 +7152,7 @@ def tela_status_lote(lote_id: str):
                 const pct = d.total ? Math.round(d.processados / d.total * 100) : 100;
                 document.getElementById('st-contagem').textContent = `${{d.processados}} de ${{d.total}} cartões processados`;
                 document.getElementById('st-barra').style.width = pct + '%';
+                renderizarLista(d.concluidos_recentes);
                 if (d.posicao_fila > 0) {{
                     document.getElementById('st-posicao').textContent = `${{d.posicao_fila}} cartão(ões) de outros professores na sua frente`;
                 }} else {{
