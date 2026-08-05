@@ -1413,7 +1413,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         )
         alts_html = (
             f'<li style="list-style:none; padding:8px; background:var(--bg-subtle); border-radius:4px;">'
-            f'<div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">'
+            f'<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px;">'
             f'<div><strong style="font-size:12px; text-transform:uppercase; color:var(--text-muted);">Coluna A</strong><ul style="margin:6px 0 0 18px; padding:0;">{ca_html}</ul></div>'
             f'<div><strong style="font-size:12px; text-transform:uppercase; color:var(--text-muted);">Coluna B</strong><ul style="margin:6px 0 0 18px; padding:0;">{cb_html}</ul></div>'
             f'</div></li>'
@@ -2900,11 +2900,11 @@ def _render_picker_questoes(conn, selected_ids=None):
     <div>
         <h3 style="margin-top:0;">Questões disponíveis</h3>
         <div style="background:var(--bg-subtle); padding:12px; border-radius:6px; margin-bottom:12px;">
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:8px;">
                 <label style="margin:0;">Disciplina<select id="filtro-disciplina">__DISC_OPTS__</select></label>
                 <label style="margin:0;">Ano<select id="filtro-ano">__ANOS_OPTS__</select></label>
             </div>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:8px; margin-top:8px;">
                 <label style="margin:0;">BNCC<input type="text" id="filtro-bncc" placeholder="EF06MA"></label>
                 <label style="margin:0;">Buscar<input type="text" id="filtro-q" placeholder="palavra-chave no enunciado"></label>
             </div>
@@ -5881,7 +5881,7 @@ def analise_aplicacao(aplicacao_id: int):
             """
         alertas_html = f"""
             <h2 style="margin-top:32px;">🎯 Alertas automáticos</h2>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px;">
                 {alerta_list or '<div></div>'}
                 {destaque_list or '<div></div>'}
             </div>
@@ -6018,7 +6018,7 @@ def analise_aplicacao(aplicacao_id: int):
             for q in mais_faceis
         )
         destaques_html = f"""
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:24px 0;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin:24px 0;">
             <div class="card">
                 <div class="card-title" style="color:var(--red);">Questões mais difíceis</div>
                 <ul style="list-style:none; padding:0; margin:12px 0 0;">{items_dif}</ul>
@@ -6422,7 +6422,7 @@ def imprimir_prova(prova_id: int):
                 for a in itens_a
             )
             corpo_resposta = (
-                f'<div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:8px;">'
+                f'<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-top:8px;">'
                 f'<div><strong style="font-size:11px; color:#555;">Coluna A</strong><ul style="margin:6px 0 0 20px;">{ca}</ul></div>'
                 f'<div><strong style="font-size:11px; color:#555;">Coluna B</strong><ul style="margin:6px 0 0 20px;">{cb}</ul></div>'
                 f'</div>'
@@ -7325,7 +7325,7 @@ def form_escanear(aplicacao_id: int):
             </ul>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:18px; margin-top:24px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-top:24px;">
 
             <form id="form-single" action="/aplicacoes/{aplicacao_id}/escanear" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
                 <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
@@ -7500,7 +7500,7 @@ async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)
         {avisos_html}
         {override_aviso}
 
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:24px; align-items:flex-start;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:24px; align-items:flex-start;">
             <div>
                 <h2 style="margin-top:0;">Imagem processada</h2>
                 <p class="muted-line">Bolhas detectadas como marcadas estão em verde. Confira se está correto antes de confirmar.</p>
@@ -9436,7 +9436,7 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
                 for h in d["melhores_habilidades"]
             ) or "<li>Nenhuma outra habilidade se destacou.</li>"
             habilidades_html = f"""
-                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:10px;">
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-top:10px;">
                     <div>
                         <p style="font-size:12px; font-weight:600; color:var(--red); margin:0 0 4px 0;">🔴 Maior dificuldade</p>
                         <ul style="margin:0 0 0 18px; font-size:12px;">{piores_li}</ul>
@@ -9477,7 +9477,7 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
             <div class="metric"><div class="metric-label">Nota média da turma</div><div class="metric-value">{media_turma}</div></div>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:18px; margin-bottom:18px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-bottom:18px;">
             <div class="card">
                 <h3 style="margin-top:0; font-size:14px;">Distribuição de faixas SAEB</h3>
                 <div style="height:220px; position:relative;"><canvas id="chart-dist-turma"></canvas></div>
@@ -10067,7 +10067,7 @@ def form_novo_simulado(request: Request):
                 </label>
                 <label>Ano<input type="number" name="ano" value="{ano_atual}" min="2024" max="2030" required></label>
             </div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
                 <label>Ano de escolaridade
                     <select name="ano_escolaridade" required>
                         <option value="">— selecione —</option>
@@ -10953,7 +10953,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             <h1>✏️ Bloco {bloco['numero']} — {bloco['disciplina_nome']}</h1>
             <p class="subtitle">{sim['nome']} · {n_add}/{n_tot} questões adicionadas</p>
         </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:20px;">
             <div>
                 <h3 style="margin-bottom:10px;">Questões do bloco <span style="font-size:13px; font-weight:400; color:var(--text-muted);">({n_add}/{n_tot})</span></h3>
                 {bloco_items}
@@ -11406,7 +11406,7 @@ def form_editar_simulado(sim_id: int):
                     <input type="number" name="ano" value="{sim['ano']}" min="2024" max="2030" required>
                 </label>
             </div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
                 <label>Ano de escolaridade
                     <select name="ano_escolaridade" required>
                         <option value="">— selecione —</option>
@@ -12309,7 +12309,7 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
             </ul>
         </div>
 
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:24px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-bottom:24px;">
 
             <!-- Individual -->
             <form id="form-single" action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-individual"
@@ -12645,7 +12645,7 @@ async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFil
             </div>
             {avisos_html}
             {override_aviso}
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:flex-start;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:24px;align-items:flex-start;">
                 <div>
                     <h2 style="margin-top:0;">Imagem processada</h2>
                     <p style="font-size:13px;color:var(--text-muted);">Confira se as marcações estão corretas antes de confirmar.</p>
@@ -13128,7 +13128,7 @@ def escanear_universal_tela(request: Request):
             </ul>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:8px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:18px;margin-bottom:8px;">
 
             <!-- Individual -->
             <form id="form-single" action="/escanear" method="post" enctype="multipart/form-data"
@@ -13310,7 +13310,7 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
                 <p class="subtitle">{apl['prova_titulo']} · {apl['turma_nome']} · <strong>{aluno['nome']}</strong></p>
             </div>
             {avisos_html}{override_aviso}
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:flex-start;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:24px;align-items:flex-start;">
                 <div>
                     <h2 style="margin-top:0;">Imagem processada</h2>
                     {preview_img}
@@ -13440,7 +13440,7 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
                 <p class="subtitle">{sim['nome']} · <strong>{aluno['nome']}</strong></p>
             </div>
             {avisos_html}{override_aviso}
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:flex-start;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:24px;align-items:flex-start;">
                 <div><h2 style="margin-top:0;">Imagem processada</h2>{preview_img}</div>
                 <div>
                     <h2 style="margin-top:0;">Respostas detectadas</h2>
