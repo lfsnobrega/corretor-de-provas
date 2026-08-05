@@ -2219,13 +2219,13 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
     filtros_html = (
         f'<form action="/questoes" method="get" '
         f'style="background:var(--bg-subtle); padding:14px 16px; border-radius:8px; margin-bottom:18px;">'
-        f'<div style="display:grid; grid-template-columns: 1.5fr 1.2fr 1.2fr 2fr auto auto; gap:10px; align-items:end;">'
-        f'<label style="margin:0;">Disciplina<select name="disciplina">{disciplinas_opts}</select></label>'
-        f'<label style="margin:0;">Ano<select name="ano">{anos_opts}</select></label>'
-        f'<label style="margin:0;">Código BNCC<input type="text" name="bncc" placeholder="EF06MA" value="{bncc or ""}"></label>'
-        f'<label style="margin:0;">Buscar no enunciado<input type="text" name="q" placeholder="palavra-chave" value="{q or ""}"></label>'
-        f'<button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>'
-        f'<a href="/questoes" class="btn" style="margin:0;">Limpar</a>'
+        f'<div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">'
+        f'<label style="margin:0; flex:1 1 130px;">Disciplina<select name="disciplina">{disciplinas_opts}</select></label>'
+        f'<label style="margin:0; flex:1 1 100px;">Ano<select name="ano">{anos_opts}</select></label>'
+        f'<label style="margin:0; flex:1 1 130px;">Código BNCC<input type="text" name="bncc" placeholder="EF06MA" value="{bncc or ""}"></label>'
+        f'<label style="margin:0; flex:1 1 160px;">Buscar no enunciado<input type="text" name="q" placeholder="palavra-chave" value="{q or ""}"></label>'
+        f'<button type="submit" class="btn btn-primary" style="margin:0; flex:0 0 auto;">Filtrar</button>'
+        f'<a href="/questoes" class="btn" style="margin:0; flex:0 0 auto;">Limpar</a>'
         f'</div></form>'
     )
 
@@ -2784,12 +2784,12 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
     filtros_html = (
         f'<form action="/provas" method="get" '
         f'style="background:var(--bg-subtle); padding:14px 16px; border-radius:8px; margin-bottom:18px;">'
-        f'<div style="display:grid; grid-template-columns: 2fr 1.2fr 1.2fr auto auto; gap:10px; align-items:end;">'
-        f'<label style="margin:0;">Buscar por título<input type="text" name="q" placeholder="palavra do título" value="{q or ""}"></label>'
-        f'<label style="margin:0;">Disciplina<select name="disciplina">{disciplinas_opts}</select></label>'
-        f'<label style="margin:0;">Ano<select name="ano">{anos_opts}</select></label>'
-        f'<button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>'
-        f'<a href="/provas" class="btn" style="margin:0;">Limpar</a>'
+        f'<div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">'
+        f'<label style="margin:0; flex:1 1 160px;">Buscar por título<input type="text" name="q" placeholder="palavra do título" value="{q or ""}"></label>'
+        f'<label style="margin:0; flex:1 1 130px;">Disciplina<select name="disciplina">{disciplinas_opts}</select></label>'
+        f'<label style="margin:0; flex:1 1 100px;">Ano<select name="ano">{anos_opts}</select></label>'
+        f'<button type="submit" class="btn btn-primary" style="margin:0; flex:0 0 auto;">Filtrar</button>'
+        f'<a href="/provas" class="btn" style="margin:0; flex:0 0 auto;">Limpar</a>'
         f'</div></form>'
     )
 
@@ -4013,13 +4013,13 @@ def listar_aplicacoes(
     filtros_html = (
         f'<form action="/aplicacoes" method="get" '
         f'style="background:var(--bg-subtle); padding:14px 16px; border-radius:8px; margin-bottom:18px;">'
-        f'<div style="display:grid; grid-template-columns: 2fr 1.3fr 1fr 1fr auto auto; gap:10px; align-items:end;">'
-        f'<label style="margin:0;">Buscar por título<input type="text" name="q" placeholder="palavra do título" value="{q or ""}"></label>'
-        f'<label style="margin:0;">Turma<select name="turma">{turmas_opts}</select></label>'
-        f'<label style="margin:0;">Modo<select name="modo">{modos_opts}</select></label>'
-        f'<label style="margin:0;">Status<select name="status">{status_opts}</select></label>'
-        f'<button type="submit" class="btn btn-primary" style="margin:0;">Filtrar</button>'
-        f'<a href="/aplicacoes" class="btn" style="margin:0;">Limpar</a>'
+        f'<div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">'
+        f'<label style="margin:0; flex:1 1 160px;">Buscar por título<input type="text" name="q" placeholder="palavra do título" value="{q or ""}"></label>'
+        f'<label style="margin:0; flex:1 1 140px;">Turma<select name="turma">{turmas_opts}</select></label>'
+        f'<label style="margin:0; flex:1 1 110px;">Modo<select name="modo">{modos_opts}</select></label>'
+        f'<label style="margin:0; flex:1 1 110px;">Status<select name="status">{status_opts}</select></label>'
+        f'<button type="submit" class="btn btn-primary" style="margin:0; flex:0 0 auto;">Filtrar</button>'
+        f'<a href="/aplicacoes" class="btn" style="margin:0; flex:0 0 auto;">Limpar</a>'
         f'</div></form>'
     )
 
