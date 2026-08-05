@@ -3790,6 +3790,177 @@ async def importar_boletim(request: Request, trimestre: int = Form(...), ano: in
     return render_page("Importação concluída", content, active="")
 
 
+@app.get("/boletim", response_class=HTMLResponse)
+def boletim_hub(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+
+    combinacoes = conn.execute("""
+        SELECT trimestre, ano, COUNT(DISTINCT aluno_id) AS n_alunos, COUNT(*) AS n_notas
+        FROM boletim_medias GROUP BY trimestre, ano ORDER BY ano DESC, trimestre DESC
+    """).fetchall()
+
+    if not combinacoes:
+        content = """
+            <div class="page-header"><h1>📊 Boletim / Conselho de Classe</h1></div>
+            <div class="empty">Nenhum dado importado ainda. <a href="/boletim/importar">Importar planilha</a></div>
+        """
+        return render_page("Boletim", content, active="")
+
+    if trimestre is None or ano is None:
+        trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
+
+    seletor_opts = "".join(
+        f'<option value="{c["trimestre"]}:{c["ano"]}"{" selected" if c["trimestre"]==trimestre and c["ano"]==ano else ""}>'
+        f'{c["trimestre"]}º Trimestre {c["ano"]} — {c["n_alunos"]} aluno(s), {c["n_notas"]} nota(s)</option>'
+        for c in combinacoes
+    )
+
+    resumo = conn.execute("""
+        SELECT
+            (SELECT COUNT(*) FROM boletim_medias WHERE trimestre=? AND ano=?) AS n_medias,
+            (SELECT COUNT(DISTINCT aluno_id) FROM boletim_medias WHERE trimestre=? AND ano=?) AS n_alunos_medias,
+            (SELECT COUNT(*) FROM boletim_faltas WHERE trimestre=? AND ano=?) AS n_faltas,
+            (SELECT COUNT(*) FROM boletim_analise WHERE trimestre=? AND ano=?) AS n_analise
+    """, (trimestre, ano, trimestre, ano, trimestre, ano, trimestre, ano)).fetchone()
+
+    turmas = conn.execute("""
+        SELECT t.id, t.nome, COUNT(DISTINCT bm.aluno_id) AS n_alunos_com_nota
+        FROM turmas t
+        JOIN alunos a ON a.turma_id = t.id
+        JOIN boletim_medias bm ON bm.aluno_id = a.id AND bm.trimestre = ? AND bm.ano = ?
+        GROUP BY t.id ORDER BY t.nome
+    """, (trimestre, ano)).fetchall()
+    conn.close()
+
+    turmas_html = "".join(
+        f'<a href="/boletim/turma?trimestre={trimestre}&ano={ano}&turma_id={t["id"]}" class="card card-link">'
+        f'<div class="card-title">Turma {t["nome"]}</div>'
+        f'<div class="card-meta">{t["n_alunos_com_nota"]} aluno(s) com nota lançada</div>'
+        f'</a>'
+        for t in turmas
+    ) or '<div class="empty">Nenhuma turma com dados nesse trimestre.</div>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>📊 Boletim / Conselho de Classe</h1>
+            <p class="subtitle">Conferência dos dados importados — clique numa turma pra ver o detalhe.</p>
+        </div>
+        <form method="get" action="/boletim" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
+            <label style="margin:0; max-width:420px;">Trimestre
+                <select name="trimestre_ano" onchange="var v=this.value.split(':'); window.location='/boletim?trimestre='+v[0]+'&ano='+v[1];">
+                    {seletor_opts}
+                </select>
+            </label>
+        </form>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin-bottom:20px;">
+            <div class="metric"><div class="metric-label">Alunos com nota</div><div class="metric-value">{resumo["n_alunos_medias"]}</div></div>
+            <div class="metric"><div class="metric-label">Notas lançadas</div><div class="metric-value">{resumo["n_medias"]}</div></div>
+            <div class="metric"><div class="metric-label">Registros de falta</div><div class="metric-value">{resumo["n_faltas"]}</div></div>
+            <div class="metric"><div class="metric-label">Observações de professores</div><div class="metric-value">{resumo["n_analise"]}</div></div>
+        </div>
+        <h3>Turmas</h3>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px;">
+            {turmas_html}
+        </div>
+    """
+    return render_page("Boletim", content, active="")
+
+
+@app.get("/boletim/turma", response_class=HTMLResponse)
+def boletim_ver_turma(request: Request, trimestre: int, ano: int, turma_id: int):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/boletim", status_code=303)
+
+    disciplinas = conn.execute("""
+        SELECT DISTINCT d.id, d.nome FROM disciplinas d
+        JOIN boletim_medias bm ON bm.disciplina_id = d.id
+        WHERE bm.trimestre = ? AND bm.ano = ?
+        ORDER BY CASE d.nome
+            WHEN 'Português' THEN 1 WHEN 'Matemática' THEN 2 WHEN 'Ciências' THEN 3
+            WHEN 'História' THEN 4 WHEN 'Geografia' THEN 5 WHEN 'Inglês' THEN 6
+            WHEN 'Arte' THEN 7 WHEN 'Ed. Física' THEN 8 WHEN 'Educação Digital' THEN 9
+            ELSE 10 END
+    """, (trimestre, ano)).fetchall()
+
+    alunos = conn.execute("""
+        SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome
+    """, (turma_id,)).fetchall()
+
+    notas_map = {}
+    for row in conn.execute("""
+        SELECT aluno_id, disciplina_id, nota FROM boletim_medias
+        WHERE trimestre = ? AND ano = ? AND aluno_id IN (SELECT id FROM alunos WHERE turma_id = ?)
+    """, (trimestre, ano, turma_id)).fetchall():
+        notas_map[(row["aluno_id"], row["disciplina_id"])] = row["nota"]
+
+    faltas_map = {}
+    for row in conn.execute("""
+        SELECT aluno_id, SUM(faltas) AS total FROM boletim_faltas
+        WHERE trimestre = ? AND ano = ? AND aluno_id IN (SELECT id FROM alunos WHERE turma_id = ?)
+        GROUP BY aluno_id
+    """, (trimestre, ano, turma_id)).fetchall():
+        faltas_map[row["aluno_id"]] = row["total"]
+
+    analise_count = {}
+    for row in conn.execute("""
+        SELECT aluno_id, COUNT(*) AS n FROM boletim_analise
+        WHERE trimestre = ? AND ano = ? AND aluno_id IN (SELECT id FROM alunos WHERE turma_id = ?)
+        GROUP BY aluno_id
+    """, (trimestre, ano, turma_id)).fetchall():
+        analise_count[row["aluno_id"]] = row["n"]
+    conn.close()
+
+    cabecalho_disc = "".join(f'<th style="padding:6px 8px; text-align:center;">{d["nome"]}</th>' for d in disciplinas)
+    linhas = ""
+    for a in alunos:
+        celulas = ""
+        for d in disciplinas:
+            nota = notas_map.get((a["id"], d["id"]))
+            celulas += f'<td style="padding:6px 8px; text-align:center;">{nota if nota is not None else "—"}</td>'
+        faltas_total = faltas_map.get(a["id"], 0)
+        n_obs = analise_count.get(a["id"], 0)
+        linhas += f"""<tr>
+            <td style="padding:6px 8px;">{a["numero"] or "—"}</td>
+            <td style="padding:6px 8px;">{a["nome"]}</td>
+            {celulas}
+            <td style="padding:6px 8px; text-align:center;">{faltas_total}</td>
+            <td style="padding:6px 8px; text-align:center;">{n_obs if n_obs else "—"}</td>
+        </tr>"""
+
+    if not disciplinas:
+        body = '<div class="empty">Nenhuma nota lançada pra essa turma nesse trimestre.</div>'
+    else:
+        body = f"""
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:6px 8px; text-align:left;">Nº</th>
+                <th style="padding:6px 8px; text-align:left;">Aluno</th>
+                {cabecalho_disc}
+                <th style="padding:6px 8px;">Faltas (total)</th>
+                <th style="padding:6px 8px;">Observações</th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+        """
+
+    content = f"""
+        <div class="page-header">
+            <h1>Turma {turma["nome"]} — {trimestre}º Trimestre {ano}</h1>
+            <p class="subtitle">{len(alunos)} aluno(s) na turma</p>
+        </div>
+        {body}
+        <div style="margin-top:16px;"><a href="/boletim?trimestre={trimestre}&ano={ano}" class="btn">← Voltar</a></div>
+    """
+    return render_page(f"Turma {turma['nome']}", content, active="")
+
+
 
 @app.get("/turmas/{turma_id}", response_class=HTMLResponse)
 def ver_turma(request: Request, turma_id: int):
