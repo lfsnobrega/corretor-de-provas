@@ -23,6 +23,7 @@ import html
 import secrets
 import json
 import urllib.parse
+import unicodedata
 
 app = FastAPI()
 
@@ -605,6 +606,52 @@ def init_db():
         FOREIGN KEY (bloco_id) REFERENCES simulado_blocos(id) ON DELETE CASCADE,
         FOREIGN KEY (questao_id) REFERENCES questoes(id)
     )""")
+
+    # ── BOLETIM / CONSELHO DE CLASSE (incorporado 05/08/2026) ──────────────
+    # Reaproveita alunos/turmas/disciplinas/professores já existentes. As 3
+    # tabelas abaixo guardam os dados por TRIMESTRE+ANO desde o início, pra
+    # não sobrescrever um trimestre com o seguinte.
+    conn.execute("""CREATE TABLE IF NOT EXISTS boletim_medias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        aluno_id INTEGER NOT NULL,
+        disciplina_id INTEGER NOT NULL,
+        trimestre INTEGER NOT NULL,
+        ano INTEGER NOT NULL,
+        nota REAL,
+        UNIQUE(aluno_id, disciplina_id, trimestre, ano),
+        FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
+        FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS boletim_faltas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        aluno_id INTEGER NOT NULL,
+        disciplina_id INTEGER NOT NULL,
+        trimestre INTEGER NOT NULL,
+        ano INTEGER NOT NULL,
+        faltas INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(aluno_id, disciplina_id, trimestre, ano),
+        FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
+        FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS boletim_analise (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        aluno_id INTEGER NOT NULL,
+        disciplina_id INTEGER NOT NULL,
+        professor_id INTEGER,
+        trimestre INTEGER NOT NULL,
+        ano INTEGER NOT NULL,
+        emocional TEXT,
+        apoio INTEGER NOT NULL DEFAULT 0,
+        alfabetizacao INTEGER NOT NULL DEFAULT 0,
+        faltoso_json TEXT,
+        observacao TEXT,
+        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(aluno_id, disciplina_id, trimestre, ano),
+        FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
+        FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id),
+        FOREIGN KEY (professor_id) REFERENCES professores(id)
+    )""")
+
     conn.commit()
     conn.close()
 
@@ -3457,6 +3504,292 @@ async def importar_excel(request: Request, arquivo: UploadFile = File(...)):
         </div>
     """
     return HTMLResponse(render_page("Importação concluída", content, active="turmas"))
+
+
+# ==========================================
+#  BOLETIM / CONSELHO DE CLASSE
+# ==========================================
+
+BOLETIM_SUBJECT_MAP = {
+    'educacao fisica': 'Ed. Física', 'ed fisica': 'Ed. Física', 'ed. fisica': 'Ed. Física',
+    'ed digital': 'Educação Digital', 'educacao digital': 'Educação Digital', 'ed. digital': 'Educação Digital',
+    'ciencias': 'Ciências', 'historia': 'História', 'geografia': 'Geografia',
+    'ingles': 'Inglês', 'portugues': 'Português', 'matematica': 'Matemática', 'arte': 'Arte',
+}
+BOLETIM_CANONICAL_SUBJECTS = ['Português', 'Matemática', 'Ciências', 'História', 'Geografia',
+                              'Inglês', 'Arte', 'Ed. Física', 'Educação Digital', 'Geral']
+
+
+def _boletim_normalizar(s):
+    """Remove acentos, baixa caixa, colapsa espaços — mesma ideia do clean() do
+    Google Apps Script original, pra casar nomes mesmo com pequenas diferenças
+    de acentuação/espaçamento entre a planilha e o banco."""
+    s = str(s or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(s.split())
+
+
+def _boletim_normalizar_disciplina(nome):
+    return BOLETIM_SUBJECT_MAP.get(_boletim_normalizar(nome), str(nome or "").strip())
+
+
+@app.get("/boletim/importar", response_class=HTMLResponse)
+def form_importar_boletim(request: Request):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    content = """
+        <div class="page-header">
+            <h1>📊 Importar dados do Boletim / Conselho de Classe</h1>
+            <p class="subtitle">Sobe a planilha exportada do Conselho de Classe (Google Sheets) e grava as notas, faltas, raça/etnia e observações dos professores pro trimestre selecionado.</p>
+        </div>
+        <div class="tip">
+            <strong>Como funciona:</strong> a planilha precisa ter as abas <code>Estudantes</code>, <code>RacaEtnia</code>,
+            <code>Faltas</code>, <code>Medias</code>, <code>Analise</code> (os nomes exatos, sem acento). Os alunos são
+            casados com os que <strong>já existem</strong> no sistema (por turma + nome, ignorando acentuação) — nenhum
+            aluno novo é criado aqui. Se algum não casar, ele aparece na lista de avisos no final, sem interromper o
+            restante da importação. Rodar a importação de novo com a mesma planilha/trimestre <strong>atualiza</strong>
+            os valores anteriores (não duplica).
+        </div>
+        <form action="/boletim/importar" method="post" enctype="multipart/form-data">
+            <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+                <label style="margin:0; flex:1 1 160px;">Trimestre
+                    <select name="trimestre" required>
+                        <option value="1">1º Trimestre</option>
+                        <option value="2">2º Trimestre</option>
+                        <option value="3">3º Trimestre</option>
+                    </select>
+                </label>
+                <label style="margin:0; flex:1 1 120px;">Ano
+                    <input type="number" name="ano" value="2026" required>
+                </label>
+                <label style="margin:0; flex:1 1 220px;">Planilha (.xlsx)
+                    <input type="file" name="arquivo" accept=".xlsx" required>
+                </label>
+            </div>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Importar</button>
+                <a href="/painel-gestao" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Importar Boletim", content, active="")
+
+
+@app.post("/boletim/importar", response_class=HTMLResponse)
+async def importar_boletim(request: Request, trimestre: int = Form(...), ano: int = Form(...), arquivo: UploadFile = File(...)):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    if not arquivo.filename.lower().endswith(".xlsx"):
+        content = '<div class="page-header"><h1>Erro</h1></div><div class="tip">O arquivo precisa ser .xlsx.</div><p><a href="/boletim/importar" class="btn">Voltar</a></p>'
+        return HTMLResponse(render_page("Erro", content, active=""))
+
+    content_bytes = await arquivo.read()
+    try:
+        wb = load_workbook(BytesIO(content_bytes), read_only=True, data_only=True)
+    except Exception as e:
+        content = f'<div class="page-header"><h1>Erro ao ler a planilha</h1></div><div class="tip">{str(e)}</div><p><a href="/boletim/importar" class="btn">Voltar</a></p>'
+        return HTMLResponse(render_page("Erro", content, active=""))
+
+    abas_esperadas = ["Estudantes", "RacaEtnia", "Faltas", "Medias", "Analise"]
+    faltando_abas = [a for a in abas_esperadas if a not in wb.sheetnames]
+    if faltando_abas:
+        content = f'<div class="page-header"><h1>Planilha incompleta</h1></div><div class="tip">Faltam as abas: {", ".join(faltando_abas)}. Abas encontradas: {", ".join(wb.sheetnames)}</div><p><a href="/boletim/importar" class="btn">Voltar</a></p>'
+        return HTMLResponse(render_page("Erro", content, active=""))
+
+    conn = get_db()
+
+    # Garante que as 9 disciplinas canônicas existem
+    disc_ids = {}
+    for s in BOLETIM_CANONICAL_SUBJECTS:
+        row = conn.execute("SELECT id FROM disciplinas WHERE nome = ?", (s,)).fetchone()
+        if row:
+            disc_ids[s] = row["id"]
+        else:
+            cur = conn.execute("INSERT INTO disciplinas (nome) VALUES (?)", (s,))
+            disc_ids[s] = cur.lastrowid
+
+    def disciplina_id_por_nome(nome):
+        return disc_ids.get(_boletim_normalizar_disciplina(nome))
+
+    # Monta o índice (turma, nome_normalizado) -> aluno_id a partir do que JÁ EXISTE
+    # no banco (não cria aluno novo — só casa com o cadastro atual).
+    alunos_existentes = conn.execute("""
+        SELECT a.id, a.nome, t.nome AS turma_nome FROM alunos a JOIN turmas t ON t.id = a.turma_id
+        WHERE t.ano_letivo = ?
+    """, (ano,)).fetchall()
+    indice_alunos = {}
+    ambiguos_nome_only = {}
+    for a in alunos_existentes:
+        chave = (a["turma_nome"], _boletim_normalizar(a["nome"]))
+        indice_alunos[chave] = a["id"]
+        ambiguos_nome_only.setdefault(_boletim_normalizar(a["nome"]), []).append(a["id"])
+
+    def buscar_aluno_id(nome, turma_raw):
+        try:
+            turma_str = str(int(float(turma_raw)))
+        except (TypeError, ValueError):
+            turma_str = str(turma_raw).strip()
+        return indice_alunos.get((turma_str, _boletim_normalizar(nome)))
+
+    avisos = []
+    resumo = {}
+
+    # ---------- ESTUDANTES: só usado pra relatar quantos batem, não grava nada ----------
+    ws_e = wb["Estudantes"]
+    total_planilha = matched_e = 0
+    for row in ws_e.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        total_planilha += 1
+        if buscar_aluno_id(row[0], row[1]):
+            matched_e += 1
+    resumo["estudantes"] = f"{matched_e}/{total_planilha} alunos da planilha já cadastrados no sistema"
+    if matched_e < total_planilha:
+        avisos.append(f"{total_planilha - matched_e} aluno(s) da planilha não foram encontrados no cadastro atual (turma+nome) — não tiveram nenhum dado importado.")
+
+    # ---------- MEDIAS ----------
+    ws_m = wb["Medias"]
+    header_m = [str(c or "").strip() for c in next(ws_m.iter_rows(max_row=1, values_only=True))]
+    n_medias = 0
+    for row in ws_m.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        aid = buscar_aluno_id(row[0], row[1])
+        if not aid:
+            continue
+        for col_idx in range(2, min(len(header_m), len(row))):
+            valor = row[col_idx]
+            if valor is None or not isinstance(valor, (int, float)):
+                continue  # pula "Ed. Digital" (categórico PA/PS/PI) e células vazias
+            did = disciplina_id_por_nome(header_m[col_idx])
+            if not did:
+                continue
+            conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota)
+                             VALUES (?,?,?,?,?)
+                             ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = excluded.nota""",
+                         (aid, did, trimestre, ano, float(valor)))
+            n_medias += 1
+    resumo["medias"] = f"{n_medias} notas gravadas/atualizadas"
+
+    # ---------- FALTAS ----------
+    ws_f = wb["Faltas"]
+    header_f = [str(c or "").strip() for c in next(ws_f.iter_rows(max_row=1, values_only=True))]
+    n_faltas = 0
+    for row in ws_f.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        aid = buscar_aluno_id(row[0], row[1])
+        if not aid:
+            continue
+        for col_idx in range(2, min(len(header_f), len(row))):
+            valor = row[col_idx]
+            if valor is None:
+                continue
+            try:
+                faltas_int = int(valor)
+            except (TypeError, ValueError):
+                continue
+            did = disciplina_id_por_nome(header_f[col_idx])
+            if not did:
+                continue
+            conn.execute("""INSERT INTO boletim_faltas (aluno_id, disciplina_id, trimestre, ano, faltas)
+                             VALUES (?,?,?,?,?)
+                             ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET faltas = excluded.faltas""",
+                         (aid, did, trimestre, ano, faltas_int))
+            n_faltas += 1
+    resumo["faltas"] = f"{n_faltas} registros de falta gravados/atualizados"
+
+    # ---------- RACA/ETNIA (atualiza alunos.raca — só quando o nome bate único) ----------
+    ws_r = wb["RacaEtnia"]
+    n_raca = 0
+    for row in ws_r.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        nome = row[0]
+        raca = row[1] if len(row) > 1 else None
+        if not raca:
+            continue
+        candidatos = ambiguos_nome_only.get(_boletim_normalizar(nome), [])
+        if len(candidatos) == 1:
+            conn.execute("UPDATE alunos SET raca = ? WHERE id = ?", (str(raca).strip(), candidatos[0]))
+            n_raca += 1
+    resumo["raca"] = f"{n_raca} alunos com raça/etnia atualizada"
+
+    # ---------- ANALISE (observações dos professores) ----------
+    ws_a = wb["Analise"]
+    n_analise = 0
+    profs_criados = 0
+    for row in ws_a.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        row = list(row) + [None] * (12 - len(row))
+        _sid, nome, turma, disc_raw, professor_nome, email, emocional, apoio, alfab, faltoso_json, obs, _ts = row[:12]
+        if not nome or not turma:
+            continue
+        aid = buscar_aluno_id(nome, turma)
+        if not aid:
+            continue
+        if disc_raw and str(disc_raw).strip() not in ("_geral_", "__geral__", ""):
+            did = disciplina_id_por_nome(disc_raw)
+        else:
+            did = disc_ids["Geral"]  # sentinela real em vez de NULL — NULL nunca "colide" numa
+            # constraint UNIQUE no SQLite, então cada observação "geral" viraria uma linha nova
+            # a cada reimportação em vez de atualizar a existente (bug encontrado e corrigido
+            # em teste antes de publicar).
+
+        prof_id = None
+        if email:
+            email_clean = str(email).strip().lower()
+            prof_row = conn.execute("SELECT id FROM professores WHERE email = ?", (email_clean,)).fetchone()
+            if prof_row:
+                prof_id = prof_row["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO professores (email, nome, status) VALUES (?, ?, 'pendente')",
+                    (email_clean, str(professor_nome or email_clean).strip())
+                )
+                prof_id = cur.lastrowid
+                profs_criados += 1
+
+        conn.execute("""
+            INSERT INTO boletim_analise
+                (aluno_id, disciplina_id, professor_id, trimestre, ano, emocional, apoio, alfabetizacao, faltoso_json, observacao, atualizado_em)
+            VALUES (?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+            ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET
+                professor_id = excluded.professor_id, emocional = excluded.emocional,
+                apoio = excluded.apoio, alfabetizacao = excluded.alfabetizacao,
+                faltoso_json = excluded.faltoso_json, observacao = excluded.observacao,
+                atualizado_em = CURRENT_TIMESTAMP
+        """, (aid, did, prof_id, trimestre, ano, emocional, bool(apoio), bool(alfab), faltoso_json, obs))
+        n_analise += 1
+    resumo["analise"] = f"{n_analise} observações de professores gravadas/atualizadas"
+    if profs_criados:
+        avisos.append(f"{profs_criados} professor(es) novo(s) criado(s) como 'pendente' (email da planilha não estava cadastrado) — aprove em Usuários se for o caso.")
+
+    conn.commit()
+    conn.close()
+
+    resumo_html = "".join(f'<li>{v}</li>' for v in resumo.values())
+    avisos_html = ""
+    if avisos:
+        itens = "".join(f'<li>{a}</li>' for a in avisos)
+        avisos_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Avisos:</strong><ul style="margin:8px 0 0 18px;">{itens}</ul></div>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>✅ Importação concluída — {trimestre}º Trimestre {ano}</h1>
+        </div>
+        <ul style="line-height:1.9;">{resumo_html}</ul>
+        {avisos_html}
+        <div class="page-actions" style="margin-top:18px;">
+            <a href="/boletim/importar" class="btn">Importar outra planilha</a>
+            <a href="/painel-gestao" class="btn btn-primary">Voltar ao painel</a>
+        </div>
+    """
+    return render_page("Importação concluída", content, active="")
+
+
 
 @app.get("/turmas/{turma_id}", response_class=HTMLResponse)
 def ver_turma(request: Request, turma_id: int):
