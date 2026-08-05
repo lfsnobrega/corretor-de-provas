@@ -489,6 +489,8 @@ def init_db():
         conn.execute("ALTER TABLE alunos ADD COLUMN email TEXT")
     if "data_nascimento" not in cols:
         conn.execute("ALTER TABLE alunos ADD COLUMN data_nascimento TEXT")
+    if "sexo" not in cols:
+        conn.execute("ALTER TABLE alunos ADD COLUMN sexo TEXT")
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
         conn.execute("ALTER TABLE questoes ADD COLUMN ano TEXT")
@@ -3662,14 +3664,22 @@ async def importar_boletim(request: Request, trimestre: int = Form(...), ano: in
 
     # ---------- ESTUDANTES: só usado pra relatar quantos batem, não grava nada ----------
     ws_e = wb["Estudantes"]
-    total_planilha = matched_e = 0
+    total_planilha = matched_e = n_sexo = 0
     for row in ws_e.iter_rows(min_row=2, values_only=True):
         if not row or not row[0]:
             continue
         total_planilha += 1
-        if buscar_aluno_id(row[0], row[1]):
+        aid_e = buscar_aluno_id(row[0], row[1])
+        if aid_e:
             matched_e += 1
-    resumo["estudantes"] = f"{matched_e}/{total_planilha} alunos da planilha já cadastrados no sistema"
+            sexo_raw = row[2] if len(row) > 2 else None
+            if sexo_raw:
+                sx = _boletim_normalizar(sexo_raw)
+                sexo_norm = "M" if sx in ("m", "masculino", "masc") else ("F" if sx in ("f", "feminino", "fem") else None)
+                if sexo_norm:
+                    conn.execute("UPDATE alunos SET sexo = ? WHERE id = ?", (sexo_norm, aid_e))
+                    n_sexo += 1
+    resumo["estudantes"] = f"{matched_e}/{total_planilha} alunos da planilha já cadastrados no sistema ({n_sexo} com sexo atualizado)"
     if matched_e < total_planilha:
         avisos.append(f"{total_planilha - matched_e} aluno(s) da planilha não foram encontrados no cadastro atual (turma+nome) — não tiveram nenhum dado importado.")
 
@@ -4040,7 +4050,7 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
     disciplinas abaixo de 5,0), se precisa de apoio/tem dificuldade de alfabetização,
     e o estado emocional mais grave relatado entre as disciplinas."""
     sql = """
-        SELECT a.id, a.nome, a.numero, a.raca, a.data_nascimento, t.nome AS turma_nome
+        SELECT a.id, a.nome, a.numero, a.raca, a.sexo, a.data_nascimento, t.nome AS turma_nome
         FROM alunos a JOIN turmas t ON t.id = a.turma_id
         WHERE t.ano_letivo = ?
     """
@@ -4094,7 +4104,7 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
         observacoes = " | ".join(r["observacao"] for r in analises if r["observacao"])
 
         resultado.append({
-            "id": a["id"], "nome": a["nome"], "numero": a["numero"], "turma": a["turma_nome"], "raca": a["raca"],
+            "id": a["id"], "nome": a["nome"], "numero": a["numero"], "turma": a["turma_nome"], "raca": a["raca"], "sexo": a["sexo"],
             "data_nascimento": a["data_nascimento"],
             "notas": notas, "notas_texto": notas_texto_por_aluno.get(a["id"], {}),
             "media": media, "saeb": _boletim_saeb_nivel(media),
@@ -4318,6 +4328,116 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
     ) if alertas_alunos else '<p style="color:var(--text-muted);">Nenhum estudante com alertas nesse recorte. 🎉</p>'
     extra_alertas = f'<p style="font-size:12px; color:var(--text-muted); margin-top:8px;">+{len(alertas_alunos)-60} outro(s) — refine o filtro pra ver todos.</p>' if len(alertas_alunos) > 60 else ""
 
+    # --- Diferença de Médias por Disciplina — Negro × Branco ---
+    def _media_disc_grupo(grupo, disc):
+        vs = [e["notas"].get(disc) for e in grupo if e["notas"].get(disc) is not None]
+        return (sum(vs) / len(vs)) if vs else None
+
+    negro = [e for e in enriquecidos if e.get("raca") in ("Preta", "Parda")]
+    branco = [e for e in enriquecidos if e.get("raca") == "Branca"]
+    gap_racial_html = ""
+    gap_racial_labels_js = gap_racial_negro_js = gap_racial_branco_js = "[]"
+    tem_gap_racial = len(negro) >= 3 and len(branco) >= 3
+    if tem_gap_racial:
+        labels_gr, negro_avgs, branco_avgs, diffs_gr = [], [], [], []
+        for d in BOLETIM_DISC_NUMERICAS:
+            nA, bA = _media_disc_grupo(negro, d), _media_disc_grupo(branco, d)
+            if nA is None and bA is None:
+                continue
+            labels_gr.append(d)
+            negro_avgs.append(nA)
+            branco_avgs.append(bA)
+            diffs_gr.append(((nA - bA) / bA * 100) if (nA is not None and bA is not None and bA) else None)
+        gap_racial_labels_js = "[" + ",".join(f'"{d[:4]}."' for d in labels_gr) + "]"
+        gap_racial_negro_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in negro_avgs) + "]"
+        gap_racial_branco_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in branco_avgs) + "]"
+        diffs_validos = [d for d in diffs_gr if d is not None]
+        media_diff = sum(diffs_validos) / len(diffs_validos) if diffs_validos else 0
+        cor_diff = "var(--red)" if media_diff < -5 else ("var(--orange)" if media_diff < 0 else "var(--green)")
+        gap_racial_html = f"""
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">⚖️ Diferença de Médias por Disciplina — Negro × Branco</h3>
+            <p style="font-size:11px; color:var(--text-muted); margin-top:-6px;">Negro = Preta + Parda ({len(negro)} alunos) · Branco ({len(branco)} alunos)</p>
+            <div style="height:200px; position:relative; margin-bottom:10px;"><canvas id="ch-gap-racial"></canvas></div>
+            <div style="background:var(--bg-subtle); border-radius:8px; padding:8px 14px; display:inline-block;">
+                <div style="font-size:11px; color:var(--text-muted);">Diferença média geral</div>
+                <div style="font-size:18px; font-weight:800; color:{cor_diff};">{"+" if media_diff>=0 else ""}{media_diff:.1f}%</div>
+                <div style="font-size:10px; color:var(--text-muted);">Negativo = estudantes negros com média inferior</div>
+            </div>
+        </div>"""
+
+    # --- Diferença de Médias por Disciplina — Meninos × Meninas ---
+    masc = [e for e in enriquecidos if e.get("sexo") == "M"]
+    fem = [e for e in enriquecidos if e.get("sexo") == "F"]
+    gap_genero_html = ""
+    gap_genero_labels_js = gap_genero_m_js = gap_genero_f_js = "[]"
+    tem_gap_genero = len(masc) >= 3 and len(fem) >= 3
+    if tem_gap_genero:
+        labels_gg, m_avgs, f_avgs = [], [], []
+        for d in BOLETIM_DISC_NUMERICAS:
+            mA, fA = _media_disc_grupo(masc, d), _media_disc_grupo(fem, d)
+            if mA is None and fA is None:
+                continue
+            labels_gg.append(d)
+            m_avgs.append(mA)
+            f_avgs.append(fA)
+        gap_genero_labels_js = "[" + ",".join(f'"{d[:4]}."' for d in labels_gg) + "]"
+        gap_genero_m_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in m_avgs) + "]"
+        gap_genero_f_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in f_avgs) + "]"
+        gap_genero_html = f"""
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">⚥ Diferença de Médias por Disciplina — Meninos × Meninas</h3>
+            <p style="font-size:11px; color:var(--text-muted); margin-top:-6px;">Meninos ({len(masc)}) · Meninas ({len(fem)})</p>
+            <div style="height:200px; position:relative;"><canvas id="ch-gap-genero"></canvas></div>
+        </div>"""
+
+    # --- Diferença Negro × Branco por Ano de Escolaridade (só escola toda) ---
+    gap_anos_html = ""
+    gap_anos_charts_js = ""
+    if not turma_id and tem_gap_racial:
+        from collections import defaultdict as _dd
+        blocos_anos = ""
+        for ano_esc in ["6", "7", "8", "9"]:
+            suf = f"{ano_esc}°"
+            neg_grp = [e for e in negro if _boletim_ano_da_turma(e["turma"]) == suf]
+            bra_grp = [e for e in branco if _boletim_ano_da_turma(e["turma"]) == suf]
+            if len(neg_grp) < 2 or len(bra_grp) < 2:
+                continue
+            lbs, nAs, bAs = [], [], []
+            for d in BOLETIM_DISC_NUMERICAS:
+                nA, bA = _media_disc_grupo(neg_grp, d), _media_disc_grupo(bra_grp, d)
+                if nA is None and bA is None:
+                    continue
+                lbs.append(d)
+                nAs.append(nA)
+                bAs.append(bA)
+            canvas_id = f"ch-gap-ano-{ano_esc}"
+            blocos_anos += f"""
+            <div class="card">
+                <h4 style="margin:0 0 8px;">{ano_esc}º Ano <span style="font-size:11px; color:var(--text-muted); font-weight:400;">({len(neg_grp)} negros, {len(bra_grp)} brancos)</span></h4>
+                <div style="height:160px; position:relative;"><canvas id="{canvas_id}"></canvas></div>
+            </div>"""
+            lbs_js = "[" + ",".join(f'"{d[:4]}."' for d in lbs) + "]"
+            nAs_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in nAs) + "]"
+            bAs_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in bAs) + "]"
+            gap_anos_charts_js += f"""
+            new Chart(document.getElementById('{canvas_id}'), {{
+                type: 'bar',
+                data: {{ labels: {lbs_js}, datasets: [
+                    {{ label:'Negro', data:{nAs_js}, backgroundColor:'#a78bfa', borderRadius:3 }},
+                    {{ label:'Branco', data:{bAs_js}, backgroundColor:'#38bdf8', borderRadius:3 }}
+                ]}},
+                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:true,position:'top'}}}}, scales:{{y:{{beginAtZero:true,max:10}}}} }}
+            }});"""
+        if blocos_anos:
+            gap_anos_html = f"""
+            <div class="card" style="margin-bottom:18px;">
+                <h3 style="margin-top:0;">⚖️ Diferença Negro × Branco por Ano de Escolaridade</h3>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px;">
+                    {blocos_anos}
+                </div>
+            </div>"""
+
     content = f"""
         <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
             <div>
@@ -4397,8 +4517,15 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             {extra_alertas}
         </div>
 
+        {gap_racial_html}
+        {gap_genero_html}
+        {gap_anos_html}
+
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
+            {"new Chart(document.getElementById('ch-gap-racial'), {type:'bar', data:{labels:" + gap_racial_labels_js + ", datasets:[{label:'Negro (Preta+Parda)',data:" + gap_racial_negro_js + ",backgroundColor:'#a78bfa',borderRadius:4},{label:'Branco',data:" + gap_racial_branco_js + ",backgroundColor:'#38bdf8',borderRadius:4}]}, options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'top'}},scales:{y:{beginAtZero:true,max:10}}}});" if tem_gap_racial else ""}
+            {"new Chart(document.getElementById('ch-gap-genero'), {type:'bar', data:{labels:" + gap_genero_labels_js + ", datasets:[{label:'Meninos',data:" + gap_genero_m_js + ",backgroundColor:'#38bdf8',borderRadius:4},{label:'Meninas',data:" + gap_genero_f_js + ",backgroundColor:'#f472b6',borderRadius:4}]}, options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'top'}},scales:{y:{beginAtZero:true,max:10}}}});" if tem_gap_genero else ""}
+            {gap_anos_charts_js}
             new Chart(document.getElementById('ch-disc'), {{
                 type: 'bar',
                 data: {{ labels: {disc_labels_js},
