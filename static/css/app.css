@@ -576,6 +576,11 @@ ul.clean li:hover { background: var(--bg-subtle); }
 @media (max-width: 768px) {
   .app { flex-direction: column; }
 
+  /* Tabelas ficam roláveis na horizontal em vez de espremer texto ou estourar a
+     tela inteira — protege as ~25 tabelas do sistema de uma vez, sem precisar
+     mexer em cada tela (04/08/2026). */
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+
   .mobile-topbar {
     display: flex;
     align-items: center;
