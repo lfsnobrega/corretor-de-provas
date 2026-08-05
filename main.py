@@ -2156,32 +2156,55 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
         import urllib.parse as _urlp
         linhas = []
         for disc_id, anos_qtds in matriz_por_disc.items():
+            total_disc = sum(qtd for _, qtd in anos_qtds)
+            aberto_por_filtro = (disciplina_id == disc_id)
             badges_linha = []
             for ano_v, qtd in anos_qtds:
                 rotulo = ano_v if ano_v else "Sem ano"
-                # Constrói query string preservando o filtro
                 qs = _urlp.urlencode({"disciplina": disc_id, "ano": ano_v} if ano_v else {"disciplina": disc_id})
-                # Destaca badge se o filtro atual bate
                 ativo = (disciplina_id == disc_id and ((ano_v and ano == ano_v) or (not ano_v and not ano)))
                 cor_bg = "var(--accent)" if ativo else "var(--bg)"
                 cor_fg = "white" if ativo else "var(--text)"
                 borda = "var(--accent)" if ativo else "var(--border)"
                 badges_linha.append(
                     f'<a href="/questoes?{qs}" class="badge" style="background:{cor_bg}; color:{cor_fg}; '
-                    f'border:1px solid {borda}; text-decoration:none; padding:3px 9px; font-size:11px;">'
+                    f'border:1px solid {borda}; text-decoration:none; padding:3px 9px; font-size:11px; '
+                    f'margin:0 6px 6px 0; display:inline-block;">'
                     f'{rotulo}: {qtd}</a>'
                 )
+            qs_disc = _urlp.urlencode({"disciplina": disc_id})
+            display_inicial = "flex" if aberto_por_filtro else "none"
+            seta_inicial = "▴" if aberto_por_filtro else "▾"
             linhas.append(
-                f'<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">'
-                f'<strong style="min-width:140px; font-size:13px;">{nomes_disc[disc_id]}</strong>'
+                f'<div style="background:var(--card); border:1px solid var(--border); border-radius:10px; margin-bottom:8px; overflow:hidden;">'
+                f'<div onclick="toggleDisciplina({disc_id})" style="display:flex; align-items:center; gap:10px; padding:11px 14px; cursor:pointer;">'
+                f'<span style="flex:1; font-size:14px; font-weight:600;">{nomes_disc[disc_id]}</span>'
+                f'<a href="/questoes?{qs_disc}" onclick="event.stopPropagation();" style="font-size:12px; color:var(--text-muted); text-decoration:none;">{total_disc}</a>'
+                f'<span id="seta-{disc_id}" style="font-size:11px; color:var(--text-muted);">{seta_inicial}</span>'
+                f'</div>'
+                f'<div id="detalhe-{disc_id}" style="display:{display_inicial}; flex-wrap:wrap; padding:0 14px 10px; border-top:1px solid var(--border); padding-top:10px;">'
                 f'{"".join(badges_linha)}'
+                f'</div>'
                 f'</div>'
             )
         matriz_html = (
-            f'<div style="background:var(--bg-subtle); padding:14px 16px; border-radius:8px; margin-bottom:14px;">'
-            f'<div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-muted); margin-bottom:10px;">Visão geral · clique para filtrar</div>'
-            f'<div style="display:flex; flex-direction:column; gap:8px;">{"".join(linhas)}</div>'
+            f'<div style="margin-bottom:14px;">'
+            f'<div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-muted); margin-bottom:8px;">Visão geral · toque numa disciplina pra ver por ano</div>'
+            f'{"".join(linhas)}'
             f'</div>'
+            f'<script>'
+            f'function toggleDisciplina(id) {{'
+            f'  var det = document.getElementById("detalhe-" + id);'
+            f'  var seta = document.getElementById("seta-" + id);'
+            f'  if (det.style.display === "none" || !det.style.display) {{'
+            f'    det.style.display = "flex";'
+            f'    seta.textContent = "▴";'
+            f'  }} else {{'
+            f'    det.style.display = "none";'
+            f'    seta.textContent = "▾";'
+            f'  }}'
+            f'}}'
+            f'</script>'
         )
 
     disciplinas_opts = '<option value="">Todas</option>' + "".join(
