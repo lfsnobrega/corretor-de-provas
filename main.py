@@ -665,6 +665,15 @@ def init_db():
         FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id)
     )""")
 
+    # Migrações — cobre bancos onde essas tabelas já existiam ANTES dessas colunas serem
+    # adicionadas (CREATE TABLE IF NOT EXISTS não altera uma tabela que já existe).
+    cols_bm = {row[1] for row in conn.execute("PRAGMA table_info(boletim_medias)").fetchall()}
+    if "nota_texto" not in cols_bm:
+        conn.execute("ALTER TABLE boletim_medias ADD COLUMN nota_texto TEXT")
+    cols_ba = {row[1] for row in conn.execute("PRAGMA table_info(boletim_analise)").fetchall()}
+    if "faltoso" not in cols_ba:
+        conn.execute("ALTER TABLE boletim_analise ADD COLUMN faltoso INTEGER NOT NULL DEFAULT 0")
+
     conn.commit()
     conn.close()
 
