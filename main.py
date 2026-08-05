@@ -1617,7 +1617,7 @@ def home(request: Request):
     label_abertas = "Aplicações abertas (escola)" if is_admin else "Aplicações abertas"
     label_encerradas = "Aplicações encerradas (escola)" if is_admin else "Aplicações encerradas"
     painel_metrics = f"""
-        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin:8px 0 14px 0;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin:8px 0 14px 0;">
             <div class="status-card">
                 <div class="status-card-label">{label_provas}</div>
                 <div class="status-card-value">{minhas_provas}</div>
@@ -9219,7 +9219,7 @@ def painel_global_ver(rodada: str):
     )
 
     kpis_html = f"""
-        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-bottom:18px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin-bottom:18px;">
             <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{n_total}</div></div>
             <div class="metric"><div class="metric-label">Nota média da escola</div><div class="metric-value">{media_global}</div></div>
             <div class="metric" style="border-color:var(--red);"><div class="metric-label">% Insuficiente (geral)</div><div class="metric-value" style="color:var(--red);">{pct_insuf_global}%</div></div>
@@ -9969,9 +9969,9 @@ def listar_simulados(request: Request):
     btn_relatorio = '<a href="/simulados/relatorio-notas" class="btn">📄 Relatório de Notas</a><a href="/simulados/painel-global" class="btn" style="border-color:var(--accent); color:var(--accent);">🏫 Painel Global</a>' if is_admin else ""
 
     content = f"""
-        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
             <div><h1>📊 Simulados</h1><p class="subtitle">Provas multidisciplinares trimestrais</p></div>
-            <div style="display:flex; gap:8px;">{btn_relatorio}{btn_novo}</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">{btn_relatorio}{btn_novo}</div>
         </div>
         {cards}
     """
@@ -10230,7 +10230,7 @@ def ver_simulado(sim_id: int):
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">{acoes_admin if is_admin else btn_preview}</div>
         </div>
-        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:20px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin-bottom:20px;">
             <div class="metric"><div class="metric-label">Pontuação total</div><div class="metric-value">{sim['pontuacao_total']}</div></div>
             <div class="metric"><div class="metric-label">Valor por questão</div><div class="metric-value">{vpq}</div></div>
             <div class="metric"><div class="metric-label">Total de questões</div><div class="metric-value">40</div></div>
@@ -10463,7 +10463,7 @@ def diagnostico_respostas_simulado(sim_id: int):
             <h1>🔍 Diagnóstico de respostas — {sim['nome']}</h1>
             <p class="subtitle">Cartões com mais questões em branco aparecem primeiro — use isso pra achar leituras suspeitas de OMR.</p>
         </div>
-        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-bottom:18px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin-bottom:18px;">
             <div class="metric" style="border-color:var(--red);"><div class="metric-label">Crítico (&lt;70% respondido)</div><div class="metric-value" style="color:var(--red);">{n_criticos}</div></div>
             <div class="metric" style="border-color:var(--orange);"><div class="metric-label">Atenção (70–89%)</div><div class="metric-value" style="color:var(--orange);">{n_atencao}</div></div>
             <div class="metric" style="border-color:var(--green);"><div class="metric-label">OK (≥90%)</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
