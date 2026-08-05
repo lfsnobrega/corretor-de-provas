@@ -3519,7 +3519,7 @@ def ver_turma(request: Request, turma_id: int):
                     <label>Número<input type="number" name="numero" value="{proximo_numero}" min="1"></label>
                     <label>Nome<input type="text" name="nome" required placeholder="Nome completo"></label>
                 </div>
-                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px;">
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px;">
                     <label>Raça<select name="raca">{racas_options}</select></label>
                     <label>E-mail<input type="email" name="email" placeholder="aluno@email.com"></label>
                     <label>Data de nascimento<input type="date" name="data_nascimento"></label>
@@ -6240,7 +6240,7 @@ def comparativo_prova(prova_id: int):
                 <a href="/aplicacoes/{ad["id"]}" style="color:inherit; text-decoration:none;">{ad["titulo"]}</a>
             </div>
             <div class="card-meta">{ad["turma_nome"]} · {ad["ano_letivo"]} · Modo {ad["modo"]}</div>
-            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-top:12px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; margin-top:12px;">
                 <div>
                     <div class="metric-label">Entregas</div>
                     <div style="font-size:18px; font-weight:600;">{ad["n_entregas"]}/{ad["total_alunos"]}</div>
@@ -7657,7 +7657,7 @@ def form_editar_aluno(request: Request, aluno_id: int):
                 <label>Número<input type="number" name="numero" value="{aluno["numero"] or ''}" min="1"></label>
                 <label>Nome<input type="text" name="nome" required value="{aluno["nome"]}"></label>
             </div>
-            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px;">
                 <label>Raça<select name="raca">{racas_opts}</select></label>
                 <label>E-mail<input type="email" name="email" value="{aluno["email"] or ''}"></label>
                 <label>Data de nascimento<input type="date" name="data_nascimento" value="{aluno["data_nascimento"] or ''}"></label>
@@ -10048,7 +10048,7 @@ def form_novo_simulado(request: Request):
             <div class="tip" style="margin-bottom:16px; font-size:13px;">
                 💡 O nome será gerado automaticamente: <strong>Simulado — Dia XX · Xº ano · Xº Trimestre</strong>
             </div>
-            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:14px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; margin-bottom:14px;">
                 <label>Trimestre
                     <select name="trimestre" required>
                         <option value="1">1º Trimestre</option>
@@ -11385,7 +11385,7 @@ def form_editar_simulado(sim_id: int):
     content = f"""
         <div class="page-header"><h1>✏️ Editar simulado</h1></div>
         <form method="post" action="/simulados/{sim_id}/editar">
-            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:16px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; margin-bottom:16px;">
                 <label>Trimestre
                     <select name="trimestre" required>
                         <option value="1"{' selected' if sim['trimestre']==1 else ''}>1º Trimestre</option>
