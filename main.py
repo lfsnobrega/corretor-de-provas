@@ -618,6 +618,7 @@ def init_db():
         trimestre INTEGER NOT NULL,
         ano INTEGER NOT NULL,
         nota REAL,
+        nota_texto TEXT,
         UNIQUE(aluno_id, disciplina_id, trimestre, ano),
         FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
         FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id)
@@ -643,6 +644,7 @@ def init_db():
         emocional TEXT,
         apoio INTEGER NOT NULL DEFAULT 0,
         alfabetizacao INTEGER NOT NULL DEFAULT 0,
+        faltoso INTEGER NOT NULL DEFAULT 0,
         faltoso_json TEXT,
         observacao TEXT,
         atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -650,6 +652,17 @@ def init_db():
         FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
         FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id),
         FOREIGN KEY (professor_id) REFERENCES professores(id)
+    )""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS boletim_professor_turma (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        professor_id INTEGER NOT NULL,
+        turma_id INTEGER NOT NULL,
+        disciplina_id INTEGER NOT NULL,
+        UNIQUE(professor_id, turma_id, disciplina_id),
+        FOREIGN KEY (professor_id) REFERENCES professores(id) ON DELETE CASCADE,
+        FOREIGN KEY (turma_id) REFERENCES turmas(id) ON DELETE CASCADE,
+        FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id)
     )""")
 
     conn.commit()
@@ -1324,6 +1337,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
                 {('<div class="sidebar-section">Análises</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análises pedagógicas")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/analise", "boletim-analise", "📝", "Análise") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else (nav_item("/boletim/analise", "boletim-analise", "📝", "Análise (Conselho de Classe)") if professor else "")}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
             {user_block}
@@ -3573,7 +3587,7 @@ def form_importar_boletim(request: Request):
             </div>
         </form>
     """
-    return render_page("Importar Boletim", content, active="")
+    return render_page("Importar Boletim", content, active="boletim-importar")
 
 
 @app.post("/boletim/importar", response_class=HTMLResponse)
@@ -3615,15 +3629,17 @@ async def importar_boletim(request: Request, trimestre: int = Form(...), ano: in
     # Monta o índice (turma, nome_normalizado) -> aluno_id a partir do que JÁ EXISTE
     # no banco (não cria aluno novo — só casa com o cadastro atual).
     alunos_existentes = conn.execute("""
-        SELECT a.id, a.nome, t.nome AS turma_nome FROM alunos a JOIN turmas t ON t.id = a.turma_id
+        SELECT a.id, a.nome, t.id AS turma_id, t.nome AS turma_nome FROM alunos a JOIN turmas t ON t.id = a.turma_id
         WHERE t.ano_letivo = ?
     """, (ano,)).fetchall()
     indice_alunos = {}
     ambiguos_nome_only = {}
+    turma_id_por_aluno = {}
     for a in alunos_existentes:
         chave = (a["turma_nome"], _boletim_normalizar(a["nome"]))
         indice_alunos[chave] = a["id"]
         ambiguos_nome_only.setdefault(_boletim_normalizar(a["nome"]), []).append(a["id"])
+        turma_id_por_aluno[a["id"]] = a["turma_id"]
 
     def buscar_aluno_id(nome, turma_raw):
         try:
@@ -3660,15 +3676,23 @@ async def importar_boletim(request: Request, trimestre: int = Form(...), ano: in
             continue
         for col_idx in range(2, min(len(header_m), len(row))):
             valor = row[col_idx]
-            if valor is None or not isinstance(valor, (int, float)):
-                continue  # pula "Ed. Digital" (categórico PA/PS/PI) e células vazias
+            if valor is None or (isinstance(valor, str) and not valor.strip()):
+                continue  # célula vazia
             did = disciplina_id_por_nome(header_m[col_idx])
             if not did:
                 continue
-            conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota)
-                             VALUES (?,?,?,?,?)
-                             ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = excluded.nota""",
-                         (aid, did, trimestre, ano, float(valor)))
+            if isinstance(valor, (int, float)):
+                conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                                 VALUES (?,?,?,?,?,NULL)
+                                 ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = excluded.nota, nota_texto = NULL""",
+                             (aid, did, trimestre, ano, float(valor)))
+            else:
+                # Nota categórica (ex: Educação Digital = PA/PS/PI) — não é número, mas
+                # ainda precisa aparecer no boletim impresso.
+                conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                                 VALUES (?,?,?,?,NULL,?)
+                                 ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = NULL, nota_texto = excluded.nota_texto""",
+                             (aid, did, trimestre, ano, str(valor).strip()))
             n_medias += 1
     resumo["medias"] = f"{n_medias} notas gravadas/atualizadas"
 
@@ -3752,16 +3776,31 @@ async def importar_boletim(request: Request, trimestre: int = Form(...), ano: in
                 prof_id = cur.lastrowid
                 profs_criados += 1
 
+        # Deriva o mapeamento professor↔turma↔disciplina a partir dessa mesma linha
+        # (a aba "Professores" da planilha não tem e-mail, só primeiro nome — arriscado
+        # de casar; aqui reaproveitamos o e-mail já validado da própria aba Análise).
+        if prof_id and did:
+            aluno_turma_id = turma_id_por_aluno.get(aid)
+            if aluno_turma_id:
+                conn.execute("""INSERT OR IGNORE INTO boletim_professor_turma (professor_id, turma_id, disciplina_id)
+                                 VALUES (?,?,?)""", (prof_id, aluno_turma_id, did))
+
         conn.execute("""
             INSERT INTO boletim_analise
-                (aluno_id, disciplina_id, professor_id, trimestre, ano, emocional, apoio, alfabetizacao, faltoso_json, observacao, atualizado_em)
-            VALUES (?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+                (aluno_id, disciplina_id, professor_id, trimestre, ano, emocional, apoio, alfabetizacao, faltoso, faltoso_json, observacao, atualizado_em)
+            VALUES (?,?,?,?,?,?,?,?,0,?,?, CURRENT_TIMESTAMP)
             ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET
                 professor_id = excluded.professor_id, emocional = excluded.emocional,
                 apoio = excluded.apoio, alfabetizacao = excluded.alfabetizacao,
                 faltoso_json = excluded.faltoso_json, observacao = excluded.observacao,
                 atualizado_em = CURRENT_TIMESTAMP
         """, (aid, did, prof_id, trimestre, ano, emocional, bool(apoio), bool(alfab), faltoso_json, obs))
+        # Nota: "faltoso" (o novo campo simples por disciplina) NÃO é sobrescrito aqui de
+        # propósito — o faltoso_json legado da planilha lista as OUTRAS disciplinas em que
+        # o aluno falta muito (não a desta própria linha), então não dá pra derivar com
+        # segurança o valor certo pra "faltoso nesta disciplina" a partir dele. Fica 0 em
+        # linhas novas, e uma reimportação nunca apaga o que um professor já marcou pela
+        # tela de Análise.
         n_analise += 1
     resumo["analise"] = f"{n_analise} observações de professores gravadas/atualizadas"
     if profs_criados:
@@ -3787,7 +3826,7 @@ async def importar_boletim(request: Request, trimestre: int = Form(...), ano: in
             <a href="/painel-gestao" class="btn btn-primary">Voltar ao painel</a>
         </div>
     """
-    return render_page("Importação concluída", content, active="")
+    return render_page("Importação concluída", content, active="boletim-importar")
 
 
 @app.get("/boletim", response_class=HTMLResponse)
@@ -3806,7 +3845,7 @@ def boletim_hub(request: Request, trimestre: Optional[int] = None, ano: Optional
             <div class="page-header"><h1>📊 Boletim / Conselho de Classe</h1></div>
             <div class="empty">Nenhum dado importado ainda. <a href="/boletim/importar">Importar planilha</a></div>
         """
-        return render_page("Boletim", content, active="")
+        return render_page("Boletim", content, active="boletim-dashboard")
 
     if trimestre is None or ano is None:
         trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
@@ -3865,7 +3904,7 @@ def boletim_hub(request: Request, trimestre: Optional[int] = None, ano: Optional
             {turmas_html}
         </div>
     """
-    return render_page("Boletim", content, active="")
+    return render_page("Boletim", content, active="boletim-dashboard")
 
 
 @app.get("/boletim/turma", response_class=HTMLResponse)
@@ -3956,7 +3995,10 @@ def boletim_ver_turma(request: Request, trimestre: int, ano: int, turma_id: int)
             <p class="subtitle">{len(alunos)} aluno(s) na turma</p>
         </div>
         {body}
-        <div style="margin-top:16px;"><a href="/boletim?trimestre={trimestre}&ano={ano}" class="btn">← Voltar</a></div>
+        <div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap;">
+            <a href="/boletim?trimestre={trimestre}&ano={ano}" class="btn">← Voltar</a>
+            <a href="/boletim/relatorio-turma?ano={ano}&turma_id={turma_id}" class="btn btn-primary" target="_blank">🖨️ Gerar Boletim (todos os trimestres)</a>
+        </div>
     """
     return render_page(f"Turma {turma['nome']}", content, active="")
 
@@ -3989,7 +4031,7 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
     disciplinas abaixo de 5,0), se precisa de apoio/tem dificuldade de alfabetização,
     e o estado emocional mais grave relatado entre as disciplinas."""
     sql = """
-        SELECT a.id, a.nome, t.nome AS turma_nome
+        SELECT a.id, a.nome, a.numero, a.raca, a.data_nascimento, t.nome AS turma_nome
         FROM alunos a JOIN turmas t ON t.id = a.turma_id
         WHERE t.ano_letivo = ?
     """
@@ -4000,16 +4042,19 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
     alunos = conn.execute(sql, params).fetchall()
 
     notas_rows = conn.execute("""
-        SELECT bm.aluno_id, d.nome AS disc_nome, bm.nota FROM boletim_medias bm
+        SELECT bm.aluno_id, d.nome AS disc_nome, bm.nota, bm.nota_texto FROM boletim_medias bm
         JOIN disciplinas d ON d.id = bm.disciplina_id
         WHERE bm.trimestre = ? AND bm.ano = ?
     """, (trimestre, ano)).fetchall()
     notas_por_aluno = {}
+    notas_texto_por_aluno = {}
     for r in notas_rows:
         notas_por_aluno.setdefault(r["aluno_id"], {})[r["disc_nome"]] = r["nota"]
+        if r["nota_texto"]:
+            notas_texto_por_aluno.setdefault(r["aluno_id"], {})[r["disc_nome"]] = r["nota_texto"]
 
     analise_rows = conn.execute("""
-        SELECT aluno_id, emocional, apoio, alfabetizacao FROM boletim_analise
+        SELECT aluno_id, emocional, apoio, alfabetizacao, faltoso, observacao FROM boletim_analise
         WHERE trimestre = ? AND ano = ?
     """, (trimestre, ano)).fetchall()
     analise_por_aluno = {}
@@ -4036,12 +4081,16 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
                 emocional = r["emocional"]
         apoio = any(r["apoio"] for r in analises)
         alfab = any(r["alfabetizacao"] for r in analises)
+        faltoso_disc = any(r["faltoso"] for r in analises)
+        observacoes = " | ".join(r["observacao"] for r in analises if r["observacao"])
 
         resultado.append({
-            "id": a["id"], "nome": a["nome"], "turma": a["turma_nome"], "notas": notas,
+            "id": a["id"], "nome": a["nome"], "numero": a["numero"], "turma": a["turma_nome"], "raca": a["raca"],
+            "data_nascimento": a["data_nascimento"],
+            "notas": notas, "notas_texto": notas_texto_por_aluno.get(a["id"], {}),
             "media": media, "saeb": _boletim_saeb_nivel(media),
             "risco_retencao": red_count >= 4,
-            "apoio": apoio, "alfab": alfab, "emocional": emocional,
+            "apoio": apoio, "alfab": alfab, "faltoso": faltoso_disc, "emocional": emocional, "observacoes": observacoes,
             "faltas_total": faltas_por_aluno.get(a["id"], 0),
         })
     return resultado
@@ -4060,7 +4109,7 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
     if not combinacoes:
         conn.close()
         content = '<div class="page-header"><h1>📈 Dashboard Pedagógico</h1></div><div class="empty">Nenhum dado importado ainda. <a href="/boletim/importar">Importar planilha</a></div>'
-        return render_page("Dashboard Pedagógico", content, active="")
+        return render_page("Dashboard Pedagógico", content, active="boletim-dashboard")
     if trimestre is None or ano is None:
         trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
 
@@ -4186,10 +4235,87 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
         extra = f'<p style="font-size:11px; color:var(--text-muted); margin-top:4px;">+{len(lista)-15} outro(s)</p>' if len(lista) > 15 else ""
         return itens + extra
 
+    # --- Desempenho por Disciplina (ranking de todas as disciplinas numéricas) ---
+    ranking_disc = []
+    for d in BOLETIM_DISC_NUMERICAS:
+        vals = [e["notas"].get(d) for e in enriquecidos if e["notas"].get(d) is not None]
+        if vals:
+            media_d = sum(vals) / len(vals)
+            ranking_disc.append((d, media_d, _boletim_saeb_nivel(media_d)))
+    ranking_disc.sort(key=lambda x: x[1], reverse=True)
+    disc_labels_js = "[" + ",".join(f'"{d[:4]}."' for d, _, _ in ranking_disc) + "]"
+    disc_valores_js = "[" + ",".join(f"{m:.2f}" for _, m, _ in ranking_disc) + "]"
+    disc_cores_js = "[" + ",".join(f'"{lvl["color"]}"' if lvl else '"#94a3b8"' for _, _, lvl in ranking_disc) + "]"
+    ranking_disc_html = "".join(
+        f'<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 8px; background:var(--bg-subtle); border-radius:5px; margin-bottom:3px;">'
+        f'<span style="font-size:12px; font-weight:600;">{d}</span>'
+        f'<span><strong style="color:{lvl["color"] if lvl else "var(--text-muted)"};">{m:.1f}</strong>'
+        + (f' <span class="badge" style="background:{lvl["color"]}22; color:{lvl["color"]};">{lvl["label"]}</span>' if lvl else '')
+        + '</span></div>'
+        for d, m, lvl in ranking_disc
+    )
+
+    # --- Painéis de Faltosos, Alfabetização e Raça/Etnia ---
+    def lista_alunos_html(criterio):
+        alunos_filtrados = [e for e in enriquecidos if criterio(e)]
+        if not alunos_filtrados:
+            return '<p style="font-size:12px; color:var(--text-muted);">Nenhum aluno.</p>', 0
+        itens = "".join(
+            f'<div style="padding:3px 8px; font-size:12px; background:var(--bg-subtle); border-radius:4px; margin-bottom:3px;">{e["nome"]} <span style="color:var(--text-muted);">· {e["turma"]}</span></div>'
+            for e in alunos_filtrados[:20]
+        )
+        extra = f'<p style="font-size:11px; color:var(--text-muted); margin-top:4px;">+{len(alunos_filtrados)-20} outro(s)</p>' if len(alunos_filtrados) > 20 else ""
+        return itens + extra, len(alunos_filtrados)
+
+    faltosos_html, n_faltosos_lista = lista_alunos_html(lambda e: e["faltoso"])
+    alfab_html, n_alfab_lista = lista_alunos_html(lambda e: e["alfab"])
+
+    raca_count = {}
+    for e in enriquecidos:
+        r = e["raca"] or "Não informado"
+        raca_count[r] = raca_count.get(r, 0) + 1
+    raca_ordenado = sorted(raca_count.items(), key=lambda x: -x[1])
+    raca_html = "".join(
+        f'<div style="display:flex; justify-content:space-between; padding:3px 8px; font-size:12px; background:var(--bg-subtle); border-radius:4px; margin-bottom:3px;">'
+        f'<span>{r}</span><strong>{c}</strong></div>'
+        for r, c in raca_ordenado
+    ) or '<p style="font-size:12px; color:var(--text-muted);">Sem dados de raça/etnia.</p>'
+
+    # --- Estudantes que Precisam de Atenção ---
+    alertas_alunos = []
+    for e in enriquecidos:
+        motivos = []
+        if e["risco_retencao"]:
+            motivos.append(f'<span class="badge" style="background:var(--red-bg); color:var(--red);">⚠️ {sum(1 for v in e["notas"].values() if isinstance(v,(int,float)) and v<5)} vermelhas</span>')
+        if e["apoio"]:
+            motivos.append('<span class="badge" style="background:var(--orange-bg); color:var(--orange);">🤝 Apoio</span>')
+        if e["alfab"]:
+            motivos.append('<span class="badge" style="background:var(--purple-bg); color:var(--purple);">📖 Alfabetização</span>')
+        if e["emocional"] == "fragilizado":
+            motivos.append('<span class="badge" style="background:var(--red-bg); color:var(--red);">😟 Fragilizado</span>')
+        if e["faltoso"]:
+            motivos.append('<span class="badge" style="background:var(--orange-bg); color:var(--orange);">🚫 Faltoso</span>')
+        if motivos:
+            alertas_alunos.append((e, motivos))
+    alertas_alunos.sort(key=lambda x: -len(x[1]))
+
+    alertas_html = "".join(
+        f'<div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">'
+        f'<div style="font-weight:600; font-size:13px;">{e["nome"]}</div>'
+        f'<div style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">{e["turma"]} · Média: {f"{e['media']:.1f}" if e["media"] is not None else "—"}</div>'
+        f'<div style="display:flex; flex-wrap:wrap; gap:4px;">{"".join(motivos)}</div>'
+        f'</div>'
+        for e, motivos in alertas_alunos[:60]
+    ) if alertas_alunos else '<p style="color:var(--text-muted);">Nenhum estudante com alertas nesse recorte. 🎉</p>'
+    extra_alertas = f'<p style="font-size:12px; color:var(--text-muted); margin-top:8px;">+{len(alertas_alunos)-60} outro(s) — refine o filtro pra ver todos.</p>' if len(alertas_alunos) > 60 else ""
+
     content = f"""
-        <div class="page-header">
-            <h1>📈 Dashboard Pedagógico</h1>
-            <p class="subtitle">{total} estudante(s) · {trimestre}º Trimestre {ano}</p>
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h1>📈 Dashboard Pedagógico</h1>
+                <p class="subtitle">{total} estudante(s) · {trimestre}º Trimestre {ano}</p>
+            </div>
+            <a href="/boletim/relatorio-geral?trimestre={trimestre}&ano={ano}" class="btn" target="_blank">🖨️ Relatório Geral de Gestão</a>
         </div>
         <form method="get" action="/boletim/dashboard" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
             <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
@@ -4232,8 +4358,44 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </div>
         </div>
 
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">📐 Desempenho por Disciplina</h3>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:-6px;">Maior → menor · cor = nível SAEB</p>
+            <div style="height:220px; position:relative; margin-bottom:12px;"><canvas id="ch-disc"></canvas></div>
+            {ranking_disc_html}
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-bottom:18px;">
+            <div class="card">
+                <h3 style="margin-top:0;">🚫 Faltosos ({n_faltosos_lista})</h3>
+                {faltosos_html}
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0;">📖 Dificuldade de Alfabetização ({n_alfab_lista})</h3>
+                {alfab_html}
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0;">🧑🏾 Raça/Etnia</h3>
+                {raca_html}
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">⚠️ Estudantes que Precisam de Atenção ({len(alertas_alunos)})</h3>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px;">
+                {alertas_html}
+            </div>
+            {extra_alertas}
+        </div>
+
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
+            new Chart(document.getElementById('ch-disc'), {{
+                type: 'bar',
+                data: {{ labels: {disc_labels_js},
+                    datasets: [{{ data: {disc_valores_js}, backgroundColor: {disc_cores_js} }}] }},
+                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:false}}}}, scales:{{y:{{beginAtZero:true, max:10}}}} }}
+            }});
             new Chart(document.getElementById('ch-saeb-pt'), {{
                 type: 'bar',
                 data: {{ labels: ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
@@ -4257,7 +4419,802 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             }});
         </script>
     """
-    return render_page("Dashboard Pedagógico", content, active="")
+    return render_page("Dashboard Pedagógico", content, active="boletim-dashboard")
+
+
+BOLETIM_EMOJI_EMOCIONAL = {"bem": "😊", "oscilando": "😐", "fragilizado": "😟"}
+BOLETIM_LABEL_EMOCIONAL = {"bem": "Bem", "oscilando": "Oscilando", "fragilizado": "Fragilizado"}
+BOLETIM_ORDEM_DISCIPLINAS = ['Português', 'Matemática', 'Ciências', 'História', 'Geografia',
+                             'Inglês', 'Arte', 'Ed. Física', 'Educação Digital']
+
+
+def _boletim_dados_turma_multitrimestre(conn, ano, turma_id):
+    """Monta, pra cada aluno de uma turma, o quadro completo dos 3 trimestres:
+    notas por disciplina em cada trimestre, faltas por trimestre, e um resumo (média
+    final, situação SAEB, alertas, observações) — base pro boletim impresso, que
+    mostra os 3 trimestres lado a lado mesmo que só o 1º já tenha dado."""
+    alunos = conn.execute("""
+        SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome
+    """, (turma_id,)).fetchall()
+    aluno_ids = [a["id"] for a in alunos]
+    if not aluno_ids:
+        return []
+    placeholders = ",".join("?" * len(aluno_ids))
+
+    notas_rows = conn.execute(f"""
+        SELECT bm.aluno_id, d.nome AS disc, bm.trimestre, bm.nota, bm.nota_texto
+        FROM boletim_medias bm JOIN disciplinas d ON d.id = bm.disciplina_id
+        WHERE bm.ano = ? AND bm.aluno_id IN ({placeholders})
+    """, [ano] + aluno_ids).fetchall()
+    notas_por_aluno = {}
+    for r in notas_rows:
+        notas_por_aluno.setdefault(r["aluno_id"], {}).setdefault(r["disc"], {})[r["trimestre"]] = (r["nota"], r["nota_texto"])
+
+    faltas_rows = conn.execute(f"""
+        SELECT aluno_id, trimestre, SUM(faltas) AS total FROM boletim_faltas
+        WHERE ano = ? AND aluno_id IN ({placeholders}) GROUP BY aluno_id, trimestre
+    """, [ano] + aluno_ids).fetchall()
+    faltas_por_aluno = {}
+    for r in faltas_rows:
+        faltas_por_aluno.setdefault(r["aluno_id"], {})[r["trimestre"]] = r["total"]
+
+    analise_rows = conn.execute(f"""
+        SELECT aluno_id, trimestre, emocional, apoio, alfabetizacao, faltoso, observacao
+        FROM boletim_analise WHERE ano = ? AND aluno_id IN ({placeholders})
+        ORDER BY trimestre
+    """, [ano] + aluno_ids).fetchall()
+    analise_por_aluno = {}
+    for r in analise_rows:
+        analise_por_aluno.setdefault(r["aluno_id"], []).append(r)
+
+    resultado = []
+    for a in alunos:
+        notas = notas_por_aluno.get(a["id"], {})
+        medias_finais = {}
+        for disc in BOLETIM_DISC_NUMERICAS:
+            vals = [v[0] for t, v in notas.get(disc, {}).items() if v[0] is not None]
+            medias_finais[disc] = sum(vals) / len(vals) if vals else None
+        todas_vals = [v for v in medias_finais.values() if v is not None]
+        media_geral = sum(todas_vals) / len(todas_vals) if todas_vals else None
+
+        analises = analise_por_aluno.get(a["id"], [])
+        emocional = None
+        for r in analises:
+            if r["emocional"] and BOLETIM_PRIORIDADE_EMOCIONAL.get(r["emocional"], 0) > BOLETIM_PRIORIDADE_EMOCIONAL.get(emocional, 0):
+                emocional = r["emocional"]
+        apoio = any(r["apoio"] for r in analises)
+        alfab = any(r["alfabetizacao"] for r in analises)
+        faltoso = any(r["faltoso"] for r in analises)
+        observacoes = " | ".join(f"[{r['trimestre']}º Tri] {r['observacao']}" for r in analises if r["observacao"])
+
+        resultado.append({
+            "id": a["id"], "nome": a["nome"], "numero": a["numero"],
+            "notas": notas, "medias_finais": medias_finais, "media_geral": media_geral,
+            "saeb_geral": _boletim_saeb_nivel(media_geral),
+            "faltas_por_trim": faltas_por_aluno.get(a["id"], {}),
+            "emocional": emocional, "apoio": apoio, "alfab": alfab, "faltoso": faltoso,
+            "observacoes": observacoes,
+        })
+    return resultado
+
+
+@app.get("/boletim/relatorio-turma", response_class=HTMLResponse)
+def boletim_relatorio_turma(ano: int, turma_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/boletim", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/boletim", status_code=303)
+    lista = _boletim_dados_turma_multitrimestre(conn, ano, turma_id)
+    conn.close()
+
+    paginas_html = ""
+    for i, e in enumerate(lista):
+        linhas_disc = ""
+        for d in BOLETIM_ORDEM_DISCIPLINAS:
+            trims = e["notas"].get(d, {})
+            celulas_trim = ""
+            for t in [1, 2, 3]:
+                nota, nota_texto = trims.get(t, (None, None))
+                if nota_texto:
+                    celulas_trim += f'<td style="text-align:center;">{nota_texto}</td>'
+                elif nota is not None:
+                    cor = "color:#dc2626; font-weight:600;" if nota < 5 else ""
+                    celulas_trim += f'<td style="text-align:center; {cor}">{nota:.1f}</td>'
+                else:
+                    celulas_trim += '<td style="text-align:center; color:#bbb;">—</td>'
+            media_disc = e["medias_finais"].get(d)
+            media_disc_str = f'{media_disc:.1f}' if media_disc is not None else "—"
+            linhas_disc += f"""<tr>
+                <td style="padding:5px 8px;">{d}</td>
+                {celulas_trim}
+                <td style="text-align:center; font-weight:700;">{media_disc_str}</td>
+            </tr>"""
+
+        saeb = e["saeb_geral"]
+        saeb_html = f'<span style="background:{saeb["color"]}22; color:{saeb["color"]}; padding:2px 8px; border-radius:4px; font-weight:600;">{saeb["label"]}</span>' if saeb else "—"
+        media_geral_str = f'{e["media_geral"]:.1f}' if e["media_geral"] is not None else "—"
+
+        faltas_cols = "".join(
+            f'<span style="margin-right:14px;"><strong>{t}º Tri:</strong> {e["faltas_por_trim"].get(t, "—")}</span>'
+            for t in [1, 2, 3]
+        )
+        faltas_total = sum(v for v in e["faltas_por_trim"].values() if v)
+
+        alertas = []
+        if e["apoio"]:
+            alertas.append("🤝 Precisa de apoio pedagógico")
+        if e["alfab"]:
+            alertas.append("📖 Dificuldade de alfabetização")
+        if e["faltoso"]:
+            alertas.append("🚫 Frequência preocupante")
+        emo_str = f'{BOLETIM_EMOJI_EMOCIONAL.get(e["emocional"], "")} {BOLETIM_LABEL_EMOCIONAL.get(e["emocional"], "Não informado")}'
+        alertas_html = "".join(f'<div style="margin-top:2px;">{al}</div>' for al in alertas)
+
+        quebra_pagina = "page-break-after: always;" if i < len(lista) - 1 else ""
+        paginas_html += f"""
+        <div style="{quebra_pagina} padding-bottom:20px;">
+            <div class="header">
+                <img src="/static/imagens/logo_walmir.png" style="max-height:55px;" alt="Walmir">
+                <div>
+                    <h2 style="margin:0;">Boletim Escolar</h2>
+                    <div style="color:#555; font-size:13px;">E.M. Walmir de Freitas Monteiro · {ano}</div>
+                </div>
+            </div>
+            <table style="margin-bottom:12px;">
+                <tr><td style="padding:4px 8px; width:25%;"><strong>Aluno:</strong></td><td style="padding:4px 8px;">{e["nome"]}</td>
+                    <td style="padding:4px 8px; width:15%;"><strong>Nº:</strong></td><td style="padding:4px 8px;">{e["numero"] if e["numero"] is not None else "—"}</td></tr>
+                <tr><td style="padding:4px 8px;"><strong>Turma:</strong></td><td style="padding:4px 8px;">{turma["nome"]}</td>
+                    <td style="padding:4px 8px;"><strong>Ano letivo:</strong></td><td style="padding:4px 8px;">{ano}</td></tr>
+            </table>
+            <table>
+                <thead><tr style="background:#f0f0f0;">
+                    <th style="padding:5px 8px; text-align:left;">Disciplina</th>
+                    <th style="padding:5px;">1º Tri</th><th style="padding:5px;">2º Tri</th><th style="padding:5px;">3º Tri</th>
+                    <th style="padding:5px;">Média Final</th>
+                </tr></thead>
+                <tbody>{linhas_disc}</tbody>
+            </table>
+            <table style="margin-top:14px;">
+                <tr><td style="padding:6px 8px; width:25%;"><strong>Média Geral</strong></td>
+                    <td style="padding:6px 8px;"><span style="font-size:16px; font-weight:800;">{media_geral_str}</span> {saeb_html}</td></tr>
+                <tr><td style="padding:6px 8px;"><strong>Faltas</strong></td>
+                    <td style="padding:6px 8px;">{faltas_cols}<strong>Total: {faltas_total}</strong></td></tr>
+                <tr><td style="padding:6px 8px;"><strong>Estado Emocional</strong></td><td style="padding:6px 8px;">{emo_str}</td></tr>
+                {f'<tr><td style="padding:6px 8px; vertical-align:top;"><strong>Alertas</strong></td><td style="padding:6px 8px;">{alertas_html}</td></tr>' if alertas else ''}
+                {f'<tr><td style="padding:6px 8px; vertical-align:top;"><strong>Observações</strong></td><td style="padding:6px 8px; font-size:12px;">{e["observacoes"]}</td></tr>' if e["observacoes"] else ''}
+            </table>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Boletim — Turma {turma['nome']}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
+  table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+  th, td {{ border:1px solid #ccc; }}
+  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:16px; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head>
+<body>
+  <div class="no-print" style="margin-bottom:16px;">
+    <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="/boletim/turma?trimestre=1&ano={ano}&turma_id={turma_id}">← Voltar</a>
+    <span style="color:#777; margin-left:10px;">{len(lista)} boletim(ns) — um por página</span>
+  </div>
+  {paginas_html}
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.get("/boletim/estudantes", response_class=HTMLResponse)
+def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
+                        turma_id: Optional[int] = None, q: Optional[str] = None):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+
+    combinacoes = conn.execute("""
+        SELECT trimestre, ano FROM boletim_medias GROUP BY trimestre, ano ORDER BY ano DESC, trimestre DESC
+    """).fetchall()
+    if not combinacoes:
+        conn.close()
+        content = '<div class="page-header"><h1>👥 Estudantes</h1></div><div class="empty">Nenhum dado importado ainda.</div>'
+        return render_page("Estudantes", content, active="")
+    if trimestre is None or ano is None:
+        trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
+
+    turmas = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
+    lista = _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=turma_id)
+    conn.close()
+
+    if q and q.strip():
+        ql = q.strip().lower()
+        lista = [e for e in lista if ql in e["nome"].lower()]
+
+    lista.sort(key=lambda e: (e["turma"], e["nome"]))
+
+    turma_opts = '<option value="">Todas as turmas</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>Turma {t["nome"]}</option>' for t in turmas
+    )
+    trimestre_opts = "".join(
+        f'<option value="{c["trimestre"]}:{c["ano"]}"{" selected" if c["trimestre"]==trimestre and c["ano"]==ano else ""}>{c["trimestre"]}º Trimestre {c["ano"]}</option>'
+        for c in combinacoes
+    )
+
+    cabecalho_disc = "".join(f'<th style="padding:6px;">{d[:4]}.</th>' for d in BOLETIM_ORDEM_DISCIPLINAS)
+
+    linhas = ""
+    for e in lista:
+        celulas = ""
+        for d in BOLETIM_ORDEM_DISCIPLINAS:
+            v = e["notas"].get(d)
+            vt = e["notas_texto"].get(d)
+            if vt:
+                celulas += f'<td style="padding:6px; text-align:center;">{vt}</td>'
+            elif v is not None:
+                cor = "color:var(--red); font-weight:600;" if v < 5 else ""
+                celulas += f'<td style="padding:6px; text-align:center; {cor}">{v:.1f}</td>'
+            else:
+                celulas += '<td style="padding:6px; text-align:center; color:var(--text-muted);">—</td>'
+        saeb = e["saeb"]
+        saeb_html = f'<span class="badge" style="background:{saeb["color"]}22; color:{saeb["color"]};">{saeb["label"]}</span>' if saeb else "—"
+        emoji_emo = BOLETIM_EMOJI_EMOCIONAL.get(e["emocional"], "—")
+        media_str = f'{e["media"]:.1f}' if e["media"] is not None else "—"
+        marcas = []
+        if e["risco_retencao"]:
+            marcas.append('⚠️')
+        if e["apoio"]:
+            marcas.append('🤝')
+        if e["alfab"]:
+            marcas.append('📖')
+        if e["faltoso"]:
+            marcas.append('🚫')
+        linhas += f"""<tr>
+            <td style="padding:6px; white-space:nowrap;"><strong>{e["nome"]}</strong></td>
+            <td style="padding:6px;">{e["turma"]}</td>
+            {celulas}
+            <td style="padding:6px; text-align:center; font-weight:700;">{media_str}</td>
+            <td style="padding:6px; text-align:center;">{saeb_html}</td>
+            <td style="padding:6px; text-align:center;">{emoji_emo}</td>
+            <td style="padding:6px; text-align:center;">{" ".join(marcas) or "—"}</td>
+            <td style="padding:6px; font-size:11px; max-width:220px;">{e["observacoes"] or ""}</td>
+        </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>👥 Estudantes</h1>
+            <p class="subtitle">{len(lista)} estudante(s) · {trimestre}º Trimestre {ano}</p>
+        </div>
+        <form method="get" action="/boletim/estudantes" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+                <label style="margin:0; flex:1 1 180px;">Trimestre
+                    <select onchange="var v=this.value.split(':'); document.getElementById('f-trimestre').value=v[0]; document.getElementById('f-ano').value=v[1]; this.form.submit();">
+                        {trimestre_opts}
+                    </select>
+                    <input type="hidden" id="f-trimestre" name="trimestre" value="{trimestre}">
+                    <input type="hidden" id="f-ano" name="ano" value="{ano}">
+                </label>
+                <label style="margin:0; flex:1 1 160px;">Turma
+                    <select name="turma_id" onchange="this.form.submit();">{turma_opts}</select>
+                </label>
+                <label style="margin:0; flex:1 1 200px;">Buscar por nome
+                    <input type="text" name="q" value="{q or ''}" placeholder="nome do aluno">
+                </label>
+                <button type="submit" class="btn btn-primary">Filtrar</button>
+            </div>
+        </form>
+        <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:6px; text-align:left;">Aluno</th><th style="padding:6px; text-align:left;">Turma</th>
+                {cabecalho_disc}
+                <th style="padding:6px;">Média</th><th style="padding:6px;">SAEB</th>
+                <th style="padding:6px;">Emoc.</th><th style="padding:6px;">Alertas</th><th style="padding:6px; text-align:left;">Observações</th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+        </div>
+    """
+    return render_page("Estudantes", content, active="boletim-estudantes")
+
+
+@app.get("/boletim/relatorio-geral", response_class=HTMLResponse)
+def boletim_relatorio_geral(trimestre: int, ano: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/boletim", status_code=303)
+
+    conn = get_db()
+    enriquecidos = _boletim_enriquecer_alunos(conn, trimestre, ano)
+    conn.close()
+
+    total = len(enriquecidos)
+    medias_validas = [e["media"] for e in enriquecidos if e["media"] is not None]
+    media_geral = sum(medias_validas) / len(medias_validas) if medias_validas else None
+    saeb_geral = _boletim_saeb_nivel(media_geral)
+    n_retencao = sum(1 for e in enriquecidos if e["risco_retencao"])
+    n_apoio = sum(1 for e in enriquecidos if e["apoio"])
+    n_alfab = sum(1 for e in enriquecidos if e["alfab"])
+    n_faltoso = sum(1 for e in enriquecidos if e["faltoso"])
+
+    from collections import defaultdict
+    por_ano = defaultdict(list)
+    for e in enriquecidos:
+        por_ano[_boletim_ano_da_turma(e["turma"])].append(e)
+    linhas_panorama = ""
+    for label in ["6°", "7°", "8°", "9°"]:
+        grupo = por_ano.get(label, [])
+        if not grupo:
+            continue
+        medias_g = [e["media"] for e in grupo if e["media"] is not None]
+        media_g = sum(medias_g) / len(medias_g) if medias_g else None
+        saeb_g = _boletim_saeb_nivel(media_g)
+        n_ret_g = sum(1 for e in grupo if e["risco_retencao"])
+        linhas_panorama += f"""<tr>
+            <td style="padding:6px 8px;">{label} Ano</td><td style="padding:6px 8px; text-align:center;">{len(grupo)}</td>
+            <td style="padding:6px 8px; text-align:center; font-weight:700;">{f"{media_g:.1f}" if media_g is not None else "—"}</td>
+            <td style="padding:6px 8px; text-align:center;">{saeb_g["label"] if saeb_g else "—"}</td>
+            <td style="padding:6px 8px; text-align:center;">{n_ret_g}</td>
+        </tr>"""
+
+    ranking_disc = []
+    for d in BOLETIM_DISC_NUMERICAS:
+        vals = [e["notas"].get(d) for e in enriquecidos if e["notas"].get(d) is not None]
+        if vals:
+            m = sum(vals) / len(vals)
+            ranking_disc.append((d, m, _boletim_saeb_nivel(m)))
+    ranking_disc.sort(key=lambda x: x[1], reverse=True)
+    linhas_disc = "".join(
+        f'<tr><td style="padding:6px 8px;">{d}</td><td style="padding:6px 8px; text-align:center; font-weight:700;">{m:.1f}</td>'
+        f'<td style="padding:6px 8px; text-align:center;">{lvl["label"] if lvl else "—"}</td></tr>'
+        for d, m, lvl in ranking_disc
+    )
+
+    raca_count = {}
+    for e in enriquecidos:
+        r = e["raca"] or "Não informado"
+        raca_count[r] = raca_count.get(r, 0) + 1
+    linhas_raca = "".join(
+        f'<tr><td style="padding:6px 8px;">{r}</td><td style="padding:6px 8px; text-align:center;">{c}</td>'
+        f'<td style="padding:6px 8px; text-align:center;">{c/total*100:.1f}%</td></tr>'
+        for r, c in sorted(raca_count.items(), key=lambda x: -x[1])
+    )
+
+    saeb_geral_html = f'{saeb_geral["label"]}' if saeb_geral else "—"
+    media_geral_str = f'{media_geral:.1f}' if media_geral is not None else "—"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Relatório Geral de Gestão — {trimestre}º Tri {ano}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
+  table {{ width:100%; border-collapse:collapse; font-size:13px; margin-bottom:20px; }}
+  th, td {{ border:1px solid #ccc; }}
+  th {{ background:#f0f0f0; padding:6px 8px; text-align:left; }}
+  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:20px; }}
+  .stat {{ display:inline-block; border:1px solid #ccc; border-radius:6px; padding:10px 16px; margin:0 10px 10px 0; }}
+  .stat-val {{ font-size:22px; font-weight:800; }}
+  .stat-lbl {{ font-size:11px; color:#666; text-transform:uppercase; }}
+  h3 {{ margin-top:26px; margin-bottom:8px; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head>
+<body>
+  <div class="header">
+    <img src="/static/imagens/logo_walmir.png" style="max-height:60px;" alt="Walmir">
+    <div>
+      <h2 style="margin:0;">Relatório Geral de Gestão</h2>
+      <div style="color:#555; font-size:13px;">E.M. Walmir de Freitas Monteiro · {trimestre}º Trimestre {ano} · {total} estudante(s)</div>
+    </div>
+  </div>
+  <div class="no-print" style="margin-bottom:16px;">
+    <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="/boletim/dashboard?trimestre={trimestre}&ano={ano}">← Voltar ao Dashboard</a>
+  </div>
+
+  <div>
+    <div class="stat"><div class="stat-val">{total}</div><div class="stat-lbl">Estudantes</div></div>
+    <div class="stat"><div class="stat-val">{media_geral_str}</div><div class="stat-lbl">Média Geral ({saeb_geral_html})</div></div>
+    <div class="stat"><div class="stat-val">{n_retencao}</div><div class="stat-lbl">Risco de Retenção</div></div>
+    <div class="stat"><div class="stat-val">{n_apoio}</div><div class="stat-lbl">Precisam de Apoio</div></div>
+    <div class="stat"><div class="stat-val">{n_alfab}</div><div class="stat-lbl">Dif. Alfabetização</div></div>
+    <div class="stat"><div class="stat-val">{n_faltoso}</div><div class="stat-lbl">Faltosos</div></div>
+  </div>
+
+  <h3>Panorama por Ano de Escolaridade</h3>
+  <table><thead><tr><th>Ano</th><th>Alunos</th><th>Média</th><th>SAEB</th><th>Risco Retenção</th></tr></thead>
+    <tbody>{linhas_panorama}</tbody></table>
+
+  <h3>Desempenho por Disciplina</h3>
+  <table><thead><tr><th>Disciplina</th><th>Média</th><th>SAEB</th></tr></thead>
+    <tbody>{linhas_disc}</tbody></table>
+
+  <h3>Distribuição por Raça/Etnia</h3>
+  <table><thead><tr><th>Raça/Etnia</th><th>Alunos</th><th>%</th></tr></thead>
+    <tbody>{linhas_raca}</tbody></table>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.get("/boletim/comparativo", response_class=HTMLResponse)
+def boletim_comparativo(request: Request, ano: Optional[int] = None,
+                         trimestre_a: Optional[int] = None, trimestre_b: Optional[int] = None,
+                         turma_id: Optional[int] = None):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+
+    trimestres_disponiveis = conn.execute("""
+        SELECT DISTINCT trimestre, ano FROM boletim_medias ORDER BY ano DESC, trimestre DESC
+    """).fetchall()
+    anos_disponiveis = sorted({r["ano"] for r in trimestres_disponiveis}, reverse=True)
+    if not anos_disponiveis:
+        conn.close()
+        content = '<div class="page-header"><h1>🔄 Comparativo entre Trimestres</h1></div><div class="empty">Nenhum dado importado ainda.</div>'
+        return render_page("Comparativo", content, active="boletim-comparativo")
+    if ano is None:
+        ano = anos_disponiveis[0]
+
+    trims_do_ano = sorted({r["trimestre"] for r in trimestres_disponiveis if r["ano"] == ano})
+    if len(trims_do_ano) < 2:
+        conn.close()
+        turmas_vazio = ""
+        content = f"""
+            <div class="page-header"><h1>🔄 Comparativo entre Trimestres</h1></div>
+            <div class="empty">Esse ano ({ano}) só tem {len(trims_do_ano)} trimestre com dados lançados — a comparação
+            fica disponível assim que o 2º trimestre for importado ou lançado pela tela de Análise.</div>
+        """
+        return render_page("Comparativo", content, active="boletim-comparativo")
+
+    if trimestre_b is None or trimestre_b not in trims_do_ano:
+        trimestre_b = trims_do_ano[-1]
+    if trimestre_a is None or trimestre_a not in trims_do_ano or trimestre_a == trimestre_b:
+        anteriores = [t for t in trims_do_ano if t < trimestre_b]
+        trimestre_a = anteriores[-1] if anteriores else trims_do_ano[0]
+
+    turmas = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
+
+    dados_a = {e["id"]: e for e in _boletim_enriquecer_alunos(conn, trimestre_a, ano, turma_id=turma_id)}
+    dados_b = {e["id"]: e for e in _boletim_enriquecer_alunos(conn, trimestre_b, ano, turma_id=turma_id)}
+    conn.close()
+
+    alunos_ids = set(dados_a) | set(dados_b)
+
+    # --- Por disciplina: média A vs B, quem subiu/desceu ---
+    linhas_disc = []
+    for d in BOLETIM_DISC_NUMERICAS:
+        vals_a = [e["notas"].get(d) for e in dados_a.values() if e["notas"].get(d) is not None]
+        vals_b = [e["notas"].get(d) for e in dados_b.values() if e["notas"].get(d) is not None]
+        media_a = sum(vals_a) / len(vals_a) if vals_a else None
+        media_b = sum(vals_b) / len(vals_b) if vals_b else None
+        delta = (media_b - media_a) if (media_a is not None and media_b is not None) else None
+        linhas_disc.append((d, media_a, media_b, delta))
+    linhas_disc.sort(key=lambda x: (x[3] is None, -(x[3] or 0)))
+
+    def seta(delta):
+        if delta is None:
+            return '<span style="color:var(--text-muted);">—</span>'
+        if delta > 0.05:
+            return f'<span style="color:var(--green); font-weight:700;">▲ +{delta:.1f}</span>'
+        if delta < -0.05:
+            return f'<span style="color:var(--red); font-weight:700;">▼ {delta:.1f}</span>'
+        return '<span style="color:var(--text-muted);">≈ estável</span>'
+
+    disc_rows_html = "".join(
+        f'<tr><td style="padding:6px 10px;">{d}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{f"{ma:.1f}" if ma is not None else "—"}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{f"{mb:.1f}" if mb is not None else "—"}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{seta(delta)}</td></tr>'
+        for d, ma, mb, delta in linhas_disc
+    )
+
+    # --- Por aluno: quem mais melhorou / quem mais piorou (média geral) ---
+    deltas_alunos = []
+    for aid in alunos_ids:
+        ea, eb = dados_a.get(aid), dados_b.get(aid)
+        if not ea or not eb or ea["media"] is None or eb["media"] is None:
+            continue
+        deltas_alunos.append({
+            "nome": eb["nome"], "turma": eb["turma"], "media_a": ea["media"], "media_b": eb["media"],
+            "delta": eb["media"] - ea["media"],
+        })
+    melhoraram = sorted([d for d in deltas_alunos if d["delta"] > 0], key=lambda x: -x["delta"])[:15]
+    pioraram = sorted([d for d in deltas_alunos if d["delta"] < 0], key=lambda x: x["delta"])[:15]
+
+    def lista_delta_html(lista, cor):
+        if not lista:
+            return '<p style="font-size:12px; color:var(--text-muted);">Nenhum aluno nessa situação.</p>'
+        return "".join(
+            f'<div style="display:flex; justify-content:space-between; padding:4px 8px; font-size:12px; background:var(--bg-subtle); border-radius:4px; margin-bottom:3px;">'
+            f'<span>{d["nome"]} <span style="color:var(--text-muted);">· {d["turma"]}</span></span>'
+            f'<strong style="color:{cor};">{d["media_a"]:.1f} → {d["media_b"]:.1f} ({"+" if d["delta"]>0 else ""}{d["delta"]:.1f})</strong></div>'
+            for d in lista
+        )
+
+    melhoraram_html = lista_delta_html(melhoraram, "var(--green)")
+    pioraram_html = lista_delta_html(pioraram, "var(--red)")
+
+    # --- Por raça: média A vs B ---
+    def media_por_raca(dados):
+        agrup = {}
+        for e in dados.values():
+            if e["media"] is None:
+                continue
+            r = e["raca"] or "Não informado"
+            agrup.setdefault(r, []).append(e["media"])
+        return {r: sum(v) / len(v) for r, v in agrup.items()}
+
+    raca_a, raca_b = media_por_raca(dados_a), media_por_raca(dados_b)
+    todas_racas = sorted(set(raca_a) | set(raca_b), key=lambda r: -(raca_b.get(r, raca_a.get(r, 0))))
+    raca_rows_html = "".join(
+        f'<tr><td style="padding:6px 10px;">{r}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{f"{raca_a[r]:.1f}" if r in raca_a else "—"}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{f"{raca_b[r]:.1f}" if r in raca_b else "—"}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{seta((raca_b[r]-raca_a[r]) if (r in raca_a and r in raca_b) else None)}</td></tr>'
+        for r in todas_racas
+    )
+
+    # --- Por distorção idade-série: média A vs B ---
+    def media_por_distorcao(dados):
+        grupos = {"Idade adequada": [], "Com distorção": []}
+        for e in dados.values():
+            if e["media"] is None or not e.get("data_nascimento"):
+                continue
+            try:
+                ano_esc = int(str(e["turma"])[0])
+            except (ValueError, IndexError):
+                continue
+            idade = _calcular_idade_referencia(e["data_nascimento"], ano)
+            if idade is None:
+                continue
+            idade_esperada = ano_esc + 5
+            grupo = "Com distorção" if idade > idade_esperada else "Idade adequada"
+            grupos[grupo].append(e["media"])
+        return {g: (sum(v) / len(v) if v else None) for g, v in grupos.items()}
+
+    dist_a, dist_b = media_por_distorcao(dados_a), media_por_distorcao(dados_b)
+    dist_rows_html = "".join(
+        f'<tr><td style="padding:6px 10px;">{g}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{f"{dist_a[g]:.1f}" if dist_a.get(g) is not None else "—"}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{f"{dist_b[g]:.1f}" if dist_b.get(g) is not None else "—"}</td>'
+        f'<td style="padding:6px 10px; text-align:center;">{seta((dist_b[g]-dist_a[g]) if (dist_a.get(g) is not None and dist_b.get(g) is not None) else None)}</td></tr>'
+        for g in ["Idade adequada", "Com distorção"]
+    )
+    tem_dados_idade = any(v is not None for v in list(dist_a.values()) + list(dist_b.values()))
+
+    # --- Seletores ---
+    trim_a_opts = "".join(f'<option value="{t}"{" selected" if t==trimestre_a else ""}>{t}º Trimestre</option>' for t in trims_do_ano)
+    trim_b_opts = "".join(f'<option value="{t}"{" selected" if t==trimestre_b else ""}>{t}º Trimestre</option>' for t in trims_do_ano)
+    turma_opts = '<option value="">Escola toda</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>Turma {t["nome"]}</option>' for t in turmas
+    )
+
+    content = f"""
+        <div class="page-header">
+            <h1>🔄 Comparativo entre Trimestres</h1>
+            <p class="subtitle">Comparando {trimestre_a}º → {trimestre_b}º Trimestre de {ano}</p>
+        </div>
+        <form method="get" action="/boletim/comparativo" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+                <label style="margin:0; flex:1 1 140px;">De<select name="trimestre_a">{trim_a_opts}</select></label>
+                <label style="margin:0; flex:1 1 140px;">Para<select name="trimestre_b">{trim_b_opts}</select></label>
+                <label style="margin:0; flex:1 1 160px;">Turma<select name="turma_id">{turma_opts}</select></label>
+                <input type="hidden" name="ano" value="{ano}">
+                <button type="submit" class="btn btn-primary">Comparar</button>
+            </div>
+        </form>
+
+        <div class="card" style="margin-bottom:18px; padding:0; overflow:hidden;">
+            <div style="padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; font-size:14px;">📐 Por Disciplina</div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px 10px; text-align:left;">Disciplina</th>
+                    <th style="padding:6px 10px;">{trimestre_a}º Tri</th><th style="padding:6px 10px;">{trimestre_b}º Tri</th>
+                    <th style="padding:6px 10px;">Variação</th>
+                </tr></thead>
+                <tbody>{disc_rows_html}</tbody>
+            </table>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:18px;">
+            <div class="card">
+                <h3 style="margin-top:0; color:var(--green);">📈 Quem Mais Melhorou</h3>
+                {melhoraram_html}
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0; color:var(--red);">📉 Quem Merece Atenção (caiu)</h3>
+                {pioraram_html}
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:18px; padding:0; overflow:hidden;">
+            <div style="padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; font-size:14px;">🧑🏾 Por Raça/Etnia</div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px 10px; text-align:left;">Raça/Etnia</th>
+                    <th style="padding:6px 10px;">{trimestre_a}º Tri</th><th style="padding:6px 10px;">{trimestre_b}º Tri</th>
+                    <th style="padding:6px 10px;">Variação</th>
+                </tr></thead>
+                <tbody>{raca_rows_html}</tbody>
+            </table>
+        </div>
+
+        <div class="card" style="padding:0; overflow:hidden;">
+            <div style="padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; font-size:14px;">📏 Por Distorção Idade-Série</div>
+            {f'''<table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px 10px; text-align:left;">Grupo</th>
+                    <th style="padding:6px 10px;">{trimestre_a}º Tri</th><th style="padding:6px 10px;">{trimestre_b}º Tri</th>
+                    <th style="padding:6px 10px;">Variação</th>
+                </tr></thead>
+                <tbody>{dist_rows_html}</tbody>
+            </table>''' if tem_dados_idade else '<div style="padding:14px 16px; color:var(--text-muted); font-size:13px;">Nenhum aluno desse recorte tem data de nascimento cadastrada — cadastre em Turmas → aluno → editar pra habilitar essa comparação.</div>'}
+        </div>
+    """
+    return render_page("Comparativo entre Trimestres", content, active="boletim-comparativo")
+
+
+@app.get("/boletim/analise", response_class=HTMLResponse)
+def boletim_analise_form(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
+                          turma_id: Optional[int] = None, disciplina_id: Optional[int] = None):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    eh_admin = bool(prof.get("is_admin") or prof.get("is_gestor"))
+
+    conn = get_db()
+
+    if trimestre is None or ano is None:
+        ultimo = conn.execute("SELECT trimestre, ano FROM boletim_medias ORDER BY ano DESC, trimestre DESC LIMIT 1").fetchone()
+        trimestre, ano = (ultimo["trimestre"], ultimo["ano"]) if ultimo else (1, 2026)
+
+    # Opções de turma/disciplina — admin vê tudo, professor só o que está mapeado pra ele
+    if eh_admin:
+        opcoes = conn.execute("""
+            SELECT DISTINCT t.id AS turma_id, t.nome AS turma_nome, d.id AS disciplina_id, d.nome AS disciplina_nome
+            FROM turmas t CROSS JOIN disciplinas d WHERE t.ano_letivo = ? AND d.nome != 'Geral'
+            ORDER BY t.nome, d.nome
+        """, (ano,)).fetchall()
+    else:
+        opcoes = conn.execute("""
+            SELECT DISTINCT t.id AS turma_id, t.nome AS turma_nome, d.id AS disciplina_id, d.nome AS disciplina_nome
+            FROM boletim_professor_turma bpt
+            JOIN turmas t ON t.id = bpt.turma_id
+            JOIN disciplinas d ON d.id = bpt.disciplina_id
+            WHERE bpt.professor_id = ? AND t.ano_letivo = ?
+            ORDER BY t.nome, d.nome
+        """, (prof["id"], ano)).fetchall()
+
+    if not opcoes:
+        conn.close()
+        msg = "Nenhuma turma/disciplina foi vinculada ao seu usuário ainda. Peça pra um admin te vincular, ou lance através da importação da planilha." if not eh_admin else "Nenhuma turma cadastrada ainda."
+        content = f'<div class="page-header"><h1>📝 Análise — Conselho de Classe</h1></div><div class="empty">{msg}</div>'
+        return render_page("Análise", content, active="boletim-analise")
+
+    if turma_id is None or disciplina_id is None:
+        turma_id, disciplina_id = opcoes[0]["turma_id"], opcoes[0]["disciplina_id"]
+
+    # Se for professor comum, confere que ele tem permissão pra essa combinação específica
+    if not eh_admin and not any(o["turma_id"] == turma_id and o["disciplina_id"] == disciplina_id for o in opcoes):
+        turma_id, disciplina_id = opcoes[0]["turma_id"], opcoes[0]["disciplina_id"]
+
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    disciplina = conn.execute("SELECT * FROM disciplinas WHERE id = ?", (disciplina_id,)).fetchone()
+
+    alunos = conn.execute("SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)).fetchall()
+    analises_existentes = {}
+    for r in conn.execute("""SELECT * FROM boletim_analise WHERE trimestre=? AND ano=? AND disciplina_id=?
+                              AND aluno_id IN (SELECT id FROM alunos WHERE turma_id=?)""",
+                           (trimestre, ano, disciplina_id, turma_id)).fetchall():
+        analises_existentes[r["aluno_id"]] = r
+    conn.close()
+
+    opcoes_opts = "".join(
+        f'<option value="{o["turma_id"]}:{o["disciplina_id"]}"{" selected" if o["turma_id"]==turma_id and o["disciplina_id"]==disciplina_id else ""}>'
+        f'Turma {o["turma_nome"]} — {o["disciplina_nome"]}</option>'
+        for o in opcoes
+    )
+
+    linhas = ""
+    for a in alunos:
+        ex = analises_existentes.get(a["id"])
+        emo_atual = ex["emocional"] if ex else ""
+        apoio_atual = bool(ex["apoio"]) if ex else False
+        alfab_atual = bool(ex["alfabetizacao"]) if ex else False
+        faltoso_atual = bool(ex["faltoso"]) if ex else False
+        obs_atual = ex["observacao"] if ex else ""
+
+        emo_opts = "".join(
+            f'<option value="{v}"{" selected" if emo_atual==v else ""}>{lbl}</option>'
+            for v, lbl in [("", "—"), ("bem", "😊 Bem"), ("oscilando", "😐 Oscilando"), ("fragilizado", "😟 Fragilizado")]
+        )
+        linhas += f"""<tr>
+            <td style="padding:6px;">{a["numero"] or "—"}</td>
+            <td style="padding:6px; white-space:nowrap;">{a["nome"]}<input type="hidden" name="aluno_id" value="{a["id"]}"></td>
+            <td style="padding:6px;"><select name="emocional_{a["id"]}">{emo_opts}</select></td>
+            <td style="padding:6px; text-align:center;"><input type="checkbox" name="apoio_{a["id"]}"{" checked" if apoio_atual else ""}></td>
+            <td style="padding:6px; text-align:center;"><input type="checkbox" name="alfab_{a["id"]}"{" checked" if alfab_atual else ""}></td>
+            <td style="padding:6px; text-align:center;"><input type="checkbox" name="faltoso_{a["id"]}"{" checked" if faltoso_atual else ""}></td>
+            <td style="padding:6px;"><input type="text" name="obs_{a["id"]}" value="{(obs_atual or "").replace(chr(34), "&quot;")}" style="width:100%; margin:0;" placeholder="Observação (opcional)"></td>
+        </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📝 Análise — Conselho de Classe</h1>
+            <p class="subtitle">Turma {turma['nome']} · {disciplina['nome']} · {trimestre}º Trimestre {ano}</p>
+        </div>
+        <form method="get" action="/boletim/analise" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
+            <input type="hidden" name="trimestre" value="{trimestre}">
+            <input type="hidden" name="ano" value="{ano}">
+            <label style="margin:0; max-width:420px;">Turma / Disciplina
+                <select onchange="var v=this.value.split(':'); this.form.turma_id.value=v[0]; this.form.disciplina_id.value=v[1]; this.form.submit();">
+                    {opcoes_opts}
+                </select>
+                <input type="hidden" name="turma_id" value="{turma_id}">
+                <input type="hidden" name="disciplina_id" value="{disciplina_id}">
+            </label>
+        </form>
+        <form method="post" action="/boletim/analise/salvar">
+            <input type="hidden" name="trimestre" value="{trimestre}">
+            <input type="hidden" name="ano" value="{ano}">
+            <input type="hidden" name="turma_id" value="{turma_id}">
+            <input type="hidden" name="disciplina_id" value="{disciplina_id}">
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px; text-align:left;">Nº</th><th style="padding:6px; text-align:left;">Aluno</th>
+                    <th style="padding:6px;">Estado emocional</th><th style="padding:6px;">Apoio</th>
+                    <th style="padding:6px;">Alfabetização</th><th style="padding:6px;">Faltoso</th><th style="padding:6px; text-align:left;">Observação</th>
+                </tr></thead>
+                <tbody>{linhas}</tbody>
+            </table>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">💾 Salvar</button>
+            </div>
+        </form>
+    """
+    return render_page("Análise", content, active="boletim-analise")
+
+
+@app.post("/boletim/analise/salvar")
+async def boletim_analise_salvar(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    form = await request.form()
+    trimestre = int(form.get("trimestre"))
+    ano = int(form.get("ano"))
+    turma_id = int(form.get("turma_id"))
+    disciplina_id = int(form.get("disciplina_id"))
+    alunos_ids = form.getlist("aluno_id")
+
+    conn = get_db()
+    n_salvos = 0
+    for aid_str in alunos_ids:
+        aid = int(aid_str)
+        emocional = form.get(f"emocional_{aid}") or None
+        apoio = form.get(f"apoio_{aid}") is not None
+        alfab = form.get(f"alfab_{aid}") is not None
+        faltoso = form.get(f"faltoso_{aid}") is not None
+        obs = (form.get(f"obs_{aid}") or "").strip() or None
+        conn.execute("""
+            INSERT INTO boletim_analise (aluno_id, disciplina_id, professor_id, trimestre, ano, emocional, apoio, alfabetizacao, faltoso, observacao, atualizado_em)
+            VALUES (?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+            ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET
+                professor_id = excluded.professor_id, emocional = excluded.emocional,
+                apoio = excluded.apoio, alfabetizacao = excluded.alfabetizacao, faltoso = excluded.faltoso,
+                observacao = excluded.observacao, atualizado_em = CURRENT_TIMESTAMP
+        """, (aid, disciplina_id, prof["id"], trimestre, ano, emocional, apoio, alfab, faltoso, obs))
+        n_salvos += 1
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(
+        f"/boletim/analise?trimestre={trimestre}&ano={ano}&turma_id={turma_id}&disciplina_id={disciplina_id}",
+        status_code=303
+    )
 
 
 
