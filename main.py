@@ -3961,6 +3961,305 @@ def boletim_ver_turma(request: Request, trimestre: int, ano: int, turma_id: int)
     return render_page(f"Turma {turma['nome']}", content, active="")
 
 
+BOLETIM_DISC_NUMERICAS = ['Português', 'Matemática', 'Ciências', 'História', 'Geografia', 'Inglês', 'Arte', 'Ed. Física']
+BOLETIM_PRIORIDADE_EMOCIONAL = {"fragilizado": 3, "oscilando": 2, "bem": 1}
+
+
+def _boletim_ano_da_turma(turma_nome):
+    t = str(turma_nome or "")
+    return {"6": "6°", "7": "7°", "8": "8°", "9": "9°"}.get(t[:1], "Outro")
+
+
+def _boletim_saeb_nivel(media):
+    """Escala SAEB: Abaixo do Básico <5,0 | Básico 5,0-6,4 | Adequado 6,5-7,9 | Avançado ≥8,0."""
+    if media is None:
+        return None
+    if media < 5:
+        return {"key": "abaixo", "label": "Abaixo do Básico", "color": "#dc2626"}
+    if media < 6.5:
+        return {"key": "basico", "label": "Básico", "color": "#ea580c"}
+    if media < 8:
+        return {"key": "adequado", "label": "Adequado", "color": "#16a34a"}
+    return {"key": "avancado", "label": "Avançado", "color": "#6366f1"}
+
+
+def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
+    """Monta, por aluno, a média (das 8 disciplinas numéricas — Educação Digital é
+    categórica PA/PS/PI e não entra na média), nível SAEB, risco de retenção (4+
+    disciplinas abaixo de 5,0), se precisa de apoio/tem dificuldade de alfabetização,
+    e o estado emocional mais grave relatado entre as disciplinas."""
+    sql = """
+        SELECT a.id, a.nome, t.nome AS turma_nome
+        FROM alunos a JOIN turmas t ON t.id = a.turma_id
+        WHERE t.ano_letivo = ?
+    """
+    params = [ano]
+    if turma_id:
+        sql += " AND t.id = ?"
+        params.append(turma_id)
+    alunos = conn.execute(sql, params).fetchall()
+
+    notas_rows = conn.execute("""
+        SELECT bm.aluno_id, d.nome AS disc_nome, bm.nota FROM boletim_medias bm
+        JOIN disciplinas d ON d.id = bm.disciplina_id
+        WHERE bm.trimestre = ? AND bm.ano = ?
+    """, (trimestre, ano)).fetchall()
+    notas_por_aluno = {}
+    for r in notas_rows:
+        notas_por_aluno.setdefault(r["aluno_id"], {})[r["disc_nome"]] = r["nota"]
+
+    analise_rows = conn.execute("""
+        SELECT aluno_id, emocional, apoio, alfabetizacao FROM boletim_analise
+        WHERE trimestre = ? AND ano = ?
+    """, (trimestre, ano)).fetchall()
+    analise_por_aluno = {}
+    for r in analise_rows:
+        analise_por_aluno.setdefault(r["aluno_id"], []).append(r)
+
+    faltas_rows = conn.execute("""
+        SELECT aluno_id, SUM(faltas) AS total FROM boletim_faltas
+        WHERE trimestre = ? AND ano = ? GROUP BY aluno_id
+    """, (trimestre, ano)).fetchall()
+    faltas_por_aluno = {r["aluno_id"]: r["total"] for r in faltas_rows}
+
+    resultado = []
+    for a in alunos:
+        notas = notas_por_aluno.get(a["id"], {})
+        vals = [notas[d] for d in BOLETIM_DISC_NUMERICAS if notas.get(d) is not None]
+        media = sum(vals) / len(vals) if vals else None
+        red_count = sum(1 for v in vals if v < 5)
+
+        analises = analise_por_aluno.get(a["id"], [])
+        emocional = None
+        for r in analises:
+            if r["emocional"] and BOLETIM_PRIORIDADE_EMOCIONAL.get(r["emocional"], 0) > BOLETIM_PRIORIDADE_EMOCIONAL.get(emocional, 0):
+                emocional = r["emocional"]
+        apoio = any(r["apoio"] for r in analises)
+        alfab = any(r["alfabetizacao"] for r in analises)
+
+        resultado.append({
+            "id": a["id"], "nome": a["nome"], "turma": a["turma_nome"], "notas": notas,
+            "media": media, "saeb": _boletim_saeb_nivel(media),
+            "risco_retencao": red_count >= 4,
+            "apoio": apoio, "alfab": alfab, "emocional": emocional,
+            "faltas_total": faltas_por_aluno.get(a["id"], 0),
+        })
+    return resultado
+
+
+@app.get("/boletim/dashboard", response_class=HTMLResponse)
+def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
+                       turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+
+    combinacoes = conn.execute("""
+        SELECT trimestre, ano FROM boletim_medias GROUP BY trimestre, ano ORDER BY ano DESC, trimestre DESC
+    """).fetchall()
+    if not combinacoes:
+        conn.close()
+        content = '<div class="page-header"><h1>📈 Dashboard Pedagógico</h1></div><div class="empty">Nenhum dado importado ainda. <a href="/boletim/importar">Importar planilha</a></div>'
+        return render_page("Dashboard Pedagógico", content, active="")
+    if trimestre is None or ano is None:
+        trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
+
+    turmas = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
+
+    enriquecidos = _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=turma_id)
+    conn.close()
+
+    if ano_esc and not turma_id:
+        enriquecidos = [e for e in enriquecidos if _boletim_ano_da_turma(e["turma"]) == ano_esc]
+
+    total = len(enriquecidos)
+    medias_validas = [e["media"] for e in enriquecidos if e["media"] is not None]
+    media_geral = sum(medias_validas) / len(medias_validas) if medias_validas else None
+    saeb_geral = _boletim_saeb_nivel(media_geral)
+    n_retencao = sum(1 for e in enriquecidos if e["risco_retencao"])
+    n_apoio = sum(1 for e in enriquecidos if e["apoio"])
+    n_alfab = sum(1 for e in enriquecidos if e["alfab"])
+
+    emo_count = {"bem": 0, "oscilando": 0, "fragilizado": 0}
+    for e in enriquecidos:
+        if e["emocional"]:
+            emo_count[e["emocional"]] += 1
+
+    # --- seletor de trimestre/turma/ano de escolaridade ---
+    trimestre_opts = "".join(
+        f'<option value="{c["trimestre"]}:{c["ano"]}"{" selected" if c["trimestre"]==trimestre and c["ano"]==ano else ""}>{c["trimestre"]}º Trimestre {c["ano"]}</option>'
+        for c in combinacoes
+    )
+    turma_opts = '<option value="">Escola toda</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>Turma {t["nome"]}</option>' for t in turmas
+    )
+    ano_esc_opts = '<option value="">Todos os anos</option>' + "".join(
+        f'<option value="{a}"{" selected" if ano_esc==a else ""}>{a} Ano</option>' for a in ["6°", "7°", "8°", "9°"]
+    )
+
+    # --- cards de estatística ---
+    stat_cards = [
+        ("👥", "Total de Estudantes", total, "var(--accent)", None),
+        ("🎯", "Média Geral", f"{media_geral:.1f}" if media_geral is not None else "—", "var(--green)", saeb_geral["label"] if saeb_geral else None),
+        ("⚠️", "Risco de Retenção (4+ notas vermelhas)", n_retencao, "var(--red)", None),
+        ("🤝", "Precisam de Apoio", n_apoio, "var(--orange)", None),
+        ("📖", "Dif. de Alfabetização", n_alfab, "var(--purple)", None),
+    ]
+    stat_cards_html = "".join(
+        f'<div class="metric"><div class="metric-label">{lbl}</div><div class="metric-value" style="color:{cor};">{val}</div>'
+        + (f'<div style="font-size:11px; color:{cor}; font-weight:600; margin-top:2px;">{sub}</div>' if sub else '')
+        + '</div>'
+        for ico, lbl, val, cor, sub in stat_cards
+    )
+
+    # --- panorama por ano de escolaridade (só quando "escola toda") ---
+    panorama_html = ""
+    if not turma_id:
+        from collections import defaultdict
+        por_ano = defaultdict(list)
+        for e in enriquecidos:
+            por_ano[_boletim_ano_da_turma(e["turma"])].append(e)
+        linhas_panorama = ""
+        for label in ["6°", "7°", "8°", "9°"]:
+            grupo = por_ano.get(label, [])
+            if not grupo:
+                continue
+            medias_g = [e["media"] for e in grupo if e["media"] is not None]
+            media_g = sum(medias_g) / len(medias_g) if medias_g else None
+            saeb_g = _boletim_saeb_nivel(media_g)
+            n_adeq_avanc = sum(1 for e in grupo if e["saeb"] and e["saeb"]["key"] in ("adequado", "avancado"))
+            pct = round(n_adeq_avanc / len(grupo) * 100) if grupo else 0
+            n_ret_g = sum(1 for e in grupo if e["risco_retencao"])
+            n_apoio_g = sum(1 for e in grupo if e["apoio"])
+            cor_g = saeb_g["color"] if saeb_g else "var(--text-muted)"
+            linhas_panorama += f"""<tr>
+                <td style="padding:8px 10px;"><strong>{label} Ano</strong> <span style="font-size:11px; color:var(--text-muted);">{len(grupo)} alunos</span></td>
+                <td style="padding:8px 10px; text-align:center; font-weight:700; color:{cor_g};">{(f"{media_g:.1f}" if media_g is not None else "—")}</td>
+                <td style="padding:8px 10px; text-align:center;">{f'<span class="badge" style="background:{cor_g}22; color:{cor_g};">{saeb_g["label"]}</span>' if saeb_g else "—"}</td>
+                <td style="padding:8px 10px;">
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <div style="flex:1; background:var(--border); border-radius:3px; height:10px; overflow:hidden;"><div style="width:{pct}%; background:{cor_g}; height:100%;"></div></div>
+                        <span style="font-size:11px; color:{cor_g}; font-weight:700; width:34px;">{pct}%</span>
+                    </div>
+                </td>
+                <td style="padding:8px 10px; text-align:center; color:var(--red); font-weight:700;">{n_ret_g}</td>
+                <td style="padding:8px 10px; text-align:center; color:var(--orange); font-weight:700;">{n_apoio_g}</td>
+            </tr>"""
+        panorama_html = f"""
+        <div class="card" style="margin-bottom:18px; padding:0; overflow:hidden;">
+            <div style="padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; font-size:14px;">📊 Panorama por Ano de Escolaridade</div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:8px 10px; text-align:left;">Ano</th><th style="padding:8px 10px;">Média</th>
+                    <th style="padding:8px 10px;">SAEB</th><th style="padding:8px 10px;">% Adequado+Avançado</th>
+                    <th style="padding:8px 10px;">Risco Retenção</th><th style="padding:8px 10px;">Apoio</th>
+                </tr></thead>
+                <tbody>{linhas_panorama}</tbody>
+            </table>
+        </div>"""
+
+    # --- distribuição SAEB por disciplina (Português e Matemática) ---
+    def dist_saeb_disciplina(disc):
+        dist = {"abaixo": 0, "basico": 0, "adequado": 0, "avancado": 0}
+        abaixo_lista = []
+        for e in enriquecidos:
+            v = e["notas"].get(disc)
+            lvl = _boletim_saeb_nivel(v)
+            if lvl:
+                dist[lvl["key"]] += 1
+                if lvl["key"] == "abaixo":
+                    abaixo_lista.append((e["nome"], e["turma"], v))
+        abaixo_lista.sort(key=lambda x: x[2])
+        return dist, abaixo_lista
+
+    dist_pt, abaixo_pt = dist_saeb_disciplina("Português")
+    dist_mt, abaixo_mt = dist_saeb_disciplina("Matemática")
+
+    def abaixo_html(lista):
+        if not lista:
+            return '<p style="font-size:12px; color:var(--text-muted);">Nenhum aluno abaixo do básico. 🎉</p>'
+        itens = "".join(
+            f'<div style="display:flex; justify-content:space-between; padding:3px 8px; font-size:12px; background:var(--red-bg); border-radius:4px; margin-bottom:3px;">'
+            f'<span>{nome} <span style="color:var(--text-muted);">· {turma}</span></span><strong style="color:var(--red);">{v:.1f}</strong></div>'
+            for nome, turma, v in lista[:15]
+        )
+        extra = f'<p style="font-size:11px; color:var(--text-muted); margin-top:4px;">+{len(lista)-15} outro(s)</p>' if len(lista) > 15 else ""
+        return itens + extra
+
+    content = f"""
+        <div class="page-header">
+            <h1>📈 Dashboard Pedagógico</h1>
+            <p class="subtitle">{total} estudante(s) · {trimestre}º Trimestre {ano}</p>
+        </div>
+        <form method="get" action="/boletim/dashboard" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+                <label style="margin:0; flex:1 1 180px;">Trimestre
+                    <select onchange="var v=this.value.split(':'); document.getElementById('f-trimestre').value=v[0]; document.getElementById('f-ano').value=v[1]; this.form.submit();">
+                        {trimestre_opts}
+                    </select>
+                    <input type="hidden" id="f-trimestre" name="trimestre" value="{trimestre}">
+                    <input type="hidden" id="f-ano" name="ano" value="{ano}">
+                </label>
+                <label style="margin:0; flex:1 1 160px;">Turma
+                    <select name="turma_id" onchange="this.form.submit();">{turma_opts}</select>
+                </label>
+                <label style="margin:0; flex:1 1 160px;">Ano de escolaridade
+                    <select name="ano_esc" onchange="this.form.submit();">{ano_esc_opts}</select>
+                </label>
+            </div>
+        </form>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:10px; margin-bottom:18px;">
+            {stat_cards_html}
+        </div>
+
+        {panorama_html}
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:18px;">
+            <div class="card">
+                <h3 style="margin-top:0;">📖 SAEB — Português</h3>
+                <div style="height:180px; position:relative;"><canvas id="ch-saeb-pt"></canvas></div>
+                <div style="margin-top:10px;">{abaixo_html(abaixo_pt)}</div>
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0;">🔢 SAEB — Matemática</h3>
+                <div style="height:180px; position:relative;"><canvas id="ch-saeb-mt"></canvas></div>
+                <div style="margin-top:10px;">{abaixo_html(abaixo_mt)}</div>
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0;">😊 Estado Emocional</h3>
+                <div style="max-width:260px; height:180px; margin:0 auto; position:relative;"><canvas id="ch-emo"></canvas></div>
+            </div>
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('ch-saeb-pt'), {{
+                type: 'bar',
+                data: {{ labels: ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
+                    datasets: [{{ data: [{dist_pt["abaixo"]}, {dist_pt["basico"]}, {dist_pt["adequado"]}, {dist_pt["avancado"]}],
+                    backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}] }},
+                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:false}}}} }}
+            }});
+            new Chart(document.getElementById('ch-saeb-mt'), {{
+                type: 'bar',
+                data: {{ labels: ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
+                    datasets: [{{ data: [{dist_mt["abaixo"]}, {dist_mt["basico"]}, {dist_mt["adequado"]}, {dist_mt["avancado"]}],
+                    backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}] }},
+                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:false}}}} }}
+            }});
+            new Chart(document.getElementById('ch-emo'), {{
+                type: 'doughnut',
+                data: {{ labels: ['Bem','Oscilando','Fragilizado'],
+                    datasets: [{{ data: [{emo_count["bem"]}, {emo_count["oscilando"]}, {emo_count["fragilizado"]}],
+                    backgroundColor: ['#16a34a','#ea580c','#dc2626'] }}] }},
+                options: {{ responsive:true, maintainAspectRatio:false }}
+            }});
+        </script>
+    """
+    return render_page("Dashboard Pedagógico", content, active="")
+
+
 
 @app.get("/turmas/{turma_id}", response_class=HTMLResponse)
 def ver_turma(request: Request, turma_id: int):
