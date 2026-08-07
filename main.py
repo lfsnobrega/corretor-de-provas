@@ -11046,7 +11046,7 @@ def painel_global_combinado_ver(trimestre_ano: str):
         regs_t = [r for r in registros if r["turma"] == t]
         n_incompletos_t = sum(1 for r in regs_t if not r["completo"])
         por_turma.append({
-            "turma": t, "n_alunos": len(regs_t), "media": _media_nota(regs_t),
+            "turma": t, "turma_id": regs_t[0]["turma_id"], "n_alunos": len(regs_t), "media": _media_nota(regs_t),
             "n_incompletos": n_incompletos_t,
             "pct_insuf": round(_agregar_faixas(regs_t).get("Insuficiente", 0) / len(regs_t) * 100, 1) if regs_t else 0,
         })
@@ -11060,7 +11060,7 @@ def painel_global_combinado_ver(trimestre_ano: str):
         cor = "var(--red)" if t["media"] < 5 else ("var(--orange)" if t["media"] < 7 else "var(--green)")
         aviso_incompleto = f' <span style="color:var(--orange); font-size:11px;">⚠ {t["n_incompletos"]} só fizeram 1 dia</span>' if t["n_incompletos"] else ""
         linhas_turma += f"""<tr>
-            <td style="padding:6px 10px;">{t['turma']}</td>
+            <td style="padding:6px 10px;"><a href="/simulados/painel-global/turma-combinado?trimestre_ano={trimestre}:{ano}&turma_id={t['turma_id']}">{t['turma']}</a></td>
             <td style="padding:6px 10px; text-align:center;">{t['n_alunos']}</td>
             <td style="padding:6px 10px; text-align:center; font-weight:700; color:{cor};">{t['media']}</td>
             <td style="padding:6px 10px; text-align:center; color:var(--red);">{t['pct_insuf']}%</td>
@@ -11349,6 +11349,80 @@ def painel_global_ver(rodada: str):
     return render_page("Painel Global da Escola", content, active="simulados")
 
 
+def _renderizar_disciplinas_cards_html(disciplinas: list) -> str:
+    """Monta o HTML dos cards 'por disciplina' (usado tanto na análise de um dia único
+    quanto na combinada Dia 01 + Dia 02) — extraído aqui pra não duplicar a lógica."""
+    disciplinas_html = ""
+    for idx_d, d in enumerate(disciplinas):
+        cor = "var(--red)" if d["pct_geral"] < 50 else ("var(--orange)" if d["pct_geral"] < 70 else "var(--green)")
+        cor_bg = "var(--red-bg)" if d["pct_geral"] < 50 else ("var(--orange-bg)" if d["pct_geral"] < 70 else "var(--green-bg)")
+
+        if d["so_uma_habilidade"]:
+            unica = d["piores_habilidades"][0]
+            habilidades_html = f"""
+                <div style="margin-top:10px;">
+                    <p style="font-size:12px; font-weight:600; color:var(--text-muted); margin:0 0 4px 0;">📌 Única habilidade BNCC cadastrada nessa disciplina</p>
+                    <ul style="margin:0 0 0 18px; font-size:12px;"><li><strong>{unica['codigo']}</strong> — {unica['descricao'] or 'sem descrição'} ({unica['pct']}% de acerto)</li></ul>
+                    <p class="muted-line" style="font-size:11px; margin-top:4px;">Cadastre mais habilidades nas questões pra comparar dificuldade entre elas.</p>
+                </div>
+            """
+        elif d["tem_habilidades"]:
+            piores_li = "".join(
+                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--red);">({h["pct"]}% de acerto)</span></li>'
+                for h in d["piores_habilidades"]
+            ) or "<li>—</li>"
+            melhores_li = "".join(
+                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--green);">({h["pct"]}% de acerto)</span></li>'
+                for h in d["melhores_habilidades"]
+            ) or "<li>Nenhuma outra habilidade se destacou.</li>"
+            habilidades_html = f"""
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-top:10px;">
+                    <div>
+                        <p style="font-size:12px; font-weight:600; color:var(--red); margin:0 0 4px 0;">🔴 Maior dificuldade</p>
+                        <ul style="margin:0 0 0 18px; font-size:12px;">{piores_li}</ul>
+                    </div>
+                    <div>
+                        <p style="font-size:12px; font-weight:600; color:var(--green); margin:0 0 4px 0;">🟢 Bem consolidado</p>
+                        <ul style="margin:0 0 0 18px; font-size:12px;">{melhores_li}</ul>
+                    </div>
+                </div>
+            """
+        else:
+            habilidades_html = '<p class="muted-line" style="font-size:12px; margin-top:8px;">Nenhuma habilidade BNCC cadastrada nas questões dessa disciplina — cadastre nas questões pra ver esse detalhamento aqui.</p>'
+
+        sugeridos_html = "".join(f"<li>{nome}</li>" for nome in d["sugeridos"]) or "<li>Nenhum abaixo de 50% de acerto.</li>"
+        lista_id = f"sug-disc-{re.sub(r'[^a-zA-Z0-9]', '', d['disciplina'])}-{idx_d}"
+
+        disciplinas_html += f"""
+        <div style="border:2px solid {cor}; background:{cor_bg}; border-radius:8px; padding:14px; margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <strong style="font-size:15px;">{d['disciplina']}</strong>
+                <span style="font-weight:700; color:{cor}; font-size:15px;">{d['pct_geral']}% de acerto</span>
+            </div>
+            {habilidades_html}
+            <button type="button" class="btn" style="font-size:11px; padding:3px 10px; margin-top:10px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
+                👥 {len(d['sugeridos'])} aluno(s) sugerido(s) pra reforço em {d['disciplina']}
+            </button>
+            <ul id="{lista_id}" style="display:none; margin:8px 0 0 18px; font-size:13px;">{sugeridos_html}</ul>
+        </div>"""
+    return disciplinas_html
+
+
+def _achar_aplicacao_turma_dia(conn, trimestre: int, ano: int, dia: int, turma_id: int):
+    """Acha a aplicação (e a prova) do simulado de um DIA específico pra uma turma
+    específica, dentro de uma rodada trimestre+ano. Retorna (aplicacao_id, prova_id) —
+    ou (None, None) se essa turma não tiver simulado nesse dia."""
+    sims = conn.execute("SELECT id FROM simulados WHERE trimestre = ? AND ano = ? AND dia = ?", (trimestre, ano, dia)).fetchall()
+    for sim in sims:
+        prova_id = _prova_id_do_simulado(conn, sim["id"])
+        if not prova_id:
+            continue
+        apl = conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)).fetchone()
+        if apl:
+            return apl["id"], prova_id
+    return None, None
+
+
 @app.get("/simulados/painel-global/turma", response_class=HTMLResponse)
 def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
     """Visão detalhada de uma turma específica dentro de uma rodada de simulado:
@@ -11399,59 +11473,7 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
         for d in disciplinas
     )
 
-    disciplinas_html = ""
-    for d in disciplinas:
-        cor = "var(--red)" if d["pct_geral"] < 50 else ("var(--orange)" if d["pct_geral"] < 70 else "var(--green)")
-        cor_bg = "var(--red-bg)" if d["pct_geral"] < 50 else ("var(--orange-bg)" if d["pct_geral"] < 70 else "var(--green-bg)")
-
-        if d["so_uma_habilidade"]:
-            unica = d["piores_habilidades"][0]
-            habilidades_html = f"""
-                <div style="margin-top:10px;">
-                    <p style="font-size:12px; font-weight:600; color:var(--text-muted); margin:0 0 4px 0;">📌 Única habilidade BNCC cadastrada nessa disciplina</p>
-                    <ul style="margin:0 0 0 18px; font-size:12px;"><li><strong>{unica['codigo']}</strong> — {unica['descricao'] or 'sem descrição'} ({unica['pct']}% de acerto)</li></ul>
-                    <p class="muted-line" style="font-size:11px; margin-top:4px;">Cadastre mais habilidades nas questões pra comparar dificuldade entre elas.</p>
-                </div>
-            """
-        elif d["tem_habilidades"]:
-            piores_li = "".join(
-                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--red);">({h["pct"]}% de acerto)</span></li>'
-                for h in d["piores_habilidades"]
-            ) or "<li>—</li>"
-            melhores_li = "".join(
-                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--green);">({h["pct"]}% de acerto)</span></li>'
-                for h in d["melhores_habilidades"]
-            ) or "<li>Nenhuma outra habilidade se destacou.</li>"
-            habilidades_html = f"""
-                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-top:10px;">
-                    <div>
-                        <p style="font-size:12px; font-weight:600; color:var(--red); margin:0 0 4px 0;">🔴 Maior dificuldade</p>
-                        <ul style="margin:0 0 0 18px; font-size:12px;">{piores_li}</ul>
-                    </div>
-                    <div>
-                        <p style="font-size:12px; font-weight:600; color:var(--green); margin:0 0 4px 0;">🟢 Bem consolidado</p>
-                        <ul style="margin:0 0 0 18px; font-size:12px;">{melhores_li}</ul>
-                    </div>
-                </div>
-            """
-        else:
-            habilidades_html = '<p class="muted-line" style="font-size:12px; margin-top:8px;">Nenhuma habilidade BNCC cadastrada nas questões dessa disciplina — cadastre nas questões pra ver esse detalhamento aqui.</p>'
-
-        sugeridos_html = "".join(f"<li>{nome}</li>" for nome in d["sugeridos"]) or "<li>Nenhum abaixo de 50% de acerto.</li>"
-        lista_id = f"sug-disc-{re.sub(r'[^a-zA-Z0-9]', '', d['disciplina'])}"
-
-        disciplinas_html += f"""
-        <div style="border:2px solid {cor}; background:{cor_bg}; border-radius:8px; padding:14px; margin-bottom:12px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                <strong style="font-size:15px;">{d['disciplina']}</strong>
-                <span style="font-weight:700; color:{cor}; font-size:15px;">{d['pct_geral']}% de acerto</span>
-            </div>
-            {habilidades_html}
-            <button type="button" class="btn" style="font-size:11px; padding:3px 10px; margin-top:10px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
-                👥 {len(d['sugeridos'])} aluno(s) sugerido(s) pra reforço em {d['disciplina']}
-            </button>
-            <ul id="{lista_id}" style="display:none; margin:8px 0 0 18px; font-size:13px;">{sugeridos_html}</ul>
-        </div>"""
+    disciplinas_html = _renderizar_disciplinas_cards_html(disciplinas)
 
     content = f"""
         <div class="page-header">
@@ -11496,6 +11518,123 @@ def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
         </script>
     """
     return render_page(f"{apl['turma_nome']} — Análise por disciplina", content, active="simulados")
+
+
+@app.get("/simulados/painel-global/turma-combinado", response_class=HTMLResponse)
+def painel_global_turma_combinado(trimestre_ano: str, turma_id: int):
+    """Igual a /simulados/painel-global/turma, mas combinando Dia 01 + Dia 02 — junta
+    as disciplinas dos dois dias (normalmente não se repetem entre os dias) numa visão
+    só, e a nota/distribuição usa a média dos dias que o aluno tiver feito."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        trimestre_s, ano_s = trimestre_ano.split(":")
+        trimestre, ano = int(trimestre_s), int(ano_s)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    apl_dia1, prova_dia1 = _achar_aplicacao_turma_dia(conn, trimestre, ano, 1, turma_id)
+    apl_dia2, prova_dia2 = _achar_aplicacao_turma_dia(conn, trimestre, ano, 2, turma_id)
+
+    disciplinas = []
+    if apl_dia1 and prova_dia1:
+        disciplinas += _analise_disciplinas_turma(conn, apl_dia1, prova_dia1)
+    if apl_dia2 and prova_dia2:
+        disciplinas += _analise_disciplinas_turma(conn, apl_dia2, prova_dia2)
+
+    registros = _coletar_dados_painel_combinado(conn, trimestre, ano)
+    conn.close()
+
+    if not apl_dia1 and not apl_dia2:
+        content = f'<div class="page-header"><h1>{turma["nome"]}</h1></div><div class="empty">Essa turma não tem simulado lançado nem no Dia 01 nem no Dia 02 dessa rodada.</div>'
+        return render_page(turma["nome"], content, active="simulados")
+
+    regs_turma = [r for r in registros if r["turma_id"] == turma_id]
+    media_turma = _media_nota(regs_turma)
+    dist_turma = _agregar_faixas(regs_turma)
+    n_turma = len(regs_turma)
+    n_incompletos = sum(1 for r in regs_turma if not r["completo"])
+
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_turma.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+    dist_legenda_turma_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]}: {dist_turma.get(f["nome"], 0)} ({round(dist_turma.get(f["nome"], 0) / n_turma * 100, 1) if n_turma else 0}%)</span>'
+        for f in FAIXAS_SAEB
+    )
+
+    disc_labels_js = ", ".join(f'"{d["disciplina"]}"' for d in disciplinas)
+    disc_pcts_js = ", ".join(str(d["pct_geral"]) for d in disciplinas)
+    disc_cores_js = ", ".join(
+        '"#dc2626"' if d["pct_geral"] < 50 else ('"#ea580c"' if d["pct_geral"] < 70 else '"#16a34a"')
+        for d in disciplinas
+    )
+
+    disciplinas_html = _renderizar_disciplinas_cards_html(disciplinas)
+
+    aviso_dias = ""
+    if not apl_dia1:
+        aviso_dias = '<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ Essa turma não tem simulado do Dia 01 nessa rodada — mostrando só o Dia 02.</p>'
+    elif not apl_dia2:
+        aviso_dias = '<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ Essa turma não tem simulado do Dia 02 nessa rodada — mostrando só o Dia 01.</p>'
+    elif n_incompletos:
+        aviso_dias = f'<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ {n_incompletos} aluno(s) só têm nota de um dos dois dias (a média considera só o dia que ele fez).</p>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>📊 {turma['nome']} — Dia 01 + Dia 02</h1>
+            <p class="subtitle">{trimestre}º Trimestre {ano} · visão combinada dos dois dias, por disciplina.</p>
+        </div>
+        {aviso_dias}
+
+        <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{n_turma}</div></div>
+            <div class="metric"><div class="metric-label">Nota média da turma</div><div class="metric-value">{media_turma}</div></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-bottom:18px;">
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">Distribuição de faixas SAEB</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-dist-turma-comb"></canvas></div>
+                <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:8px; font-size:11px; color:var(--text-muted);">{dist_legenda_turma_html}</div>
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">% de acerto por disciplina (Dia 01 + Dia 02)</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-disc-turma-comb"></canvas></div>
+            </div>
+        </div>
+
+        <h3>Por disciplina — o que precisa de atenção</h3>
+        {disciplinas_html}
+
+        <div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap;">
+            <a href="/simulados/painel-global/combinado/ver?trimestre_ano={trimestre}:{ano}" class="btn">← Voltar ao painel combinado</a>
+            {f'<a href="/simulados/painel-global/turma?rodada={trimestre}:{ano}:1&turma_id={turma_id}&aplicacao_id={apl_dia1}" class="btn">Ver só Dia 01</a>' if apl_dia1 else ''}
+            {f'<a href="/simulados/painel-global/turma?rodada={trimestre}:{ano}:2&turma_id={turma_id}&aplicacao_id={apl_dia2}" class="btn">Ver só Dia 02</a>' if apl_dia2 else ''}
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-turma-comb'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+            }});
+            new Chart(document.getElementById('chart-disc-turma-comb'), {{
+                type: 'bar',
+                data: {{ labels: [{disc_labels_js}], datasets: [{{ label: '% de acerto', data: [{disc_pcts_js}], backgroundColor: [{disc_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true, max: 100 }} }} }}
+            }});
+        </script>
+    """
+    return render_page(f"{turma['nome']} — Dia 01 + Dia 02", content, active="simulados")
 
 
 
@@ -11726,7 +11865,7 @@ def form_relatorio_notas_simulado():
 
     content = f"""
     <div class="page-header"><h1>📄 Relatório de Notas — Simulado</h1>
-        <p class="subtitle">Nota Dia 01 + Dia 02 = Total, por turma. Opcionalmente exibe a divisão de referência 70% (Gram/Alg) · 30% (Leit/Geom) da nota total.</p>
+        <p class="subtitle">Nota Dia 01 + Dia 02 = Total, por turma. Opcionalmente exibe a divisão de referência 50% (Gram/Alg) · 50% (Leit/Geom) da nota total.</p>
     </div>
     <div class="card">
         <form method="get" action="/simulados/relatorio-notas/gerar" style="display:flex; flex-direction:column; gap:14px; max-width:480px;">
@@ -11737,7 +11876,7 @@ def form_relatorio_notas_simulado():
                 <select name="turma_id" required style="width:100%;">{opcoes_turma}</select>
             </label>
             <label style="display:flex; align-items:center; gap:8px;">
-                <input type="checkbox" name="ponderado" value="1" style="width:auto;"> Exibir divisão 70/30 (Gram/Alg · Leit/Geom)
+                <input type="checkbox" name="ponderado" value="1" style="width:auto;"> Exibir divisão 50/50 (Gram/Alg · Leit/Geom)
             </label>
             <button type="submit" class="btn btn-primary">Gerar relatório</button>
         </form>
@@ -11797,14 +11936,14 @@ def gerar_relatorio_notas_simulado(par: str, turma_id: int, ponderado: int = 0):
         link_detalhe = f'<a href="/simulados/relatorio-notas/aluno?par={par}&turma_id={turma_id}&aluno_id={aid}" target="_blank">👁 Ver</a>'
 
         if ponderado:
-            col_setenta = _arredondar_comercial(total_bruto * 0.7, 1)
-            col_trinta = _arredondar_comercial(total_bruto * 0.3, 1)
+            col_cinquenta_1 = _arredondar_comercial(total_bruto * 0.5, 1)
+            col_cinquenta_2 = _arredondar_comercial(total_bruto * 0.5, 1)
             linhas += f"""<tr>
                 <td style="padding:6px;">{numero}</td>
                 <td style="padding:6px;">{nome}</td>
                 <td style="padding:6px; text-align:center; font-weight:600;">{total_bruto}</td>
-                <td style="padding:6px; text-align:center;">{col_setenta}</td>
-                <td style="padding:6px; text-align:center;">{col_trinta}</td>
+                <td style="padding:6px; text-align:center;">{col_cinquenta_1}</td>
+                <td style="padding:6px; text-align:center;">{col_cinquenta_2}</td>
                 <td style="padding:6px; text-align:center;">{link_detalhe}</td>
             </tr>"""
         else:
@@ -11836,7 +11975,7 @@ def gerar_relatorio_notas_simulado(par: str, turma_id: int, ponderado: int = 0):
             <th style="padding:6px;">Composição</th>
         </tr>"""
 
-    titulo_relatorio = "Relatório de Notas (70/30)" if ponderado else "Relatório de Notas — Dia 01 + Dia 02"
+    titulo_relatorio = "Relatório de Notas (50/50)" if ponderado else "Relatório de Notas — Dia 01 + Dia 02"
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{titulo_relatorio} — {turma['nome']}</title>
