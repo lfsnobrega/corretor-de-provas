@@ -3142,6 +3142,26 @@ def criar_prova(request: Request, titulo: str = Form(...), descricao: str = Form
     turmas = conn2.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     conn2.close()
 
+    if turmas:
+        turmas_options = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+        form_aplicar = f"""
+            <form action="/aplicacoes/nova" method="post">
+                <input type="hidden" name="prova_id" value="{prova_id}">
+                <label style="margin:0 0 10px;">Turma
+                    <select name="turma_id" required>{turmas_options}</select>
+                </label>
+                <label style="font-weight:normal; display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+                    <input type="radio" name="modo" value="online" required checked style="width:auto;"> Online
+                </label>
+                <label style="font-weight:normal; display:flex; align-items:center; gap:6px; margin-bottom:12px;">
+                    <input type="radio" name="modo" value="impressa" style="width:auto;"> Impressa
+                </label>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Criar aplicação</button>
+            </form>
+        """
+    else:
+        form_aplicar = '<p style="font-size:13px; color:var(--text-muted); margin:0;">Você ainda não tem nenhuma turma cadastrada. <a href="/turmas/nova">Criar turma</a></p>'
+
     content_html = f"""
         <div style="max-width:560px; margin:60px auto; text-align:center; padding:0 20px;">
             <div style="font-size:52px; margin-bottom:12px;">🎉</div>
@@ -4421,14 +4441,10 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             nAs_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in nAs) + "]"
             bAs_js = "[" + ",".join(f"{v:.2f}" if v is not None else "null" for v in bAs) + "]"
             gap_anos_charts_js += f"""
-            new Chart(document.getElementById('{canvas_id}'), {{
-                type: 'bar',
-                data: {{ labels: {lbs_js}, datasets: [
-                    {{ label:'Negro', data:{nAs_js}, backgroundColor:'#a78bfa', borderRadius:3 }},
-                    {{ label:'Branco', data:{bAs_js}, backgroundColor:'#38bdf8', borderRadius:3 }}
-                ]}},
-                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:true,position:'top'}}}}, scales:{{y:{{beginAtZero:true,max:10}}}} }}
-            }});"""
+            boletimChart('{canvas_id}', 'bar', {lbs_js}, [
+                {{ label:'Negro', data:{nAs_js}, backgroundColor:'#a78bfa' }},
+                {{ label:'Branco', data:{bAs_js}, backgroundColor:'#38bdf8' }}
+            ], {{scales:{{y:{{max:10}}}}}});"""
         if blocos_anos:
             gap_anos_html = f"""
             <div class="card" style="margin-bottom:18px;">
@@ -4444,7 +4460,7 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
                 <h1>📈 Dashboard Pedagógico</h1>
                 <p class="subtitle">{total} estudante(s) · {trimestre}º Trimestre {ano}</p>
             </div>
-            <a href="/boletim/relatorio-geral?trimestre={trimestre}&ano={ano}" class="btn" target="_blank">🖨️ Relatório Geral de Gestão</a>
+            <a href="/boletim/relatorio-geral?trimestre={trimestre}&ano={ano}{f'&turma_id={turma_id}' if turma_id else ''}{f'&ano_esc={ano_esc}' if ano_esc else ''}" class="btn" target="_blank">🖨️ Relatório Geral de Gestão</a>
         </div>
         <form method="get" action="/boletim/dashboard" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
             <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
@@ -4523,36 +4539,65 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
-            {"new Chart(document.getElementById('ch-gap-racial'), {type:'bar', data:{labels:" + gap_racial_labels_js + ", datasets:[{label:'Negro (Preta+Parda)',data:" + gap_racial_negro_js + ",backgroundColor:'#a78bfa',borderRadius:4},{label:'Branco',data:" + gap_racial_branco_js + ",backgroundColor:'#38bdf8',borderRadius:4}]}, options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'top'}},scales:{y:{beginAtZero:true,max:10}}}});" if tem_gap_racial else ""}
-            {"new Chart(document.getElementById('ch-gap-genero'), {type:'bar', data:{labels:" + gap_genero_labels_js + ", datasets:[{label:'Meninos',data:" + gap_genero_m_js + ",backgroundColor:'#38bdf8',borderRadius:4},{label:'Meninas',data:" + gap_genero_f_js + ",backgroundColor:'#f472b6',borderRadius:4}]}, options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'top'}},scales:{y:{beginAtZero:true,max:10}}}});" if tem_gap_genero else ""}
+        function _boletimCssVar(nome) {{
+            return getComputedStyle(document.documentElement).getPropertyValue(nome).trim() || '#94a3b8';
+        }}
+        function boletimChart(canvasId, tipo, labels, datasets, opcoesExtra) {{
+            var el = document.getElementById(canvasId);
+            if (!el) return null;
+            var corMuted = _boletimCssVar('--text-muted');
+            var corBorda = _boletimCssVar('--border');
+            datasets.forEach(function(ds) {{
+                if (ds.borderRadius === undefined) ds.borderRadius = 6;
+                if (ds.borderWidth === undefined) ds.borderWidth = 0;
+                if (tipo === 'doughnut' && ds.borderWidth === 0) ds.borderWidth = 3;
+                if (tipo === 'doughnut' && ds.borderColor === undefined) ds.borderColor = _boletimCssVar('--card') || '#fff';
+            }});
+            var opcoesBase = {{
+                responsive: true, maintainAspectRatio: false,
+                font: {{ family: 'Sora' }},
+                plugins: {{
+                    legend: {{
+                        display: tipo === 'doughnut' || (datasets.length > 1),
+                        position: tipo === 'doughnut' ? 'bottom' : 'top',
+                        labels: {{ color: corMuted, font: {{ family: 'Sora', size: 11 }}, padding: 10, usePointStyle: true, pointStyle: 'circle' }}
+                    }},
+                    tooltip: {{
+                        backgroundColor: '#0a1220', borderColor: '#1e3050', borderWidth: 1,
+                        titleColor: '#e2eaf5', bodyColor: '#8ca3c4', padding: 10, cornerRadius: 8,
+                        titleFont: {{ family: 'Sora', weight: '700' }}, bodyFont: {{ family: 'Sora' }},
+                        usePointStyle: true
+                    }}
+                }}
+            }};
+            if (tipo === 'doughnut') {{
+                opcoesBase.cutout = '68%';
+            }} else {{
+                opcoesBase.scales = {{
+                    x: {{ ticks: {{ color: corMuted, font: {{ family: 'Sora', size: 10 }} }}, grid: {{ display: false }}, border: {{ display: false }} }},
+                    y: {{ ticks: {{ color: corMuted, font: {{ family: 'Sora', size: 10 }} }}, grid: {{ color: corBorda }}, border: {{ display: false }}, beginAtZero: true }}
+                }};
+            }}
+            var opcoesFinal = Object.assign({{}}, opcoesBase, opcoesExtra || {{}});
+            if (opcoesExtra && opcoesExtra.scales && opcoesBase.scales) {{
+                opcoesFinal.scales = Object.assign({{}}, opcoesBase.scales, opcoesExtra.scales);
+            }}
+            return new Chart(el, {{ type: tipo, data: {{ labels: labels, datasets: datasets }}, options: opcoesFinal }});
+        }}
+
+            {"boletimChart('ch-gap-racial','bar'," + gap_racial_labels_js + ",[{label:'Negro (Preta+Parda)',data:" + gap_racial_negro_js + ",backgroundColor:'#a78bfa'},{label:'Branco',data:" + gap_racial_branco_js + ",backgroundColor:'#38bdf8'}],{scales:{y:{max:10}}});" if tem_gap_racial else ""}
+            {"boletimChart('ch-gap-genero','bar'," + gap_genero_labels_js + ",[{label:'Meninos',data:" + gap_genero_m_js + ",backgroundColor:'#38bdf8'},{label:'Meninas',data:" + gap_genero_f_js + ",backgroundColor:'#f472b6'}],{scales:{y:{max:10}}});" if tem_gap_genero else ""}
             {gap_anos_charts_js}
-            new Chart(document.getElementById('ch-disc'), {{
-                type: 'bar',
-                data: {{ labels: {disc_labels_js},
-                    datasets: [{{ data: {disc_valores_js}, backgroundColor: {disc_cores_js} }}] }},
-                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:false}}}}, scales:{{y:{{beginAtZero:true, max:10}}}} }}
-            }});
-            new Chart(document.getElementById('ch-saeb-pt'), {{
-                type: 'bar',
-                data: {{ labels: ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
-                    datasets: [{{ data: [{dist_pt["abaixo"]}, {dist_pt["basico"]}, {dist_pt["adequado"]}, {dist_pt["avancado"]}],
-                    backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}] }},
-                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:false}}}} }}
-            }});
-            new Chart(document.getElementById('ch-saeb-mt'), {{
-                type: 'bar',
-                data: {{ labels: ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
-                    datasets: [{{ data: [{dist_mt["abaixo"]}, {dist_mt["basico"]}, {dist_mt["adequado"]}, {dist_mt["avancado"]}],
-                    backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}] }},
-                options: {{ responsive:true, maintainAspectRatio:false, plugins:{{legend:{{display:false}}}} }}
-            }});
-            new Chart(document.getElementById('ch-emo'), {{
-                type: 'doughnut',
-                data: {{ labels: ['Bem','Oscilando','Fragilizado'],
-                    datasets: [{{ data: [{emo_count["bem"]}, {emo_count["oscilando"]}, {emo_count["fragilizado"]}],
-                    backgroundColor: ['#16a34a','#ea580c','#dc2626'] }}] }},
-                options: {{ responsive:true, maintainAspectRatio:false }}
-            }});
+            boletimChart('ch-disc', 'bar', {disc_labels_js}, [{{ data: {disc_valores_js}, backgroundColor: {disc_cores_js} }}], {{scales:{{y:{{max:10}}}}}});
+            boletimChart('ch-saeb-pt', 'bar', ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
+                [{{ data: [{dist_pt["abaixo"]}, {dist_pt["basico"]}, {dist_pt["adequado"]}, {dist_pt["avancado"]}],
+                   backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}]);
+            boletimChart('ch-saeb-mt', 'bar', ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
+                [{{ data: [{dist_mt["abaixo"]}, {dist_mt["basico"]}, {dist_mt["adequado"]}, {dist_mt["avancado"]}],
+                   backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}]);
+            boletimChart('ch-emo', 'doughnut', ['Bem','Oscilando','Fragilizado'],
+                [{{ data: [{emo_count["bem"]}, {emo_count["oscilando"]}, {emo_count["fragilizado"]}],
+                   backgroundColor: ['#16a34a','#ea580c','#dc2626'] }}]);
         </script>
     """
     return render_page("Dashboard Pedagógico", content, active="boletim-dashboard")
@@ -4748,7 +4793,7 @@ def boletim_relatorio_turma(ano: int, turma_id: int):
 
 @app.get("/boletim/estudantes", response_class=HTMLResponse)
 def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
-                        turma_id: Optional[int] = None, q: Optional[str] = None):
+                        turma_id: Optional[int] = None, ano_esc: Optional[str] = None, q: Optional[str] = None):
     _r = _require_admin_or_403(request)
     if _r is not None: return _r
     conn = get_db()
@@ -4767,6 +4812,9 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
     lista = _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=turma_id)
     conn.close()
 
+    if ano_esc and not turma_id:
+        lista = [e for e in lista if _boletim_ano_da_turma(e["turma"]) == ano_esc]
+
     if q and q.strip():
         ql = q.strip().lower()
         lista = [e for e in lista if ql in e["nome"].lower()]
@@ -4775,6 +4823,9 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
 
     turma_opts = '<option value="">Todas as turmas</option>' + "".join(
         f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>Turma {t["nome"]}</option>' for t in turmas
+    )
+    ano_esc_opts = '<option value="">Todos os anos</option>' + "".join(
+        f'<option value="{a}"{" selected" if ano_esc==a else ""}>{a} Ano</option>' for a in ["6°", "7°", "8°", "9°"]
     )
     trimestre_opts = "".join(
         f'<option value="{c["trimestre"]}:{c["ano"]}"{" selected" if c["trimestre"]==trimestre and c["ano"]==ano else ""}>{c["trimestre"]}º Trimestre {c["ano"]}</option>'
@@ -4837,6 +4888,9 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
                 <label style="margin:0; flex:1 1 160px;">Turma
                     <select name="turma_id" onchange="this.form.submit();">{turma_opts}</select>
                 </label>
+                <label style="margin:0; flex:1 1 160px;">Ano de escolaridade
+                    <select name="ano_esc" onchange="this.form.submit();">{ano_esc_opts}</select>
+                </label>
                 <label style="margin:0; flex:1 1 200px;">Buscar por nome
                     <input type="text" name="q" value="{q or ''}" placeholder="nome do aluno">
                 </label>
@@ -4859,14 +4913,24 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
 
 
 @app.get("/boletim/relatorio-geral", response_class=HTMLResponse)
-def boletim_relatorio_geral(trimestre: int, ano: int):
+def boletim_relatorio_geral(trimestre: int, ano: int, turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/boletim", status_code=303)
 
     conn = get_db()
-    enriquecidos = _boletim_enriquecer_alunos(conn, trimestre, ano)
+    turma_nome_filtro = None
+    if turma_id:
+        row_t = conn.execute("SELECT nome FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+        turma_nome_filtro = row_t["nome"] if row_t else None
+    turmas_disponiveis = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
+    enriquecidos = _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=turma_id)
     conn.close()
+
+    if ano_esc and not turma_id:
+        enriquecidos = [e for e in enriquecidos if _boletim_ano_da_turma(e["turma"]) == ano_esc]
+
+    escopo_label = f"Turma {turma_nome_filtro}" if turma_nome_filtro else (f"{ano_esc} Ano" if ano_esc else "Escola toda")
 
     total = len(enriquecidos)
     medias_validas = [e["media"] for e in enriquecidos if e["media"] is not None]
@@ -4942,12 +5006,23 @@ def boletim_relatorio_geral(trimestre: int, ano: int):
     <img src="/static/imagens/logo_walmir.png" style="max-height:60px;" alt="Walmir">
     <div>
       <h2 style="margin:0;">Relatório Geral de Gestão</h2>
-      <div style="color:#555; font-size:13px;">E.M. Walmir de Freitas Monteiro · {trimestre}º Trimestre {ano} · {total} estudante(s)</div>
+      <div style="color:#555; font-size:13px;">E.M. Walmir de Freitas Monteiro · {escopo_label} · {trimestre}º Trimestre {ano} · {total} estudante(s)</div>
     </div>
   </div>
   <div class="no-print" style="margin-bottom:16px;">
     <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
     <a href="/boletim/dashboard?trimestre={trimestre}&ano={ano}">← Voltar ao Dashboard</a>
+    <form method="get" action="/boletim/relatorio-geral" style="display:inline-flex; gap:8px; margin-left:14px; vertical-align:middle;">
+        <input type="hidden" name="trimestre" value="{trimestre}"><input type="hidden" name="ano" value="{ano}">
+        <select name="turma_id" onchange="this.form.submit();">
+            <option value="">Escola toda</option>
+            {"".join(f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>Turma {t["nome"]}</option>' for t in turmas_disponiveis)}
+        </select>
+        <select name="ano_esc" onchange="this.form.submit();">
+            <option value="">Todos os anos</option>
+            {"".join(f'<option value="{a}"{" selected" if ano_esc==a else ""}>{a} Ano</option>' for a in ["6°","7°","8°","9°"])}
+        </select>
+    </form>
   </div>
 
   <div>
@@ -4977,7 +5052,7 @@ def boletim_relatorio_geral(trimestre: int, ano: int):
 @app.get("/boletim/comparativo", response_class=HTMLResponse)
 def boletim_comparativo(request: Request, ano: Optional[int] = None,
                          trimestre_a: Optional[int] = None, trimestre_b: Optional[int] = None,
-                         turma_id: Optional[int] = None):
+                         turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
     _r = _require_admin_or_403(request)
     if _r is not None: return _r
     conn = get_db()
@@ -5015,6 +5090,10 @@ def boletim_comparativo(request: Request, ano: Optional[int] = None,
     dados_a = {e["id"]: e for e in _boletim_enriquecer_alunos(conn, trimestre_a, ano, turma_id=turma_id)}
     dados_b = {e["id"]: e for e in _boletim_enriquecer_alunos(conn, trimestre_b, ano, turma_id=turma_id)}
     conn.close()
+
+    if ano_esc and not turma_id:
+        dados_a = {k: v for k, v in dados_a.items() if _boletim_ano_da_turma(v["turma"]) == ano_esc}
+        dados_b = {k: v for k, v in dados_b.items() if _boletim_ano_da_turma(v["turma"]) == ano_esc}
 
     alunos_ids = set(dados_a) | set(dados_b)
 
@@ -5126,6 +5205,9 @@ def boletim_comparativo(request: Request, ano: Optional[int] = None,
     turma_opts = '<option value="">Escola toda</option>' + "".join(
         f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>Turma {t["nome"]}</option>' for t in turmas
     )
+    ano_esc_opts_comp = '<option value="">Todos os anos</option>' + "".join(
+        f'<option value="{a}"{" selected" if ano_esc==a else ""}>{a} Ano</option>' for a in ["6°", "7°", "8°", "9°"]
+    )
 
     content = f"""
         <div class="page-header">
@@ -5137,6 +5219,7 @@ def boletim_comparativo(request: Request, ano: Optional[int] = None,
                 <label style="margin:0; flex:1 1 140px;">De<select name="trimestre_a">{trim_a_opts}</select></label>
                 <label style="margin:0; flex:1 1 140px;">Para<select name="trimestre_b">{trim_b_opts}</select></label>
                 <label style="margin:0; flex:1 1 160px;">Turma<select name="turma_id">{turma_opts}</select></label>
+                <label style="margin:0; flex:1 1 160px;">Ano de escolaridade<select name="ano_esc">{ano_esc_opts_comp}</select></label>
                 <input type="hidden" name="ano" value="{ano}">
                 <button type="submit" class="btn btn-primary">Comparar</button>
             </div>
@@ -5282,15 +5365,23 @@ def boletim_analise_form(request: Request, trimestre: Optional[int] = None, ano:
             <p class="subtitle">Turma {turma['nome']} · {disciplina['nome']} · {trimestre}º Trimestre {ano}</p>
         </div>
         <form method="get" action="/boletim/analise" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
-            <input type="hidden" name="trimestre" value="{trimestre}">
-            <input type="hidden" name="ano" value="{ano}">
-            <label style="margin:0; max-width:420px;">Turma / Disciplina
-                <select onchange="var v=this.value.split(':'); this.form.turma_id.value=v[0]; this.form.disciplina_id.value=v[1]; this.form.submit();">
-                    {opcoes_opts}
-                </select>
-                <input type="hidden" name="turma_id" value="{turma_id}">
-                <input type="hidden" name="disciplina_id" value="{disciplina_id}">
-            </label>
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+                <label style="margin:0; flex:0 0 140px;">Trimestre
+                    <select name="trimestre" onchange="this.form.submit();">
+                        <option value="1"{' selected' if trimestre==1 else ''}>1º Trimestre</option>
+                        <option value="2"{' selected' if trimestre==2 else ''}>2º Trimestre</option>
+                        <option value="3"{' selected' if trimestre==3 else ''}>3º Trimestre</option>
+                    </select>
+                </label>
+                <input type="hidden" name="ano" value="{ano}">
+                <label style="margin:0; flex:1 1 320px;">Turma / Disciplina
+                    <select onchange="var v=this.value.split(':'); this.form.turma_id.value=v[0]; this.form.disciplina_id.value=v[1]; this.form.submit();">
+                        {opcoes_opts}
+                    </select>
+                    <input type="hidden" name="turma_id" value="{turma_id}">
+                    <input type="hidden" name="disciplina_id" value="{disciplina_id}">
+                </label>
+            </div>
         </form>
         <form method="post" action="/boletim/analise/salvar">
             <input type="hidden" name="trimestre" value="{trimestre}">
