@@ -8799,10 +8799,35 @@ def cartao_resposta_pdf(aplicacao_id: int):
 #  FASE C2: OMR — LEITURA AUTOMÁTICA DE CARTÕES
 # ==========================================
 
+def _corrigir_orientacao_exif(image_bytes):
+    """Lê a tag EXIF Orientation de um JPG e retorna a rotação necessária em graus
+    (0, 90, 180, 270) para que a imagem fique na orientação correta.
+    Celulares gravam a foto com o sensor em paisagem e registram a orientação real
+    no EXIF; cv2.imdecode() ignora esse metadado, fazendo a foto chegar deitada."""
+    try:
+        from PIL import Image
+        import io
+        pil_img = Image.open(io.BytesIO(image_bytes))
+        exif = pil_img.getexif()
+        orient = exif.get(274)  # 274 = tag Orientation
+        # Mapeamento EXIF Orientation → rotação necessária:
+        # 1=normal, 3=180°, 6=90° horário, 8=90° anti-horário
+        if orient == 3:
+            return 180
+        elif orient == 6:
+            return 90
+        elif orient == 8:
+            return 270
+    except Exception:
+        pass
+    return 0
+
+
 def _decode_image_universal(image_bytes, filename=""):
     """Decodifica imagem em bytes → numpy array BGR (cv2). Suporta JPG, PNG, HEIC.
     Retorna (img_np, erro_str). Se erro_str não for None, img_np é None.
-    HEIC: tenta usar pillow_heif se instalado; se não, sugere conversão."""
+    HEIC: tenta usar pillow_heif se instalado; se não, sugere conversão.
+    EXIF: corrige automaticamente a orientação gravada pelo celular (12/08/2026)."""
     import cv2
     import numpy as np
 
@@ -8822,6 +8847,8 @@ def _decode_image_universal(image_bytes, filename=""):
             import io
             register_heif_opener()
             pil_img = Image.open(io.BytesIO(image_bytes))
+            # HEIC via Pillow já aplica a orientação no .open() — sem necessidade de
+            # correção EXIF manual aqui.
             if pil_img.mode != "RGB":
                 pil_img = pil_img.convert("RGB")
             arr = np.array(pil_img)
@@ -8835,12 +8862,116 @@ def _decode_image_universal(image_bytes, filename=""):
         except Exception as e:
             return None, f"Erro ao decodificar HEIC: {e}"
 
+    # === Ler orientação EXIF ANTES de decodificar com cv2 ===
+    rotacao = _corrigir_orientacao_exif(image_bytes)
+
     # Caminho padrão JPG/PNG via cv2
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         return None, "Formato de imagem não reconhecido. Use JPG, PNG ou HEIC."
+
+    # Aplicar rotação EXIF para que a foto fique na orientação real
+    if rotacao == 90:
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    elif rotacao == 180:
+        img = cv2.rotate(img, cv2.ROTATE_180)
+    elif rotacao == 270:
+        img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
     return img, None
+
+
+def _detectar_qr_robusto(img_bgr):
+    """Tenta ler QR code de uma imagem BGR usando múltiplas estratégias (12/08/2026).
+    Retorna (qr_data_str, qr_center_tuple_ou_None).
+    - Estratégia 1: pyzbar (zbar) — mais robusto com fotos reais de celular
+    - Estratégia 2: cv2.QRCodeDetector — fallback nativo do OpenCV
+    - Estratégia 3: pré-processamento (contraste/nitidez) + pyzbar
+    Se nenhuma funcionar retorna ("", None)."""
+    import cv2
+    import numpy as np
+
+    qr_data = ""
+    qr_center = None
+
+    # --- Estratégia 1: pyzbar (zbar) ---
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode
+        from pyzbar.pyzbar import ZBarSymbol
+        resultados = zbar_decode(img_bgr, symbols=[ZBarSymbol.QRCODE])
+        if resultados:
+            qr_data = resultados[0].data.decode("utf-8", errors="replace")
+            # Calcular centro a partir do polígono
+            pts = resultados[0].polygon
+            if pts:
+                cx = sum(p.x for p in pts) / len(pts)
+                cy = sum(p.y for p in pts) / len(pts)
+                qr_center = (cx, cy)
+            if qr_data:
+                return qr_data, qr_center
+    except ImportError:
+        pass  # pyzbar não instalado — segue pro fallback
+    except Exception:
+        pass
+
+    # --- Estratégia 2: cv2.QRCodeDetector (fallback) ---
+    try:
+        det = cv2.QRCodeDetector()
+        result = det.detectAndDecode(img_bgr)
+        qr_data = result[0] if result else ""
+        if len(result) > 1 and result[1] is not None:
+            pts_arr = np.array(result[1]).reshape(-1, 2)
+            if len(pts_arr) > 0:
+                qr_center = tuple(pts_arr.mean(axis=0))
+        if qr_data:
+            return qr_data, qr_center
+    except Exception:
+        pass
+
+    # --- Estratégia 3: pré-processamento (equalização + sharpen) + pyzbar ---
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode
+        from pyzbar.pyzbar import ZBarSymbol
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        # Equalização de histograma pra melhorar contraste em fotos escuras
+        eq = cv2.equalizeHist(gray)
+        # Binarização adaptativa pra isolar o QR
+        binar = cv2.adaptiveThreshold(eq, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, 51, 10)
+        resultados = zbar_decode(binar, symbols=[ZBarSymbol.QRCODE])
+        if resultados:
+            qr_data = resultados[0].data.decode("utf-8", errors="replace")
+            pts = resultados[0].polygon
+            if pts:
+                cx = sum(p.x for p in pts) / len(pts)
+                cy = sum(p.y for p in pts) / len(pts)
+                qr_center = (cx, cy)
+            if qr_data:
+                return qr_data, qr_center
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # --- Estratégia 4: pré-processamento + cv2.QRCodeDetector (último recurso) ---
+    try:
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        eq = cv2.equalizeHist(gray)
+        eq_bgr = cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+        det = cv2.QRCodeDetector()
+        result = det.detectAndDecode(eq_bgr)
+        qr_data = result[0] if result else ""
+        if len(result) > 1 and result[1] is not None:
+            pts_arr = np.array(result[1]).reshape(-1, 2)
+            if len(pts_arr) > 0:
+                qr_center = tuple(pts_arr.mean(axis=0))
+        if qr_data:
+            return qr_data, qr_center
+    except Exception:
+        pass
+
+    return "", None
 
 
 def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", threshold_modo="normal", questoes_info=None):
@@ -8967,27 +9098,12 @@ def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", th
     warped = cv2.warpPerspective(img, M, (canon_w, canon_h))
     warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
-    # === STEP 3: Read QR code ===
-    qr_detector = cv2.QRCodeDetector()
-    qr_data = ""
-    qr_center = None
-    try:
-        result = qr_detector.detectAndDecode(warped)
-        qr_data = result[0] if result else ""
-        if len(result) > 1 and result[1] is not None:
-            pts_arr = np.array(result[1]).reshape(-1, 2)
-            if len(pts_arr) > 0:
-                qr_center = pts_arr.mean(axis=0)
-    except Exception:
-        qr_data = ""
+    # === STEP 3: Read QR code — detecção robusta (12/08/2026) ===
+    qr_data, qr_center = _detectar_qr_robusto(warped)
 
     if not qr_data:
-        # Fallback: try in original image
-        try:
-            result = qr_detector.detectAndDecode(img)
-            qr_data = result[0] if result else ""
-        except Exception:
-            qr_data = ""
+        # Fallback: tentar na imagem original (antes da correção de perspectiva)
+        qr_data, _ = _detectar_qr_robusto(img)
 
     if not qr_data or not qr_data.startswith("CR:"):
         return {"success": False, "error": f"Não foi possível ler o QR Code do cartão. Tente uma foto mais nítida ou com mais resolução. (Dado lido: '{qr_data[:30]}')"}
@@ -14162,25 +14278,12 @@ def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
     warped = cv2.warpPerspective(img, M, (canon_w, canon_h))
     warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
-    # Ler QR Code
-    qr_detector = cv2.QRCodeDetector()
-    qr_data = ""
-    qr_center = None
-    try:
-        r = qr_detector.detectAndDecode(warped)
-        qr_data = r[0] if r else ""
-        if len(r) > 1 and r[1] is not None:
-            pts_arr = np.array(r[1]).reshape(-1, 2)
-            if len(pts_arr) > 0:
-                qr_center = pts_arr.mean(axis=0)
-    except Exception:
-        pass
+    # Ler QR Code — detecção robusta (12/08/2026)
+    qr_data, qr_center = _detectar_qr_robusto(warped)
+
     if not qr_data:
-        try:
-            r = qr_detector.detectAndDecode(img)
-            qr_data = r[0] if r else ""
-        except Exception:
-            pass
+        # Fallback: tentar na imagem original (antes da correção de perspectiva)
+        qr_data, _ = _detectar_qr_robusto(img)
 
     if not qr_data or not qr_data.startswith("SIM:"):
         return {"success": False, "error": f"QR Code inválido ou não encontrado. (lido: '{qr_data[:30]}')"}
@@ -15322,22 +15425,13 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
     if not image_bytes:
         return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p><a href="/escanear" class="btn">← Voltar</a>', active="aplicacoes"))
 
-    # Tentar ler o QR Code da imagem para identificar o tipo
-    import cv2
-    import numpy as np
-
-    img_arr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+    # Tentar ler o QR Code da imagem para identificar o tipo (12/08/2026: usa
+    # _decode_image_universal pra corrigir EXIF + _detectar_qr_robusto)
+    img, img_erro = _decode_image_universal(image_bytes, filename=file.filename or "")
     if img is None:
-        return HTMLResponse(render_page("Erro", '<p>Não foi possível abrir a imagem.</p><a href="/escanear" class="btn">← Voltar</a>', active="aplicacoes"))
+        return HTMLResponse(render_page("Erro", f'<p>{img_erro or "Não foi possível abrir a imagem."}</p><a href="/escanear" class="btn">← Voltar</a>', active="aplicacoes"))
 
-    qr_detector = cv2.QRCodeDetector()
-    qr_data = ""
-    try:
-        r = qr_detector.detectAndDecode(img)
-        qr_data = r[0] if r else ""
-    except Exception:
-        pass
+    qr_data, _ = _detectar_qr_robusto(img)
 
     def _render_erro(msg):
         content = f"""
@@ -15636,20 +15730,14 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
     conn = get_db()
     try:
         for filename, image_bytes in all_files:
-            img_arr = np.frombuffer(image_bytes, np.uint8)
-            img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+            # 12/08/2026: usa _decode_image_universal (EXIF) + _detectar_qr_robusto
+            img, img_erro = _decode_image_universal(image_bytes, filename=filename)
             if img is None:
-                cards_html_parts.append(_render_card_erro(idx, filename, "Imagem inválida."))
+                cards_html_parts.append(_render_card_erro(idx, filename, img_erro or "Imagem inválida."))
                 n_erro += 1; idx += 1
                 continue
 
-            qr_detector = cv2.QRCodeDetector()
-            qr_data = ""
-            try:
-                r = qr_detector.detectAndDecode(img)
-                qr_data = r[0] if r else ""
-            except Exception:
-                pass
+            qr_data, _ = _detectar_qr_robusto(img)
 
             if not qr_data:
                 cards_html_parts.append(_render_card_erro(idx, filename, "QR Code não encontrado."))
