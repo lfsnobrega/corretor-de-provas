@@ -511,6 +511,9 @@ def init_db():
         conn.execute("ALTER TABLE respostas ADD COLUMN dados_extra TEXT")
     if "credito_anulacao" not in cols_resp:
         conn.execute("ALTER TABLE respostas ADD COLUMN credito_anulacao INTEGER DEFAULT 0")
+    if "resposta_texto" not in cols_resp:
+        # Texto livre do aluno pra questões discursivas na aplicação online (12/08/2026)
+        conn.execute("ALTER TABLE respostas ADD COLUMN resposta_texto TEXT")
 
     # Tabelas pra V ou F
     conn.execute("""CREATE TABLE IF NOT EXISTS vf_afirmacoes (
@@ -553,6 +556,10 @@ def init_db():
     cols_a = {row[1] for row in conn.execute("PRAGMA table_info(aplicacoes)").fetchall()}
     if "criada_por_professor_id" not in cols_a:
         conn.execute("ALTER TABLE aplicacoes ADD COLUMN criada_por_professor_id INTEGER")
+    if "mostrar_resultado_aluno" not in cols_a:
+        # Flag: professor decide se aluno vê nota/gabarito ao entregar (12/08/2026).
+        # Default 1 (mostra) — preserva o comportamento atual para aplicações já existentes.
+        conn.execute("ALTER TABLE aplicacoes ADD COLUMN mostrar_resultado_aluno INTEGER NOT NULL DEFAULT 1")
     cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
     if "is_gestor" not in cols_prof:
         conn.execute("ALTER TABLE professores ADD COLUMN is_gestor INTEGER NOT NULL DEFAULT 0")
@@ -6126,6 +6133,11 @@ def form_nova_aplicacao():
 
             <label>Título da aplicação (opcional)<input type="text" name="titulo" placeholder="Ex: 1º Bimestre — 9º A"></label>
 
+            <label style="font-weight:normal; display:flex; align-items:flex-start; gap:8px; margin-top:12px;">
+                <input type="checkbox" name="mostrar_resultado_aluno" value="1" checked style="width:auto; margin-top:4px;">
+                <span><strong>Mostrar nota e gabarito ao aluno</strong><br><small>Ao entregar, o aluno vê a nota e quais questões acertou/errou. Desmarque para exercícios/tarefas onde isso não é desejado — o aluno só verá a confirmação de entrega.</small></span>
+            </label>
+
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Criar aplicação</button>
                 <a href="/aplicacoes" class="btn">Cancelar</a>
@@ -6136,14 +6148,15 @@ def form_nova_aplicacao():
 
 
 @app.post("/aplicacoes/nova")
-def criar_aplicacao(request: Request, prova_id: int = Form(...), turma_id: int = Form(...), modo: str = Form(...), titulo: str = Form("")):
+def criar_aplicacao(request: Request, prova_id: int = Form(...), turma_id: int = Form(...), modo: str = Form(...), titulo: str = Form(""), mostrar_resultado_aluno: str = Form(None)):
     prof = get_current_professor(request)
     if not prof:
         return RedirectResponse("/login", status_code=303)
+    mostrar_resultado = 1 if mostrar_resultado_aluno else 0
     conn = get_db()
     cursor = conn.execute(
-        "INSERT INTO aplicacoes (prova_id, turma_id, modo, titulo, criada_por_professor_id) VALUES (?, ?, ?, ?, ?)",
-        (prova_id, turma_id, modo, titulo.strip() or None, prof["id"])
+        "INSERT INTO aplicacoes (prova_id, turma_id, modo, titulo, criada_por_professor_id, mostrar_resultado_aluno) VALUES (?, ?, ?, ?, ?, ?)",
+        (prova_id, turma_id, modo, titulo.strip() or None, prof["id"], mostrar_resultado)
     )
     aplicacao_id = cursor.lastrowid
     conn.commit()
@@ -6216,6 +6229,12 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
         acoes_btn += f'<a href="/provas/{apl["prova_id"]}/imprimir" class="btn" target="_blank">🖨️ Imprimir prova</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/analise" class="btn">📈 Análise pedagógica</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/exportar" class="btn">📊 Exportar Planilha Excel</a>'
+    if apl["modo"] == "online":
+        mostra_resultado_atual = apl["mostrar_resultado_aluno"] if "mostrar_resultado_aluno" in apl.keys() and apl["mostrar_resultado_aluno"] is not None else 1
+        if mostra_resultado_atual:
+            acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/toggle-resultado" style="margin:0;"><button type="submit" class="btn" title="Aluno vê a nota e o gabarito ao entregar">👁 Resultado visível ao aluno</button></form>'
+        else:
+            acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/toggle-resultado" style="margin:0;"><button type="submit" class="btn" style="color:var(--text-muted);" title="Aluno só vê a confirmação de entrega, sem nota nem gabarito">🙈 Resultado oculto do aluno</button></form>'
     if apl["aberta"]:
         acoes_btn += f'<form method="post" action="/aplicacoes/{aplicacao_id}/encerrar" style="margin:0;" onsubmit="return confirm(\'Encerrar esta aplicação?\')"><button type="submit" class="btn" style="color:var(--red); border-color:var(--red);">🔒 Encerrar aplicação</button></form>'
     else:
@@ -6288,6 +6307,19 @@ def reabrir_aplicacao(aplicacao_id: int):
     return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
 
 
+@app.post("/aplicacoes/{aplicacao_id}/toggle-resultado")
+def toggle_resultado_aluno(aplicacao_id: int):
+    """Liga/desliga se o aluno vê nota e gabarito ao entregar a prova online (12/08/2026)."""
+    conn = get_db()
+    atual = conn.execute("SELECT mostrar_resultado_aluno FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
+    if atual is not None:
+        novo_valor = 0 if (atual["mostrar_resultado_aluno"] is None or atual["mostrar_resultado_aluno"]) else 1
+        conn.execute("UPDATE aplicacoes SET mostrar_resultado_aluno = ? WHERE id = ?", (novo_valor, aplicacao_id))
+        conn.commit()
+    conn.close()
+    return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
+
+
 @app.get("/responder/{codigo}/{aplicacao_id}", response_class=HTMLResponse)
 def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
     conn = get_db()
@@ -6304,21 +6336,28 @@ def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
         conn.close()
         return HTMLResponse(_pagina_simples("Link inválido", "<p>Esse link não corresponde a uma aplicação válida. Confira com seu professor.</p>"))
 
+    # Flag do professor: mostra nota/gabarito ao aluno ou só confirma a entrega (12/08/2026)
+    mostrar_resultado = apl["mostrar_resultado_aluno"] if "mostrar_resultado_aluno" in apl.keys() and apl["mostrar_resultado_aluno"] is not None else 1
+
     entrega = conn.execute("SELECT * FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno["id"])).fetchone()
     if entrega:
-        score, total = _calcular_nota(conn, aplicacao_id, aluno["id"])
         conn.close()
+        if mostrar_resultado:
+            score, total = _calcular_nota(conn, aplicacao_id, aluno["id"])
+            corpo_resultado = f'<p style="font-size:32px; font-weight:600; margin: 24px 0;">Nota: {score}/{total}</p>'
+        else:
+            corpo_resultado = '<p style="margin: 24px 0;">Sua entrega foi registrada com sucesso.</p>'
         return HTMLResponse(_pagina_simples(
             "Prova entregue",
             f"""
             <p>Olá, <strong>{aluno["nome"]}</strong>! Sua prova foi entregue em {entrega["finalizada_em"]}.</p>
-            <p style="font-size:32px; font-weight:600; margin: 24px 0;">Nota: {score}/{total}</p>
+            {corpo_resultado}
             <p>Você não pode mais alterar suas respostas.</p>
             """
         ))
 
     questoes = conn.execute("""
-        SELECT q.id, q.enunciado, d.nome AS disciplina_nome
+        SELECT q.id, q.enunciado, q.tipo, d.nome AS disciplina_nome
         FROM prova_questoes pq
         JOIN questoes q ON q.id = pq.questao_id
         JOIN disciplinas d ON d.id = q.disciplina_id
@@ -6327,14 +6366,16 @@ def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
     """, (apl["prova_id"],)).fetchall()
 
     respostas_dadas = {}
-    for r in conn.execute("SELECT questao_id, alternativa_letra FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno["id"])).fetchall():
+    respostas_texto = {}
+    for r in conn.execute("SELECT questao_id, alternativa_letra, resposta_texto FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno["id"])).fetchall():
         respostas_dadas[r["questao_id"]] = r["alternativa_letra"]
+        if "resposta_texto" in r.keys():
+            respostas_texto[r["questao_id"]] = r["resposta_texto"]
 
     questoes_html = ""
     for idx, q in enumerate(questoes, start=1):
         textos = conn.execute("SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
         imagens = conn.execute("SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
-        alts = conn.execute("SELECT letra, texto FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
 
         textos_html = ""
         for t in textos:
@@ -6346,11 +6387,29 @@ def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
             legenda_html = f'<figcaption>{img["legenda"]}</figcaption>' if img["legenda"] else ""
             imagens_html += f'<figure><img src="/{img["caminho"]}" alt="">{legenda_html}</figure>'
 
-        marcada = respostas_dadas.get(q["id"], "")
-        alts_html = ""
-        for a in alts:
-            checked = ' checked' if a["letra"] == marcada else ''
-            alts_html += f'<label style="display:flex; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; align-items:flex-start;"><input type="radio" name="q_{q["id"]}" value="{a["letra"]}"{checked} style="width:auto; margin-top:3px;"><span><strong>{a["letra"]})</strong> {a["texto"]}</span></label>'
+        tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+
+        if tipo_q == "discursiva":
+            # Resposta livre em texto — sem isso o aluno não tinha como responder online (12/08/2026)
+            texto_atual = respostas_texto.get(q["id"]) or ""
+            alts_html = (
+                f'<textarea name="qd_{q["id"]}" rows="6" placeholder="Digite sua resposta aqui..." '
+                f'style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:6px; '
+                f'background:var(--card); color:var(--text); font-family:inherit; font-size:14px; resize:vertical;">{texto_atual}</textarea>'
+            )
+        else:
+            alts = conn.execute("SELECT letra, texto FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
+            marcada = respostas_dadas.get(q["id"], "")
+            alts_html = ""
+            for a in alts:
+                checked = ' checked' if a["letra"] == marcada else ''
+                alts_html += (
+                    f'<label style="display:flex; gap:10px; padding:10px 12px; border:1px solid var(--border); '
+                    f'border-radius:6px; margin-bottom:6px; cursor:pointer; align-items:flex-start; '
+                    f'background:var(--card); color:var(--text);">'
+                    f'<input type="radio" name="q_{q["id"]}" value="{a["letra"]}"{checked} style="width:auto; margin-top:3px;">'
+                    f'<span><strong>{a["letra"]})</strong> {a["texto"]}</span></label>'
+                )
 
         bncc_pref = _bncc_prefix(conn, q["id"])
         questoes_html += f'<div class="question"><div class="question-header">Questão {idx} · {q["disciplina_nome"]}</div>{textos_html}{imagens_html}<div class="enunciado">{bncc_pref}{q["enunciado"]}</div>{alts_html}</div>'
@@ -6362,7 +6421,7 @@ def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
             <h1>{apl["prova_titulo"]}</h1>
             <p class="subtitle">Aluno: <strong>{aluno["nome"]}</strong> · Turma: {apl["turma_nome"]}</p>
         </div>
-        <div class="tip">Marque a alternativa correta em cada questão. Você pode salvar o progresso e voltar depois usando o mesmo link. Quando terminar, clique em <strong>Finalizar e entregar</strong>.</div>
+        <div class="tip">Responda cada questão. Você pode salvar o progresso e voltar depois usando o mesmo link. Quando terminar, clique em <strong>Finalizar e entregar</strong>.</div>
         <form action="/responder/{codigo}/{aplicacao_id}" method="post">
             {questoes_html}
             <div class="page-actions" style="margin-top:24px;">
@@ -6483,6 +6542,17 @@ async def salvar_respostas(codigo: str, aplicacao_id: int, request: Request):
                 ON CONFLICT(aplicacao_id, aluno_id, questao_id)
                 DO UPDATE SET alternativa_letra = excluded.alternativa_letra, respondida_em = CURRENT_TIMESTAMP
             """, (aplicacao_id, aluno["id"], questao_id, value))
+        elif key.startswith("qd_"):
+            # Resposta discursiva (texto livre) — 12/08/2026. Salva mesmo em branco
+            # pra permitir apagar um rascunho anterior ao "Salvar progresso".
+            questao_id = int(key[3:])
+            texto = value.strip() if value else None
+            conn.execute("""
+                INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, resposta_texto)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(aplicacao_id, aluno_id, questao_id)
+                DO UPDATE SET resposta_texto = excluded.resposta_texto, respondida_em = CURRENT_TIMESTAMP
+            """, (aplicacao_id, aluno["id"], questao_id, texto))
 
     if acao == "finalizar":
         conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?, ?)", (aplicacao_id, aluno["id"]))
@@ -6708,7 +6778,7 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
 
     entrega = conn.execute("SELECT * FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id)).fetchone()
     questoes = conn.execute("""
-        SELECT q.id, q.enunciado, d.nome AS disciplina_nome
+        SELECT q.id, q.enunciado, q.tipo, d.nome AS disciplina_nome
         FROM prova_questoes pq
         JOIN questoes q ON q.id = pq.questao_id
         JOIN disciplinas d ON d.id = q.disciplina_id
@@ -6716,18 +6786,39 @@ def ver_respostas_aluno(aplicacao_id: int, aluno_id: int):
         ORDER BY pq.ordem
     """, (apl["prova_id"],)).fetchall()
 
-    respostas = {r["questao_id"]: r["alternativa_letra"] for r in conn.execute("SELECT questao_id, alternativa_letra FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id)).fetchall()}
+    respostas = {}
+    respostas_texto = {}
+    for r in conn.execute("SELECT questao_id, alternativa_letra, resposta_texto FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id)).fetchall():
+        respostas[r["questao_id"]] = r["alternativa_letra"]
+        if "resposta_texto" in r.keys():
+            respostas_texto[r["questao_id"]] = r["resposta_texto"]
     score, total = _calcular_nota(conn, aplicacao_id, aluno_id)
 
     questoes_html = ""
     composicao = {}  # disciplina_nome -> {"acertos": int, "total": int}
     for idx, q in enumerate(questoes, start=1):
-        alts = conn.execute("SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
-        marcada = respostas.get(q["id"])
-
+        tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
         disc = q["disciplina_nome"] or "—"
         composicao.setdefault(disc, {"acertos": 0, "total": 0})
         composicao[disc]["total"] += 1
+
+        if tipo_q == "discursiva":
+            texto_resp = respostas_texto.get(q["id"])
+            if texto_resp:
+                alts_html = (
+                    f'<div style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; '
+                    f'background:var(--bg-subtle); white-space:pre-wrap;">{texto_resp}</div>'
+                    f'<div style="color:var(--text-muted); font-size:12px; font-style:italic; margin-top:4px;">📝 Questão discursiva — correção manual (não conta na nota automática)</div>'
+                )
+                status_questao = ""
+            else:
+                alts_html = ""
+                status_questao = '<div style="color:var(--text-muted); font-style:italic; margin-bottom:8px;">⚠ Aluno não respondeu esta questão</div>'
+            questoes_html += f'<div class="question"><div class="question-header">Questão {idx} · {q["disciplina_nome"]}</div>{status_questao}<div class="enunciado">{q["enunciado"]}</div>{alts_html}</div>'
+            continue
+
+        alts = conn.execute("SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
+        marcada = respostas.get(q["id"])
 
         alts_html = ""
         for a in alts:
