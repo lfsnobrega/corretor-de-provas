@@ -7231,3 +7231,8778 @@ def form_editar_questao(id: int, request: Request):
         fieldset_alts = f"""
             <fieldset>
                 <legend>Coluna A — itens (1, 2...) com gabarito</legend>
+                {col_a_html_edit}
+            </fieldset>
+            <fieldset>
+                <legend>Coluna B — opções (a, b...)</legend>
+                {col_b_html_edit}
+            </fieldset>
+        """
+
+    content = f"""
+        <div class="page-header"><h1>Editar questão</h1>
+            <p class="subtitle">{tipo_info['icone']} {tipo_info['label']} <span style="color:var(--text-muted); font-size:12px;">(o tipo não pode ser alterado depois da criação)</span></p>
+        </div>
+        <div class="tip"><strong>Dica:</strong> use <code>$fórmula$</code> para fórmulas inline ou <code>$$fórmula$$</code> para centralizadas. Textos e imagens existentes podem ser removidos individualmente acima; os campos "Adicionar novos" só inserem novos itens.</div>
+
+        {textos_existentes_html}
+        {imagens_existentes_html}
+
+        <form action="/questoes/{id}/editar" method="post" enctype="multipart/form-data">
+            <input type="hidden" name="tipo" value="{tipo_q}">
+            <div style="display:grid; grid-template-columns: 2fr 1fr; gap:12px;">
+                <label>Disciplina<select name="disciplina_id" required>{options}</select></label>
+                <label>Ano de escolaridade<select name="ano">{anos_options}</select></label>
+            </div>
+            <div id="bncc-container" style="margin:10px 0;">
+                <label style="margin-bottom:6px;">Habilidades BNCC <span style="font-weight:400; color:var(--text-muted); font-size:12px;">(opcional)</span></label>
+                <input type="hidden" name="habilidades_codigos" id="bncc-hidden" value="{habs_preset}">
+                <div id="bncc-chips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:24px; margin-bottom:8px;"></div>
+                <input type="search" id="bncc-search" placeholder="Digite o código (EF09MA09) ou palavra-chave (fração, célula...)" style="margin:0;">
+                <div id="bncc-results" style="margin-top:6px;"></div>
+            </div>
+            {link_catalogo}
+
+            <fieldset>
+                <legend>Adicionar novos textos de apoio (opcional)</legend>
+                {_editor_enunciado_html(name="texto1_conteudo", valor_inicial="", required=False, label="Texto novo — conteúdo", min_height=80, placeholder="Cole ou digite o texto de apoio")}
+                <label>Texto novo — fonte<input type="text" name="texto1_fonte" placeholder="Autor, obra, ano"></label>
+                {_editor_enunciado_html(name="texto2_conteudo", valor_inicial="", required=False, label="Outro texto novo — conteúdo", min_height=80, placeholder="Segundo texto de apoio (opcional)")}
+                <label>Outro texto novo — fonte<input type="text" name="texto2_fonte"></label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Adicionar novas imagens (opcional)</legend>
+                <label>Imagem nova<input type="file" name="imagem1" accept="image/*"></label>
+                <label>Legenda<input type="text" name="imagem1_legenda"></label>
+                <label>Fonte<input type="text" name="imagem1_fonte"></label>
+                <label>Outra imagem nova<input type="file" name="imagem2" accept="image/*"></label>
+                <label>Legenda<input type="text" name="imagem2_legenda"></label>
+                <label>Fonte<input type="text" name="imagem2_fonte"></label>
+            </fieldset>
+
+            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão.", detectar_alternativas=(tipo_q == "multipla_escolha"))}
+
+            {fieldset_alts}
+
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar alterações</button>
+                <a href="/questoes" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Editar questão", content, active="questoes", head_extra=MATHJAX_EDIT)
+
+
+@app.post("/questoes/{id}/editar", response_class=HTMLResponse)
+async def atualizar_questao(
+    id: int,
+    request: Request,
+    disciplina_id: int = Form(...),
+    enunciado: str = Form(...),
+    tipo: str = Form("multipla_escolha"),
+    alt_a: str = Form(""), alt_b: str = Form(""), alt_c: str = Form(""), alt_d: str = Form(""),
+    correta: str = Form(""),
+    habilidades_codigos: str = Form(""),
+    ano: str = Form(""),
+    texto1_conteudo: str = Form(""), texto1_fonte: str = Form(""),
+    texto2_conteudo: str = Form(""), texto2_fonte: str = Form(""),
+    imagem1: Optional[UploadFile] = File(None), imagem1_legenda: str = Form(""), imagem1_fonte: str = Form(""),
+    imagem2: Optional[UploadFile] = File(None), imagem2_legenda: str = Form(""), imagem2_fonte: str = Form(""),
+):
+    prof = get_current_professor(request)
+    conn = get_db()
+    q_existente = conn.execute("SELECT criada_por_professor_id, tipo FROM questoes WHERE id = ?", (id,)).fetchone()
+    if not q_existente:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_questao(prof, q_existente["criada_por_professor_id"]):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem permissão",
+            '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
+            '<p>Apenas o autor da questão ou o administrador podem editá-la.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ), status_code=403)
+    # Tipo NÃO pode mudar depois de criada (preserva integridade de respostas históricas)
+    tipo_atual = q_existente["tipo"] if "tipo" in q_existente.keys() and q_existente["tipo"] else "multipla_escolha"
+    conn.execute("UPDATE questoes SET disciplina_id = ?, enunciado = ?, ano = ? WHERE id = ?", (disciplina_id, _sanitizar_html_enunciado(enunciado), ano.strip() or None, id))
+
+    # Recarrega o form pra pegar campos dinâmicos
+    form_extra = await request.form()
+
+    if tipo_atual == "multipla_escolha":
+        conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
+        for letra, texto in [("A", alt_a), ("B", alt_b), ("C", alt_c), ("D", alt_d)]:
+            conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)",
+                         (id, letra, _sanitizar_html_enunciado(texto), 1 if letra == correta else 0))
+    elif tipo_atual == "vf":
+        conn.execute("DELETE FROM vf_afirmacoes WHERE questao_id = ?", (id,))
+        ordem_real = 0
+        for i in range(VF_MAX_AFIRMACOES):
+            texto_afirm = _sanitizar_html_enunciado(str(form_extra.get(f"vf_afirm_{i}_texto", "")))
+            gabarito = str(form_extra.get(f"vf_afirm_{i}_gabarito", "")).strip().upper()
+            if texto_afirm and gabarito in ("V", "F"):
+                conn.execute("INSERT INTO vf_afirmacoes (questao_id, ordem, texto, gabarito) VALUES (?, ?, ?, ?)",
+                             (id, ordem_real, texto_afirm, gabarito))
+                ordem_real += 1
+    elif tipo_atual == "associacao":
+        conn.execute("DELETE FROM assoc_itens_a WHERE questao_id = ?", (id,))
+        conn.execute("DELETE FROM assoc_itens_b WHERE questao_id = ?", (id,))
+        ordem_real = 0
+        for i in range(ASSOC_MAX_PARES):
+            texto_a = _sanitizar_html_enunciado(str(form_extra.get(f"assoc_a_{i}_texto", "")))
+            gabarito = str(form_extra.get(f"assoc_a_{i}_gabarito", "")).strip().lower()
+            if texto_a and gabarito:
+                conn.execute("INSERT INTO assoc_itens_a (questao_id, ordem, texto, gabarito_letra) VALUES (?, ?, ?, ?)",
+                             (id, ordem_real, texto_a, gabarito))
+                ordem_real += 1
+        for j in range(ASSOC_MAX_PARES):
+            letra_b = chr(97+j)
+            texto_b = _sanitizar_html_enunciado(str(form_extra.get(f"assoc_b_{letra_b}_texto", "")))
+            if texto_b:
+                conn.execute("INSERT INTO assoc_itens_b (questao_id, letra, texto) VALUES (?, ?, ?)",
+                             (id, letra_b, texto_b))
+
+    conn.execute("DELETE FROM questao_habilidades WHERE questao_id = ?", (id,))
+    for parte in habilidades_codigos.replace("\n", ",").split(","):
+        codigo = parte.strip().upper()
+        if not codigo:
+            continue
+        existing = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+        habilidade_id = existing["id"] if existing else conn.execute("INSERT INTO habilidades_bncc (codigo) VALUES (?)", (codigo,)).lastrowid
+        try:
+            conn.execute("INSERT INTO questao_habilidades (questao_id, habilidade_id) VALUES (?, ?)", (id, habilidade_id))
+        except sqlite3.IntegrityError:
+            pass
+
+    proximo_ordem_texto = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM textos_apoio WHERE questao_id = ?", (id,)).fetchone()["n"]
+    for offset, (conteudo, fonte) in enumerate([(texto1_conteudo, texto1_fonte), (texto2_conteudo, texto2_fonte)]):
+        conteudo_sanit = _sanitizar_html_enunciado(conteudo)
+        if conteudo_sanit:
+            conn.execute("INSERT INTO textos_apoio (questao_id, conteudo, fonte, ordem) VALUES (?, ?, ?, ?)",
+                         (id, conteudo_sanit, fonte.strip() or None, proximo_ordem_texto + offset))
+
+    proximo_ordem_img = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM imagens WHERE questao_id = ?", (id,)).fetchone()["n"]
+    for offset, (img, legenda, fonte) in enumerate([(imagem1, imagem1_legenda, imagem1_fonte), (imagem2, imagem2_legenda, imagem2_fonte)]):
+        if img and img.filename:
+            content_bytes = await img.read()
+            content_bytes = _redimensionar_imagem(content_bytes, max_width=800)
+            unique_name = f"{uuid.uuid4().hex}.jpg"
+            file_path = os.path.join(UPLOAD_DIR, unique_name)
+            with open(file_path, "wb") as f:
+                f.write(content_bytes)
+            conn.execute("INSERT INTO imagens (questao_id, caminho, legenda, fonte, ordem) VALUES (?, ?, ?, ?, ?)",
+                         (id, f"static/imagens/{unique_name}", legenda.strip() or None, fonte.strip() or None, proximo_ordem_img + offset))
+
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/questoes", status_code=303)
+
+
+@app.post("/questoes/{id}/deletar", response_class=HTMLResponse)
+def deletar_questao(id: int, request: Request):
+    prof = get_current_professor(request)
+    conn = get_db()
+    q_existente = conn.execute("SELECT criada_por_professor_id FROM questoes WHERE id = ?", (id,)).fetchone()
+    if not q_existente:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_questao(prof, q_existente["criada_por_professor_id"]):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem permissão",
+            '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
+            '<p>Apenas o autor da questão ou o administrador podem excluí-la.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ), status_code=403)
+    em_uso = conn.execute("SELECT COUNT(*) AS c FROM prova_questoes WHERE questao_id = ?", (id,)).fetchone()["c"]
+    if em_uso > 0:
+        conn.close()
+        content = """
+        <div style="border: 1px solid var(--red); background: var(--red-bg); padding: 20px; border-radius: 6px; margin-top:20px; color:var(--red);">
+            <h3 style="color:var(--red); margin-top:0;">Operação Impedida</h3>
+            <p>Não é possível excluir esta questão porque ela está sendo usada em uma ou mais <strong>provas</strong>.</p>
+            <p>Se deseja realmente excluí-la, remova-a primeiro das provas que a usam (na tela de edição de prova).</p>
+            <a href="/questoes" class="btn" style="margin-top:10px;">Voltar para Questões</a>
+        </div>
+        """
+        return render_page("Erro ao Excluir Questão", content, active="questoes")
+
+    imagens = conn.execute("SELECT caminho FROM imagens WHERE questao_id = ?", (id,)).fetchall()
+    for img in imagens:
+        try:
+            if os.path.exists(img["caminho"]):
+                os.remove(img["caminho"])
+        except Exception:
+            pass
+
+    conn.execute("DELETE FROM alternativas WHERE questao_id = ?", (id,))
+    conn.execute("DELETE FROM textos_apoio WHERE questao_id = ?", (id,))
+    conn.execute("DELETE FROM imagens WHERE questao_id = ?", (id,))
+    conn.execute("DELETE FROM questao_habilidades WHERE questao_id = ?", (id,))
+    conn.execute("DELETE FROM questoes WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/questoes", status_code=303)
+
+
+@app.post("/questoes/{id}/anular", response_class=HTMLResponse)
+def anular_questao(id: int, request: Request):
+    """Anula uma questão de múltipla escolha: todas as alternativas passam a valer como
+    corretas — quem marcou qualquer letra passa a acertar automaticamente (porque todos
+    os relatórios já leem 'alternativas.correta' pra decidir acerto) — e quem deixou a
+    questão em branco também ganha o ponto (já que o erro foi de cadastro da questão,
+    não do aluno): criamos uma resposta de crédito pra esses alunos, marcada com
+    credito_anulacao=1 pra poder ser desfeita direitinho se a questão for reativada.
+    Chamar de novo nessa mesma questão reativa o gabarito original."""
+    prof = get_current_professor(request)
+    conn = get_db()
+    q = conn.execute("SELECT * FROM questoes WHERE id = ?", (id,)).fetchone()
+    if not q:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_questao(prof, q["criada_por_professor_id"]):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem permissão",
+            '<div class="page-header"><h1>🔒 Sem permissão</h1></div>'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
+            '<p>Apenas o autor da questão ou o administrador podem anulá-la.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ), status_code=403)
+
+    tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+    if tipo_q != "multipla_escolha":
+        conn.close()
+        return HTMLResponse(render_page(
+            "Não é possível anular",
+            '<div class="page-header"><h1>⚠ Não é possível anular</h1></div>'
+            '<div style="background:var(--orange-bg); color:var(--orange); border:1px solid var(--orange); padding:16px; border-radius:6px;">'
+            '<p>Anulação automática (todas as alternativas viram corretas) só está disponível pra questões de múltipla escolha por enquanto.</p></div>'
+            '<div class="page-actions" style="margin-top:14px;"><a href="/questoes" class="btn">← Voltar</a></div>',
+            active="questoes"
+        ))
+
+    if not q["anulada"]:
+        # Anular: guarda qual letra era a correta original, depois marca todas como corretas
+        correta_atual = conn.execute("SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1", (id,)).fetchone()
+        letra_original = correta_atual["letra"] if correta_atual else None
+        conn.execute("UPDATE questoes SET anulada = 1, gabarito_original = ? WHERE id = ?", (letra_original, id))
+        conn.execute("UPDATE alternativas SET correta = 1 WHERE questao_id = ?", (id,))
+
+        # Dar o ponto também pra quem deixou em branco: toda aplicação que usa essa
+        # questão (prova normal OU simulado — ambos passam pela mesma prova_questoes),
+        # todo aluno com entrega mas sem resposta registrada pra ela, ganha uma
+        # resposta de crédito (marcada como credito_anulacao=1, pra poder desfazer).
+        letra_credito = letra_original or "A"
+        aplicacoes_usando = conn.execute("""
+            SELECT DISTINCT a.id AS aplicacao_id
+            FROM prova_questoes pq JOIN aplicacoes a ON a.prova_id = pq.prova_id
+            WHERE pq.questao_id = ?
+        """, (id,)).fetchall()
+        n_creditados = 0
+        for apl in aplicacoes_usando:
+            sem_resposta = conn.execute("""
+                SELECT e.aluno_id FROM entregas e
+                WHERE e.aplicacao_id = ? AND e.aluno_id NOT IN (
+                    SELECT aluno_id FROM respostas WHERE aplicacao_id = ? AND questao_id = ?
+                )
+            """, (apl["aplicacao_id"], apl["aplicacao_id"], id)).fetchall()
+            for al in sem_resposta:
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra, credito_anulacao) VALUES (?,?,?,?,1)",
+                    (apl["aplicacao_id"], al["aluno_id"], id, letra_credito)
+                )
+                n_creditados += 1
+    else:
+        # Reativar: remove os créditos sintéticos dados a quem tinha deixado em branco,
+        # e restaura o gabarito original nas alternativas.
+        conn.execute("DELETE FROM respostas WHERE questao_id = ? AND credito_anulacao = 1", (id,))
+        conn.execute("UPDATE alternativas SET correta = 0 WHERE questao_id = ?", (id,))
+        if q["gabarito_original"]:
+            conn.execute("UPDATE alternativas SET correta = 1 WHERE questao_id = ? AND letra = ?", (id, q["gabarito_original"]))
+        conn.execute("UPDATE questoes SET anulada = 0, gabarito_original = NULL WHERE id = ?", (id,))
+
+    conn.commit()
+    conn.close()
+    referer = request.headers.get("referer", "/questoes")
+    return RedirectResponse(referer, status_code=303)
+
+
+@app.post("/textos_apoio/{id}/deletar")
+def deletar_texto_apoio(id: int):
+    conn = get_db()
+    row = conn.execute("SELECT questao_id FROM textos_apoio WHERE id = ?", (id,)).fetchone()
+    if not row:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    questao_id = row["questao_id"]
+    conn.execute("DELETE FROM textos_apoio WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/questoes/{questao_id}/editar", status_code=303)
+
+
+@app.post("/imagens/{id}/deletar")
+def deletar_imagem(id: int):
+    conn = get_db()
+    row = conn.execute("SELECT questao_id, caminho FROM imagens WHERE id = ?", (id,)).fetchone()
+    if not row:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    questao_id = row["questao_id"]
+    caminho = row["caminho"]
+
+    try:
+        if os.path.exists(caminho):
+            os.remove(caminho)
+    except Exception:
+        pass
+
+    conn.execute("DELETE FROM imagens WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/questoes/{questao_id}/editar", status_code=303)
+
+
+# ==========================================
+#  ANÁLISES PEDAGÓGICAS (FASE B)
+# ==========================================
+
+def _estatisticas_questao(conn, aplicacao_id, questao_id, alunos_entregues):
+    """Retorna estatísticas de uma questão entre os alunos que entregaram.
+    alunos_entregues: set/list de aluno_ids que finalizaram a aplicação."""
+    if not alunos_entregues:
+        return {"total": 0, "acertos": 0, "distribuicao": {"A": 0, "B": 0, "C": 0, "D": 0},
+                "em_branco": 0, "correta_letra": None, "pct_acerto": 0.0}
+
+    correta_row = conn.execute(
+        "SELECT letra FROM alternativas WHERE questao_id = ? AND correta = 1",
+        (questao_id,)
+    ).fetchone()
+    correta_letra = correta_row["letra"] if correta_row else None
+
+    placeholders = ",".join("?" * len(alunos_entregues))
+    respostas = conn.execute(
+        f"SELECT alternativa_letra FROM respostas WHERE aplicacao_id = ? AND questao_id = ? AND aluno_id IN ({placeholders})",
+        (aplicacao_id, questao_id, *list(alunos_entregues))
+    ).fetchall()
+
+    distribuicao = {"A": 0, "B": 0, "C": 0, "D": 0}
+    acertos = 0
+    respondidas = 0
+    for r in respostas:
+        letra = r["alternativa_letra"]
+        if letra in distribuicao:
+            distribuicao[letra] += 1
+            respondidas += 1
+        if letra == correta_letra:
+            acertos += 1
+
+    total = len(alunos_entregues)
+    em_branco = total - respondidas
+    pct = (acertos / total) * 100 if total > 0 else 0.0
+
+    return {
+        "total": total, "acertos": acertos, "distribuicao": distribuicao,
+        "em_branco": em_branco, "correta_letra": correta_letra, "pct_acerto": pct,
+    }
+
+
+def _cor_por_pct(pct):
+    """Retorna cor de fundo conforme % de acerto (verde > 70%, amarelo 40-70%, vermelho < 40%)."""
+    if pct >= 70:
+        return "var(--green)"  # verde
+    elif pct >= 40:
+        return "var(--orange)"  # amarelo/laranja
+    else:
+        return "var(--red)"  # vermelho
+
+
+def _barra_html(pct, largura_total=200):
+    """Gera HTML de barra horizontal com cor adaptativa."""
+    cor = _cor_por_pct(pct)
+    return (
+        f'<div style="display:inline-flex; align-items:center; gap:8px; width:{largura_total + 60}px;">'
+        f'<div style="background:var(--bg-muted); border-radius:4px; height:18px; width:{largura_total}px; overflow:hidden; position:relative;">'
+        f'<div style="background:{cor}; height:100%; width:{pct}%; transition:width 0.3s;"></div>'
+        f'</div>'
+        f'<span style="font-weight:600; font-size:13px; min-width:50px;">{pct:.1f}%</span>'
+        f'</div>'
+    )
+
+
+@app.get("/aplicacoes/{aplicacao_id}/analise", response_class=HTMLResponse)
+def analise_aplicacao(aplicacao_id: int):
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo
+        FROM aplicacoes a
+        JOIN provas p ON p.id = a.prova_id
+        JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    questoes = conn.execute("""
+        SELECT q.id, q.enunciado, d.nome AS disciplina_nome
+        FROM prova_questoes pq
+        JOIN questoes q ON q.id = pq.questao_id
+        JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE pq.prova_id = ?
+        ORDER BY pq.ordem
+    """, (apl["prova_id"],)).fetchall()
+    total_questoes = len(questoes)
+
+    entregas = conn.execute("SELECT aluno_id FROM entregas WHERE aplicacao_id = ?", (aplicacao_id,)).fetchall()
+    alunos_entregues = [e["aluno_id"] for e in entregas]
+    total_entregas = len(alunos_entregues)
+
+    if total_entregas == 0:
+        conn.close()
+        content = f"""
+            <div class="page-header">
+                <h1>Análise pedagógica</h1>
+                <p class="subtitle">{apl["prova_titulo"]} · {apl["turma_nome"]} ({apl["ano_letivo"]})</p>
+            </div>
+            <div class="empty">
+                <p>Nenhum aluno finalizou a prova ainda. A análise pedagógica fica disponível após pelo menos uma entrega.</p>
+                <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar para a aplicação</a>
+            </div>
+        """
+        return render_page("Análise pedagógica", content, active="aplicacoes")
+
+    notas_alunos = []
+    for aluno_id in alunos_entregues:
+        score, total = _calcular_nota(conn, aplicacao_id, aluno_id)
+        # Variante objetiva (sem discursivas) pra calcular nota 10 + faixa SAEB
+        acertos_obj, total_obj, nota_10 = _calcular_nota_objetiva(conn, aplicacao_id, aluno_id)
+        faixa = _faixa_saeb(nota_10)
+        notas_alunos.append({
+            "aluno_id": aluno_id, "score": score, "total": total,
+            "acertos_obj": acertos_obj, "total_obj": total_obj,
+            "nota_10": nota_10, "faixa": faixa,
+        })
+
+    media_acertos = sum(n["score"] for n in notas_alunos) / total_entregas
+    media_pct = (media_acertos / total_questoes) * 100 if total_questoes > 0 else 0
+    maior_nota = max(n["score"] for n in notas_alunos)
+    menor_nota = min(n["score"] for n in notas_alunos)
+    # Média na escala 0-10 (só objetivas)
+    media_10 = sum(n["nota_10"] for n in notas_alunos) / total_entregas if total_entregas else 0
+    faixa_media = _faixa_saeb(media_10)
+    # Distribuição nas 4 faixas
+    dist_faixas = {f["nome"]: 0 for f in FAIXAS_SAEB}
+    for n in notas_alunos:
+        dist_faixas[n["faixa"]["nome"]] += 1
+
+    questoes_stats = []
+    for idx, q in enumerate(questoes, start=1):
+        stats = _estatisticas_questao(conn, aplicacao_id, q["id"], alunos_entregues)
+        stats["questao_id"] = q["id"]
+        stats["numero"] = idx
+        preview = _preview_enunciado(q["enunciado"], max_chars=120)
+        if len(q["enunciado"]) > 120:
+            preview += "..."
+        stats["enunciado_preview"] = preview
+        stats["disciplina_nome"] = q["disciplina_nome"]
+        questoes_stats.append(stats)
+
+    questoes_ordenadas = sorted(questoes_stats, key=lambda x: x["pct_acerto"])
+    mais_dificeis = questoes_ordenadas[:3]
+    mais_faceis = list(reversed(questoes_ordenadas[-3:]))
+
+    habilidades = conn.execute("""
+        SELECT DISTINCT h.id, h.codigo, h.descricao
+        FROM habilidades_bncc h
+        JOIN questao_habilidades qh ON qh.habilidade_id = h.id
+        JOIN prova_questoes pq ON pq.questao_id = qh.questao_id
+        WHERE pq.prova_id = ?
+        ORDER BY h.codigo
+    """, (apl["prova_id"],)).fetchall()
+
+    habilidades_stats = []
+    for h in habilidades:
+        questoes_da_hab = conn.execute("""
+            SELECT q.id FROM questao_habilidades qh
+            JOIN questoes q ON q.id = qh.questao_id
+            JOIN prova_questoes pq ON pq.questao_id = q.id
+            WHERE qh.habilidade_id = ? AND pq.prova_id = ?
+        """, (h["id"], apl["prova_id"])).fetchall()
+        acertos_h = 0
+        oport_h = 0
+        for q in questoes_da_hab:
+            s = _estatisticas_questao(conn, aplicacao_id, q["id"], alunos_entregues)
+            acertos_h += s["acertos"]
+            oport_h += s["total"]
+        pct = (acertos_h / oport_h) * 100 if oport_h > 0 else 0
+        habilidades_stats.append({
+            "codigo": h["codigo"],
+            "descricao": h["descricao"] or "—",
+            "n_questoes": len(questoes_da_hab),
+            "pct_acerto": pct,
+            "acertos": acertos_h,
+            "total": oport_h,
+        })
+
+    alunos_info = {a["id"]: a for a in conn.execute("SELECT id, nome, numero FROM alunos WHERE turma_id = ?", (apl["turma_id"],)).fetchall()}
+
+    ranking = []
+    for n in notas_alunos:
+        aluno = alunos_info.get(n["aluno_id"])
+        if aluno:
+            pct = (n["score"] / n["total"] * 100) if n["total"] > 0 else 0
+            ranking.append({
+                "nome": aluno["nome"],
+                "numero": aluno["numero"],
+                "aluno_id": n["aluno_id"],
+                "score": n["score"],
+                "total": n["total"],
+                "pct": pct,
+                "nota_10": n["nota_10"],
+                "faixa": n["faixa"],
+            })
+    ranking.sort(key=lambda x: x["nota_10"], reverse=True)
+
+    # Alertas automáticos
+    alunos_alerta = [r for r in ranking if r["faixa"]["nome"] == "Insuficiente"]
+    alunos_destaque = [r for r in ranking if r["faixa"]["nome"] == "Avançado"]
+
+    conn.close()
+
+    # ═══ BLOCO SAEB: KPI principal (média da turma + faixa) ═══
+    saeb_kpi_html = f"""
+        <div class="card" style="background:{faixa_media['cor_bg']}; border-left:4px solid {faixa_media['cor']}; padding:18px 20px; margin-bottom:18px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
+                <div>
+                    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; font-weight:700; color:{faixa_media['cor']};">Proficiência média da turma</div>
+                    <div style="font-size:36px; font-weight:800; color:{faixa_media['cor']}; line-height:1.1; margin-top:4px;">{media_10:.1f} <small style="font-size:18px; opacity:0.7;">/10</small></div>
+                    <div style="font-size:14px; color:var(--text); margin-top:6px; font-weight:600;">{faixa_media['emoji']} {faixa_media['nome']}</div>
+                </div>
+                <div style="font-size:12px; color:var(--text-muted); max-width:300px;">
+                    Calculado sobre {total_entregas} aluno(s) entregue(s) considerando apenas questões objetivas (MC, V/F, Associação). Discursivas são corrigidas manualmente.
+                </div>
+            </div>
+        </div>
+    """
+
+    # ═══ DISTRIBUIÇÃO NAS 4 FAIXAS (4 cards + gráfico) ═══
+    cards_faixas = ""
+    for f in FAIXAS_SAEB:
+        qtd = dist_faixas[f["nome"]]
+        pct_faixa = (qtd / total_entregas * 100) if total_entregas else 0
+        cards_faixas += f"""
+            <div class="card" style="background:{f['cor_bg']}; border-color:{f['cor_border']}; padding:14px 16px; text-align:center;">
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; font-weight:700; color:{f['cor']};">{f['emoji']} {f['nome']}</div>
+                <div style="font-size:28px; font-weight:800; color:{f['cor']}; line-height:1.1; margin-top:6px;">{qtd}</div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">{pct_faixa:.0f}% da turma</div>
+            </div>
+        """
+    distribuicao_html = f"""
+        <h2 style="margin-top:24px;">📊 Distribuição por faixa de proficiência</h2>
+        <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:18px;">
+            {cards_faixas}
+        </div>
+        <div class="card" style="padding:16px;">
+            <canvas id="chartDistFaixas" style="max-height:280px;"></canvas>
+        </div>
+    """
+
+    # ═══ GRÁFICO de % de acerto por questão ═══
+    questoes_labels_js = "[" + ", ".join(f'"Q{q["numero"]}"' for q in questoes_stats) + "]"
+    questoes_valores_js = "[" + ", ".join(f'{q["pct_acerto"]:.1f}' for q in questoes_stats) + "]"
+    # Cores: vermelho < 50%, laranja 50-65%, azul 66-79%, verde >= 80%
+    questoes_cores_js = "[" + ", ".join(
+        f'"{_faixa_saeb(q["pct_acerto"]/10)["hex"]}"' for q in questoes_stats
+    ) + "]"
+    chart_questoes_html = f"""
+        <h2 style="margin-top:32px;">📈 % de acerto por questão</h2>
+        <div class="card" style="padding:16px;">
+            <canvas id="chartQuestoes" style="max-height:320px;"></canvas>
+        </div>
+    """
+
+    # ═══ ALERTAS automáticos ═══
+    alertas_html = ""
+    if alunos_alerta or alunos_destaque:
+        alerta_list = ""
+        if alunos_alerta:
+            items = "".join(
+                f'<li style="padding:6px 0; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border);">'
+                f'<span><strong>{a["nome"]}</strong>{" · Nº " + str(a["numero"]) if a["numero"] else ""}</span>'
+                f'<span style="font-weight:700; color:var(--red);">{a["nota_10"]:.1f}/10</span>'
+                f'</li>'
+                for a in alunos_alerta
+            )
+            alerta_list = f"""
+                <div class="card" style="background:var(--red-bg); border-left:4px solid var(--red); padding:14px 16px;">
+                    <div style="font-size:13px; font-weight:700; color:var(--red); margin-bottom:8px;">🔴 Atenção necessária — {len(alunos_alerta)} aluno(s) na faixa Insuficiente</div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">Recomende reforço, retomada de conteúdo ou acompanhamento individual.</div>
+                    <ul style="list-style:none; padding:0; margin:0;">{items}</ul>
+                </div>
+            """
+        destaque_list = ""
+        if alunos_destaque:
+            items = "".join(
+                f'<li style="padding:6px 0; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border);">'
+                f'<span><strong>{a["nome"]}</strong>{" · Nº " + str(a["numero"]) if a["numero"] else ""}</span>'
+                f'<span style="font-weight:700; color:var(--green);">{a["nota_10"]:.1f}/10</span>'
+                f'</li>'
+                for a in alunos_destaque
+            )
+            destaque_list = f"""
+                <div class="card" style="background:var(--green-bg); border-left:4px solid var(--green); padding:14px 16px;">
+                    <div style="font-size:13px; font-weight:700; color:var(--green); margin-bottom:8px;">🟢 Destaque positivo — {len(alunos_destaque)} aluno(s) na faixa Avançado</div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">Vale parabenizar e considerar atividades de aprofundamento.</div>
+                    <ul style="list-style:none; padding:0; margin:0;">{items}</ul>
+                </div>
+            """
+        alertas_html = f"""
+            <h2 style="margin-top:32px;">🎯 Alertas automáticos</h2>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px;">
+                {alerta_list or '<div></div>'}
+                {destaque_list or '<div></div>'}
+            </div>
+        """
+
+    # ═══ Script Chart.js (renderiza os 2 gráficos) ═══
+    dist_data_js = "[" + ", ".join(str(dist_faixas[f["nome"]]) for f in FAIXAS_SAEB) + "]"
+    dist_cores_js = "[" + ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB) + "]"
+    dist_labels_js = "[" + ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB) + "]"
+
+    charts_script = f"""
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" onerror="window._chartFail=true"></script>
+    <script>
+    (function() {{
+      // Fallback visual se Chart.js não carregou (ex: rede sem acesso ao CDN)
+      if (typeof Chart === 'undefined') {{
+        document.querySelectorAll('canvas[id^=chart]').forEach(function(c) {{
+          var msg = document.createElement('div');
+          msg.style.cssText = 'padding:20px; text-align:center; color:var(--text-muted); font-size:12px; font-style:italic;';
+          msg.innerHTML = '📡 Gráfico indisponível (Chart.js não carregou — verifique conexão).';
+          c.parentNode.replaceChild(msg, c);
+        }});
+        return;
+      }}
+
+      // Cores que se adaptam ao tema (texto e grid)
+      function temaCores() {{
+        var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+        return {{
+          texto: dark ? '#e2eaf5' : '#1e293b',
+          grid: dark ? '#1e3050' : '#e2e8f0',
+          tooltipBg: dark ? '#172341' : '#ffffff',
+          tooltipBorder: dark ? '#1e3050' : '#e2e8f0',
+        }};
+      }}
+
+      var cores = temaCores();
+
+      // ━━ Gráfico 1: distribuição nas 4 faixas ━━
+      var elDist = document.getElementById('chartDistFaixas');
+      if (elDist) {{
+        new Chart(elDist, {{
+          type: 'bar',
+          data: {{
+            labels: {dist_labels_js},
+            datasets: [{{
+              label: 'Alunos',
+              data: {dist_data_js},
+              backgroundColor: {dist_cores_js},
+              borderRadius: 8,
+              borderSkipped: false,
+            }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+              legend: {{ display: false }},
+              tooltip: {{
+                backgroundColor: cores.tooltipBg,
+                titleColor: cores.texto,
+                bodyColor: cores.texto,
+                borderColor: cores.tooltipBorder,
+                borderWidth: 1,
+              }}
+            }},
+            scales: {{
+              x: {{ ticks: {{ color: cores.texto, font: {{ size: 12, weight: 600 }} }}, grid: {{ display: false }} }},
+              y: {{ beginAtZero: true, ticks: {{ color: cores.texto, precision: 0 }}, grid: {{ color: cores.grid }} }}
+            }}
+          }}
+        }});
+      }}
+
+      // ━━ Gráfico 2: % de acerto por questão ━━
+      var elQ = document.getElementById('chartQuestoes');
+      if (elQ) {{
+        new Chart(elQ, {{
+          type: 'bar',
+          data: {{
+            labels: {questoes_labels_js},
+            datasets: [{{
+              label: '% de acerto',
+              data: {questoes_valores_js},
+              backgroundColor: {questoes_cores_js},
+              borderRadius: 6,
+              borderSkipped: false,
+            }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+              legend: {{ display: false }},
+              tooltip: {{
+                backgroundColor: cores.tooltipBg,
+                titleColor: cores.texto,
+                bodyColor: cores.texto,
+                borderColor: cores.tooltipBorder,
+                borderWidth: 1,
+                callbacks: {{
+                  label: function(ctx) {{ return ctx.parsed.y.toFixed(1) + '% de acerto'; }}
+                }}
+              }}
+            }},
+            scales: {{
+              x: {{ ticks: {{ color: cores.texto }}, grid: {{ display: false }} }},
+              y: {{ beginAtZero: true, max: 100, ticks: {{ color: cores.texto, callback: v => v + '%' }}, grid: {{ color: cores.grid }} }}
+            }}
+          }}
+        }});
+      }}
+    }})();
+    </script>
+    """
+
+    metrics_html = f"""
+        <div class="metric-grid">
+            <div class="metric"><div class="metric-label">Alunos com entrega</div><div class="metric-value">{total_entregas}</div></div>
+            <div class="metric"><div class="metric-label">Média da turma</div><div class="metric-value">{media_acertos:.1f}<small style="font-size:14px; color:var(--text-muted);">/{total_questoes}</small></div><div class="card-meta">{media_pct:.1f}%</div></div>
+            <div class="metric"><div class="metric-label">Maior nota</div><div class="metric-value">{maior_nota}/{total_questoes}</div></div>
+            <div class="metric"><div class="metric-label">Menor nota</div><div class="metric-value">{menor_nota}/{total_questoes}</div></div>
+        </div>
+    """
+
+    destaques_html = ""
+    if mais_dificeis:
+        items_dif = "".join(
+            f'<li style="padding:6px 0;">Q{q["numero"]} ({q["disciplina_nome"]}) — {_barra_html(q["pct_acerto"], 120)}</li>'
+            for q in mais_dificeis
+        )
+        items_fac = "".join(
+            f'<li style="padding:6px 0;">Q{q["numero"]} ({q["disciplina_nome"]}) — {_barra_html(q["pct_acerto"], 120)}</li>'
+            for q in mais_faceis
+        )
+        destaques_html = f"""
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin:24px 0;">
+            <div class="card">
+                <div class="card-title" style="color:var(--red);">Questões mais difíceis</div>
+                <ul style="list-style:none; padding:0; margin:12px 0 0;">{items_dif}</ul>
+            </div>
+            <div class="card">
+                <div class="card-title" style="color:var(--green);">Questões mais fáceis</div>
+                <ul style="list-style:none; padding:0; margin:12px 0 0;">{items_fac}</ul>
+            </div>
+        </div>
+        """
+
+    questoes_detalhe_html = ""
+    for q in questoes_stats:
+        dist_html = ""
+        for letra in ["A", "B", "C", "D"]:
+            count = q["distribuicao"][letra]
+            pct_letra = (count / q["total"] * 100) if q["total"] > 0 else 0
+            destaque = ""
+            if letra == q["correta_letra"]:
+                destaque = ' style="background:var(--green-bg); color:var(--green); font-weight:600; padding:2px 6px; border-radius:4px;"'
+            dist_html += f'<span{destaque}>{letra}: {count} ({pct_letra:.0f}%)</span>'
+            if letra != "D":
+                dist_html += '<span style="color:var(--text-subtle); margin:0 6px;">·</span>'
+        em_branco = q["em_branco"]
+        em_branco_html = f' · <span style="color:var(--text-muted);">Em branco: {em_branco}</span>' if em_branco > 0 else ""
+        questoes_detalhe_html += f"""
+        <div class="card">
+            <div class="card-meta">Questão {q["numero"]} · {q["disciplina_nome"]}</div>
+            <div style="margin:8px 0 12px;">{q["enunciado_preview"]}</div>
+            {_barra_html(q["pct_acerto"], 300)}
+            <div style="margin-top:12px; font-size:13px;">{dist_html}{em_branco_html}</div>
+            <div style="margin-top:8px;"><a href="/aplicacoes/{aplicacao_id}" style="font-size:12px; color:var(--text-muted);">Detalhes da aplicação →</a></div>
+        </div>
+        """
+
+    habilidades_detalhe_html = ""
+    if habilidades_stats:
+        habs_html = ""
+        for h in habilidades_stats:
+            habs_html += f"""
+            <div class="card">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                    <span class="badge">{h["codigo"]}</span>
+                    <small style="color:var(--text-muted);">{h["n_questoes"]} questão{"" if h["n_questoes"] == 1 else "ões"} na prova</small>
+                </div>
+                <div style="font-size:13px; margin-bottom:8px; color:var(--text-muted);">{h["descricao"]}</div>
+                {_barra_html(h["pct_acerto"], 300)}
+                <div style="margin-top:6px; font-size:12px; color:var(--text-muted);">{h["acertos"]} acertos em {h["total"]} oportunidades</div>
+            </div>
+            """
+        habilidades_detalhe_html = f'<h2>Desempenho por habilidade BNCC</h2>{habs_html}'
+    else:
+        habilidades_detalhe_html = '<h2>Habilidades BNCC</h2><div class="empty">Nenhuma das questões desta prova tem habilidades BNCC cadastradas. Vincule códigos BNCC nas questões para ver esta análise.</div>'
+
+    ranking_html = ""
+    for pos, r in enumerate(ranking, start=1):
+        num = r["numero"] if r["numero"] else "—"
+        f = r["faixa"]
+        # Recupera total objetivo do aluno (vem de notas_alunos)
+        n_dict = next((x for x in notas_alunos if x["aluno_id"] == r["aluno_id"]), {})
+        total_obj_aluno = n_dict.get("total_obj", 0)
+        acertos_obj_aluno = n_dict.get("acertos_obj", 0)
+        ranking_html += f"""
+        <div class="student-row">
+            <div class="numero">{pos}º</div>
+            <div>
+                <a href="/aplicacoes/{aplicacao_id}/aluno/{r["aluno_id"]}" style="color:inherit; text-decoration:none; font-weight:600;">{r["nome"]}</a>
+                <div style="font-size:12px; color:var(--text-muted);">Nº {num} · <span style="color:{f['cor']}; font-weight:600;">{f['emoji']} {f['nome']}</span></div>
+            </div>
+            <div style="text-align:right;">
+                <div style="font-size:15px; font-weight:700; color:{f['cor']};">{r["nota_10"]:.1f}/10</div>
+                <div style="font-size:11px; color:var(--text-muted);">{acertos_obj_aluno}/{total_obj_aluno} acertos</div>
+            </div>
+        </div>
+        """
+
+    content = f"""
+        <div class="page-header">
+            <h1>📈 Análise pedagógica</h1>
+            <p class="subtitle">{apl["prova_titulo"]} · {apl["turma_nome"]} ({apl["ano_letivo"]})</p>
+            <div class="page-actions">
+                <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar para a aplicação</a>
+                <a href="/aplicacoes/{aplicacao_id}/exportar" class="btn">📊 Exportar Excel</a>
+            </div>
+        </div>
+
+        {saeb_kpi_html}
+        {metrics_html}
+
+        {distribuicao_html}
+        {alertas_html}
+
+        {chart_questoes_html}
+        {destaques_html}
+
+        <h2 style="margin-top:32px;">🏆 Ranking de alunos</h2>
+        {ranking_html}
+
+        <h2 style="margin-top:32px;">Desempenho detalhado por questão</h2>
+        {questoes_detalhe_html}
+
+        <div style="margin-top:32px;"></div>
+        {habilidades_detalhe_html}
+
+        {charts_script}
+    """
+    return render_page("Análise pedagógica", content, active="aplicacoes", head_extra=MATHJAX)
+
+
+@app.get("/provas/{prova_id}/comparativo", response_class=HTMLResponse)
+def comparativo_prova(prova_id: int):
+    conn = get_db()
+    prova = conn.execute("SELECT * FROM provas WHERE id = ?", (prova_id,)).fetchone()
+    if not prova:
+        conn.close()
+        return RedirectResponse("/provas", status_code=303)
+
+    aplicacoes = conn.execute("""
+        SELECT a.id, a.titulo, a.modo, a.criada_em, t.nome AS turma_nome, t.ano_letivo
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+        WHERE a.prova_id = ?
+        ORDER BY a.criada_em DESC
+    """, (prova_id,)).fetchall()
+
+    if not aplicacoes:
+        conn.close()
+        content = f"""
+            <div class="page-header">
+                <h1>Comparativo de aplicações</h1>
+                <p class="subtitle">{prova["titulo"]}</p>
+            </div>
+            <div class="empty">
+                <p>Esta prova ainda não foi aplicada em nenhuma turma.</p>
+                <a href="/aplicacoes/nova" class="btn btn-primary">Criar aplicação</a>
+            </div>
+        """
+        return render_page("Comparativo", content, active="provas")
+
+    questoes = conn.execute("""
+        SELECT q.id, q.enunciado, d.nome AS disciplina_nome
+        FROM prova_questoes pq
+        JOIN questoes q ON q.id = pq.questao_id
+        JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE pq.prova_id = ?
+        ORDER BY pq.ordem
+    """, (prova_id,)).fetchall()
+    total_questoes = len(questoes)
+
+    habilidades = conn.execute("""
+        SELECT DISTINCT h.id, h.codigo
+        FROM habilidades_bncc h
+        JOIN questao_habilidades qh ON qh.habilidade_id = h.id
+        JOIN prova_questoes pq ON pq.questao_id = qh.questao_id
+        WHERE pq.prova_id = ?
+        ORDER BY h.codigo
+    """, (prova_id,)).fetchall()
+
+    aplicacoes_dados = []
+    for apl in aplicacoes:
+        entregas = conn.execute("SELECT aluno_id FROM entregas WHERE aplicacao_id = ?", (apl["id"],)).fetchall()
+        alunos_entregues = [e["aluno_id"] for e in entregas]
+        n_entregas = len(alunos_entregues)
+        total_alunos = conn.execute("SELECT COUNT(*) AS c FROM alunos a JOIN aplicacoes ap ON ap.turma_id = a.turma_id WHERE ap.id = ?", (apl["id"],)).fetchone()["c"]
+
+        if n_entregas > 0:
+            notas = []
+            for aluno_id in alunos_entregues:
+                score, _ = _calcular_nota(conn, apl["id"], aluno_id)
+                notas.append(score)
+            media = sum(notas) / n_entregas
+            media_pct = (media / total_questoes * 100) if total_questoes > 0 else 0
+        else:
+            media = 0
+            media_pct = 0
+
+        questoes_stats = {}
+        for q in questoes:
+            s = _estatisticas_questao(conn, apl["id"], q["id"], alunos_entregues)
+            questoes_stats[q["id"]] = s
+
+        habilidades_stats = {}
+        for h in habilidades:
+            qs_hab = conn.execute("""
+                SELECT q.id FROM questao_habilidades qh
+                JOIN questoes q ON q.id = qh.questao_id
+                JOIN prova_questoes pq ON pq.questao_id = q.id
+                WHERE qh.habilidade_id = ? AND pq.prova_id = ?
+            """, (h["id"], prova_id)).fetchall()
+            ac = 0
+            op = 0
+            for q in qs_hab:
+                s = _estatisticas_questao(conn, apl["id"], q["id"], alunos_entregues)
+                ac += s["acertos"]
+                op += s["total"]
+            habilidades_stats[h["id"]] = (ac / op * 100) if op > 0 else 0
+
+        aplicacoes_dados.append({
+            "id": apl["id"],
+            "titulo": apl["titulo"] or f'{apl["turma_nome"]} ({apl["ano_letivo"]})',
+            "turma_nome": apl["turma_nome"],
+            "ano_letivo": apl["ano_letivo"],
+            "modo": apl["modo"],
+            "n_entregas": n_entregas,
+            "total_alunos": total_alunos,
+            "media": media,
+            "media_pct": media_pct,
+            "questoes_stats": questoes_stats,
+            "habilidades_stats": habilidades_stats,
+        })
+
+    conn.close()
+
+    cards_html = ""
+    for ad in aplicacoes_dados:
+        pct_entrega = (ad["n_entregas"] / ad["total_alunos"] * 100) if ad["total_alunos"] > 0 else 0
+        cards_html += f"""
+        <div class="card">
+            <div class="card-title">
+                <a href="/aplicacoes/{ad["id"]}" style="color:inherit; text-decoration:none;">{ad["titulo"]}</a>
+            </div>
+            <div class="card-meta">{ad["turma_nome"]} · {ad["ano_letivo"]} · Modo {ad["modo"]}</div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; margin-top:12px;">
+                <div>
+                    <div class="metric-label">Entregas</div>
+                    <div style="font-size:18px; font-weight:600;">{ad["n_entregas"]}/{ad["total_alunos"]}</div>
+                    <div class="card-meta">{pct_entrega:.0f}%</div>
+                </div>
+                <div>
+                    <div class="metric-label">Média</div>
+                    <div style="font-size:18px; font-weight:600;">{ad["media"]:.1f}<small style="color:var(--text-muted); font-size:12px;">/{total_questoes}</small></div>
+                    <div class="card-meta">{ad["media_pct"]:.0f}%</div>
+                </div>
+                <div style="display:flex; align-items:flex-end; justify-content:flex-end;">
+                    <a href="/aplicacoes/{ad["id"]}/analise" class="btn" style="font-size:12px; padding:4px 10px;">Análise detalhada</a>
+                </div>
+            </div>
+        </div>
+        """
+
+    questoes_tabela_html = ""
+    if total_questoes > 0:
+        col_aplicacoes = "".join(f'<th style="text-align:center; padding:8px; font-size:12px; min-width:110px;">{ad["turma_nome"]}</th>' for ad in aplicacoes_dados)
+        rows = ""
+        for idx, q in enumerate(questoes, start=1):
+            preview = _preview_enunciado(q["enunciado"], max_chars=60)
+            if len(q["enunciado"]) > 60:
+                preview += "..."
+            cells = ""
+            for ad in aplicacoes_dados:
+                s = ad["questoes_stats"].get(q["id"], {"pct_acerto": 0, "total": 0})
+                if s["total"] == 0:
+                    cells += '<td style="text-align:center; padding:8px; color:var(--text-subtle);">—</td>'
+                else:
+                    cor = _cor_por_pct(s["pct_acerto"])
+                    cells += f'<td style="text-align:center; padding:8px; color:{cor}; font-weight:600;">{s["pct_acerto"]:.0f}%</td>'
+            rows += f"""
+            <tr style="border-top:1px solid var(--border);">
+                <td style="padding:8px; font-size:13px;"><strong>Q{idx}</strong> <span style="color:var(--text-muted);">({q["disciplina_nome"]})</span><br><small style="color:var(--text-subtle);">{preview}</small></td>
+                {cells}
+            </tr>
+            """
+        questoes_tabela_html = f"""
+        <h2 style="margin-top:32px;">Acertos por questão</h2>
+        <p class="muted-line">Percentual de alunos que acertaram cada questão, em cada turma. Verde ≥ 70%, amarelo 40-70%, vermelho &lt; 40%.</p>
+        <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; margin-top:12px;">
+            <thead>
+                <tr style="background:var(--bg-subtle);">
+                    <th style="text-align:left; padding:8px;">Questão</th>
+                    {col_aplicacoes}
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>
+        </div>
+        """
+
+    habilidades_tabela_html = ""
+    if habilidades:
+        col_aplicacoes = "".join(f'<th style="text-align:center; padding:8px; font-size:12px; min-width:110px;">{ad["turma_nome"]}</th>' for ad in aplicacoes_dados)
+        rows = ""
+        for h in habilidades:
+            cells = ""
+            for ad in aplicacoes_dados:
+                pct = ad["habilidades_stats"].get(h["id"], 0)
+                if ad["n_entregas"] == 0:
+                    cells += '<td style="text-align:center; padding:8px; color:var(--text-subtle);">—</td>'
+                else:
+                    cor = _cor_por_pct(pct)
+                    cells += f'<td style="text-align:center; padding:8px; color:{cor}; font-weight:600;">{pct:.0f}%</td>'
+            rows += f"""
+            <tr style="border-top:1px solid var(--border);">
+                <td style="padding:8px;"><span class="badge">{h["codigo"]}</span></td>
+                {cells}
+            </tr>
+            """
+        habilidades_tabela_html = f"""
+        <h2 style="margin-top:32px;">Acertos por habilidade BNCC</h2>
+        <p class="muted-line">Percentual médio de acertos nas questões vinculadas a cada habilidade.</p>
+        <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; margin-top:12px;">
+            <thead>
+                <tr style="background:var(--bg-subtle);">
+                    <th style="text-align:left; padding:8px;">Habilidade</th>
+                    {col_aplicacoes}
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>
+        </div>
+        """
+
+    titulo_pagina = "Comparativo entre turmas" if len(aplicacoes_dados) >= 2 else "Análises da prova"
+    subtitulo = f'{prova["titulo"]} · {len(aplicacoes_dados)} aplicação{"" if len(aplicacoes_dados) == 1 else "ões"}'
+
+    content = f"""
+        <div class="page-header">
+            <h1>{titulo_pagina}</h1>
+            <p class="subtitle">{subtitulo}</p>
+            <div class="page-actions">
+                <a href="/provas/{prova_id}" class="btn">← Voltar para a prova</a>
+            </div>
+        </div>
+
+        <h2>Aplicações desta prova</h2>
+        {cards_html}
+
+        {questoes_tabela_html}
+        {habilidades_tabela_html}
+    """
+    return render_page(titulo_pagina, content, active="provas")
+
+
+# ==========================================
+#  FASE C1: PDF DA PROVA E CARTÃO RESPOSTA
+# ==========================================
+
+@app.get("/provas/{prova_id}/imprimir", response_class=HTMLResponse)
+def imprimir_prova(prova_id: int):
+    """Versão da prova otimizada pra impressão (sem gabarito visível)."""
+    conn = get_db()
+    prova = conn.execute("SELECT * FROM provas WHERE id = ?", (prova_id,)).fetchone()
+    if not prova:
+        conn.close()
+        return RedirectResponse("/provas", status_code=303)
+
+    questoes = conn.execute("""
+        SELECT q.id, q.enunciado, q.tipo, d.nome AS disciplina_nome
+        FROM prova_questoes pq
+        JOIN questoes q ON q.id = pq.questao_id
+        JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE pq.prova_id = ? ORDER BY pq.ordem
+    """, (prova_id,)).fetchall()
+
+    questoes_html = ""
+    for idx, q in enumerate(questoes, start=1):
+        tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+        textos = conn.execute("SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+        imagens = conn.execute("SELECT caminho, legenda, fonte FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+
+        textos_html = ""
+        for t in textos:
+            fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
+            textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
+
+        imagens_html = ""
+        for img in imagens:
+            legenda_html = f'<figcaption>{img["legenda"]}</figcaption>' if img["legenda"] else ""
+            fonte_html = f'<figcaption><small>Fonte: {img["fonte"]}</small></figcaption>' if img["fonte"] else ""
+            imagens_html += f'<figure><img src="/{img["caminho"]}" alt="">{legenda_html}{fonte_html}</figure>'
+
+        # Conteúdo específico do tipo
+        if tipo_q == "multipla_escolha":
+            alts = conn.execute("SELECT letra, texto FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
+            corpo_resposta = "<ul class=\"q-alts\">" + "".join(f'<li><strong>{a["letra"]})</strong> {a["texto"]}</li>' for a in alts) + "</ul>"
+        elif tipo_q == "discursiva":
+            # Linhas em branco pra resposta manuscrita
+            linhas = "".join('<div style="border-bottom: 1px solid #999; height: 22px; margin-bottom: 4px;"></div>' for _ in range(6))
+            corpo_resposta = f'<div style="margin-top:10px;"><strong style="font-size:11px; color:#555;">Resposta:</strong>{linhas}</div>'
+        elif tipo_q == "vf":
+            afirms = conn.execute("SELECT ordem, texto FROM vf_afirmacoes WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+            linhas = ""
+            for af in afirms:
+                num_sub = f"{idx}.{af['ordem']+1}"
+                linhas += (
+                    f'<div style="display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center; margin-bottom:6px; padding:4px 0; border-bottom:1px dotted #ccc;">'
+                    f'<strong style="min-width:32px;">{num_sub}</strong>'
+                    f'<span>{af["texto"]}</span>'
+                    f'<span style="font-size:11px; color:#555; white-space:nowrap;">( ) V&nbsp;&nbsp;( ) F</span>'
+                    f'</div>'
+                )
+            corpo_resposta = f'<div style="margin-top:8px;"><strong style="font-size:11px; color:#555;">Julgue cada afirmação:</strong>{linhas}</div>'
+        elif tipo_q == "associacao":
+            itens_a = conn.execute("SELECT ordem, texto FROM assoc_itens_a WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
+            itens_b = conn.execute("SELECT letra, texto FROM assoc_itens_b WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
+            ca = "".join(f'<li><strong>{a["ordem"]+1}.</strong> {a["texto"]}</li>' for a in itens_a)
+            cb = "".join(f'<li><strong>({b["letra"]})</strong> {b["texto"]}</li>' for b in itens_b)
+            # Linhas pra o aluno escrever as respostas (1→ , 2→ , ...)
+            respostas = " ".join(
+                f'<span style="border-bottom:1px solid #555; display:inline-block; min-width:30px;">&nbsp;</span> ({a["ordem"]+1})'
+                for a in itens_a
+            )
+            corpo_resposta = (
+                f'<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-top:8px;">'
+                f'<div><strong style="font-size:11px; color:#555;">Coluna A</strong><ul style="margin:6px 0 0 20px;">{ca}</ul></div>'
+                f'<div><strong style="font-size:11px; color:#555;">Coluna B</strong><ul style="margin:6px 0 0 20px;">{cb}</ul></div>'
+                f'</div>'
+                f'<div style="margin-top:10px; padding:6px 10px; background:#f9f9f9; border:1px dashed #aaa; border-radius:4px; font-size:12px;">'
+                f'<strong>Resposta — associe cada item da A à letra da B:</strong> {respostas}</div>'
+            )
+        else:
+            corpo_resposta = ""
+
+        bncc_pref = _bncc_prefix(conn, q["id"])
+        questoes_html += f"""
+        <div class="q-print">
+            <div class="q-head">Questão {idx} · {q['disciplina_nome']}</div>
+            {textos_html}{imagens_html}
+            <div class="q-enunciado">{bncc_pref}{q['enunciado']}</div>
+            {corpo_resposta}
+        </div>
+        """
+
+    conn.close()
+
+    desc_html = f'<p style="margin:6px 0 0; color:#555;">{prova["descricao"]}</p>' if prova["descricao"] else ""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <title>{prova["titulo"]} — Versão impressa</title>
+    {INTER_FONT}
+    {MATHJAX}
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: 'Sora', -apple-system, sans-serif;
+            font-size: 12px;
+            margin: 0 auto;
+            padding: 24px;
+            background: white;
+            color: black;
+            max-width: 21cm;
+        }}
+        .actions {{ margin-bottom: 24px; display: flex; gap: 8px; }}
+        .btn {{ display: inline-block; padding: 8px 16px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px; font-size: 13px; border: none; cursor: pointer; font-family: inherit; font-weight: 500; }}
+        .btn-secondary {{ background: #6b7280; }}
+        .inst-header {{ display: flex; gap: 14px; align-items: center; padding-bottom: 12px; border-bottom: 1px solid #888; margin-bottom: 20px; }}
+        .inst-header img {{ width: 56px; height: auto; flex-shrink: 0; }}
+        .inst-header .inst-text {{ font-size: 10px; color: #333; line-height: 1.5; }}
+        .inst-header .inst-text .escola {{ font-weight: 700; font-size: 12px; color: #000; }}
+        .header {{ border-bottom: 2px solid #000; padding-bottom: 12px; margin-bottom: 18px; }}
+        .header h1 {{ margin: 0; font-size: 18px; }}
+        .student-info {{ display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; margin-top: 14px; font-size: 10px; color:#555; }}
+        .student-info > div {{ border-bottom: 1px solid #555; padding-bottom: 6px; min-height: 24px; }}
+        .q-print {{ margin-bottom: 18px; page-break-inside: avoid; }}
+        .q-head {{ font-size: 10px; color: #555; margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }}
+        blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 8px 0; color: #333; font-style: italic; background: #fafafa; font-size: 11px; }}
+        blockquote footer {{ font-size: 9px; margin-top: 4px; font-style: normal; }}
+        figure {{ margin: 8px 0; }}
+        figure img {{ max-width: 100%; max-height: 220px; }}
+        figcaption {{ font-size: 9px; color: #666; margin-top: 2px; }}
+        .q-enunciado {{ margin: 6px 0 8px; line-height: 1.5; }}
+        .q-alts {{ list-style: none; padding-left: 8px; margin: 6px 0; }}
+        .q-alts li {{ padding: 3px 0; line-height: 1.5; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 11px; }}
+        th, td {{ border: 1px solid #999; padding: 5px 8px; text-align: left; }}
+        th {{ background: #f0f0f0; font-weight: 600; }}
+        @media print {{
+            @page {{ size: A4; margin: 1.5cm; }}
+            body {{ padding: 0; max-width: 100%; }}
+            .no-print {{ display: none !important; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="actions no-print">
+        <button onclick="window.print()" class="btn">🖨️ Imprimir / Salvar PDF</button>
+        <a href="/provas/{prova_id}" class="btn btn-secondary">← Voltar</a>
+    </div>
+    <div class="inst-header">
+        <img src="/static/imagens/brasao_vr.png" alt="Brasão Volta Redonda">
+        <div class="inst-text">
+            <div>Estado do Rio de Janeiro</div>
+            <div>Prefeitura de Volta Redonda</div>
+            <div>Secretaria Municipal de Educação</div>
+            <div class="escola">E.M. WALMIR DE FREITAS MONTEIRO</div>
+        </div>
+    </div>
+    <div class="header">
+        <h1>{prova["titulo"]}</h1>
+        {desc_html}
+        <div class="student-info">
+            <div><small>Nome:</small></div>
+            <div><small>Turma:</small></div>
+            <div><small>Data:</small></div>
+        </div>
+    </div>
+    {questoes_html}
+</body>
+</html>""")
+
+
+def _calcular_layout_cartao(questoes_info):
+    """Calcula coordenadas das bolhas pro cartão de respostas.
+    Recebe lista de dicts: [{id, num, tipo, vf_count, assoc_a_count, assoc_b_count}, ...]
+    Retorna lista de blocos: [{num, tipo, top_y_mm, height_mm, bubbles: [{label, x_mm, y_mm}], header: str}]
+    Coordenadas em mm. Origem (0,0) é o canto superior esquerdo da folha A4 (210x297mm).
+    Usado tanto pelo gerador de PDF quanto pelo leitor OMR — garantia de sincronia."""
+    # Dimensões A4
+    PAGE_W = 210
+    PAGE_H = 297
+    MARGEM = 10
+    MARKER = 8
+
+    # Área útil: abaixo do cabeçalho (~55mm pra título/aluno/QR)
+    AREA_TOP_Y = 75      # começa abaixo do header
+    AREA_BOTTOM_Y = PAGE_H - MARGEM - MARKER - 3   # acima dos marcadores inferiores
+    BLOCK_W_MM = 80
+    BLOCK_X_INIT = 25    # x do início da coluna 1
+    NUM_OFFSET_X = 18    # onde fica o número
+    FIRST_BUBBLE_X = 28  # onde começa a primeira bolha
+
+    ROW_H = 8           # altura padrão de linha
+    BUBBLE_SPACING = 9  # distância entre bolhas
+    HEADER_H = 6        # cabeçalho de cada bloco (tipo da questão)
+
+    blocos = []
+    cur_y = AREA_TOP_Y
+    cur_col = 0
+    cur_x = BLOCK_X_INIT + cur_col * BLOCK_W_MM
+
+    for info in questoes_info:
+        tipo = info["tipo"]
+        if tipo == "discursiva":
+            continue  # discursiva não vai pro cartão (correção manual)
+
+        # Calcular altura do bloco
+        if tipo == "multipla_escolha":
+            n_linhas = 1
+        elif tipo == "vf":
+            n_linhas = info.get("vf_count", 0)
+            if n_linhas == 0:
+                continue
+        elif tipo == "associacao":
+            n_linhas = info.get("assoc_a_count", 0)
+            if n_linhas == 0:
+                continue
+        else:
+            continue
+
+        bloco_h = HEADER_H + n_linhas * ROW_H + 2  # +2 pequena folga
+
+        # Cabe na coluna atual?
+        if cur_y + bloco_h > AREA_BOTTOM_Y:
+            cur_col += 1
+            if cur_col >= 2:
+                # extrapolou 2 colunas — quebrar pra próxima página
+                # (por enquanto não suportamos; aviso silencioso e cortamos)
+                break
+            cur_x = BLOCK_X_INIT + cur_col * BLOCK_W_MM
+            cur_y = AREA_TOP_Y
+
+        bubbles = []
+        labels_header = ""
+
+        if tipo == "multipla_escolha":
+            labels_header = "A   B   C   D"
+            for i, letra in enumerate(["A", "B", "C", "D"]):
+                bx = cur_x + FIRST_BUBBLE_X + i * BUBBLE_SPACING
+                by = cur_y + HEADER_H + 4
+                bubbles.append({"label": letra, "x_mm": bx, "y_mm": by, "afirm": None, "item": None})
+
+        elif tipo == "vf":
+            labels_header = "V   F"
+            for k in range(n_linhas):
+                by = cur_y + HEADER_H + 4 + k * ROW_H
+                for i, vf in enumerate(["V", "F"]):
+                    bx = cur_x + FIRST_BUBBLE_X + i * BUBBLE_SPACING
+                    bubbles.append({"label": vf, "x_mm": bx, "y_mm": by, "afirm": k, "item": None})
+
+        elif tipo == "associacao":
+            n_letras = info.get("assoc_b_count", 0)
+            letras = [chr(97 + i) for i in range(n_letras)]
+            labels_header = "   ".join(letras)
+            for k in range(n_linhas):
+                by = cur_y + HEADER_H + 4 + k * ROW_H
+                for i, letra in enumerate(letras):
+                    bx = cur_x + FIRST_BUBBLE_X + i * BUBBLE_SPACING
+                    bubbles.append({"label": letra, "x_mm": bx, "y_mm": by, "afirm": None, "item": k})
+
+        blocos.append({
+            "num": info["num"],
+            "questao_id": info["id"],
+            "tipo": tipo,
+            "top_y_mm": cur_y,
+            "x_mm": cur_x,
+            "height_mm": bloco_h,
+            "header": labels_header,
+            "bubbles": bubbles,
+            "n_linhas": n_linhas,
+        })
+
+        cur_y += bloco_h + 2  # +2 espaço entre blocos
+
+    return blocos
+
+
+def _coletar_info_questoes_cartao(conn, prova_id):
+    """Coleta info necessária pra layout do cartão a partir da prova."""
+    questoes = conn.execute("""
+        SELECT q.id, q.tipo
+        FROM prova_questoes pq
+        JOIN questoes q ON q.id = pq.questao_id
+        WHERE pq.prova_id = ?
+        ORDER BY pq.ordem
+    """, (prova_id,)).fetchall()
+    infos = []
+    for idx, q in enumerate(questoes, start=1):
+        tipo = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
+        info = {"id": q["id"], "num": idx, "tipo": tipo, "vf_count": 0, "assoc_a_count": 0, "assoc_b_count": 0}
+        if tipo == "vf":
+            info["vf_count"] = conn.execute("SELECT COUNT(*) AS c FROM vf_afirmacoes WHERE questao_id = ?", (q["id"],)).fetchone()["c"]
+        elif tipo == "associacao":
+            info["assoc_a_count"] = conn.execute("SELECT COUNT(*) AS c FROM assoc_itens_a WHERE questao_id = ?", (q["id"],)).fetchone()["c"]
+            info["assoc_b_count"] = conn.execute("SELECT COUNT(*) AS c FROM assoc_itens_b WHERE questao_id = ?", (q["id"],)).fetchone()["c"]
+        infos.append(info)
+    return infos
+
+
+def _gerar_cartao_resposta_pdf(apl, alunos, questoes_info):
+    """Gera PDF com cartões resposta padronizados (um por aluno) para OMR posterior.
+    questoes_info: lista de dicts retornada por _coletar_info_questoes_cartao()."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    blocos = _calcular_layout_cartao(questoes_info)
+    n_questoes_no_cartao = len(blocos)
+    bubble_radius = 2.2 * mm
+
+    for aluno in alunos:
+        # 4 marcadores de canto pra OMR (quadrados pretos)
+        marker_size = 8 * mm
+        margin = 10 * mm
+        c.setFillColorRGB(0, 0, 0)
+        c.rect(margin, height - margin - marker_size, marker_size, marker_size, fill=1, stroke=0)
+        c.rect(width - margin - marker_size, height - margin - marker_size, marker_size, marker_size, fill=1, stroke=0)
+        c.rect(margin, margin, marker_size, marker_size, fill=1, stroke=0)
+        c.rect(width - margin - marker_size, margin, marker_size, marker_size, fill=1, stroke=0)
+
+        # Cabeçalho de texto
+        c.setFont("Helvetica-Bold", 14)
+        titulo_str = apl["prova_titulo"][:60]
+        c.drawString(30*mm, height - 25*mm, titulo_str)
+        c.setFont("Helvetica", 10)
+        c.drawString(30*mm, height - 32*mm, f"Turma: {apl['turma_nome']} ({apl['ano_letivo']})")
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(30*mm, height - 40*mm, f"Aluno: {aluno['nome']}")
+        c.setFont("Helvetica", 9)
+        num_str = f"Nº {aluno['numero']} · " if aluno["numero"] else ""
+        c.drawString(30*mm, height - 46*mm, f"{num_str}Código: {aluno['codigo_unico']}")
+
+        # QR Code: codifica aluno_id e aplicacao_id
+        qr_data = f"CR:{aluno['id']}:{apl['id']}"
+        qr_obj = qrcode.QRCode(box_size=10, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        qr_obj.add_data(qr_data)
+        qr_obj.make(fit=True)
+        qr_img = qr_obj.make_image(fill_color="black", back_color="white")
+        qr_buf = BytesIO()
+        qr_img.save(qr_buf, format="PNG")
+        qr_buf.seek(0)
+        c.drawImage(ImageReader(qr_buf), width - 50*mm, height - 50*mm, width=30*mm, height=30*mm)
+
+        # Instruções
+        c.setFont("Helvetica", 8)
+        c.drawString(30*mm, height - 55*mm, "Preencha com caneta preta. Pinte toda a bolha. Não use corretivo nem rasure.")
+
+        # Renderiza blocos
+        for blk in blocos:
+            tipo = blk["tipo"]
+            # Cabeçalho do bloco: "Q3 (V/F)"
+            label_tipo = {"multipla_escolha": "", "vf": "(V/F)", "associacao": "(Assoc.)"}.get(tipo, "")
+            c.setFont("Helvetica-Bold", 9)
+            # Posição em PDF: y é "altura - y_mm" (PDF tem origem em baixo)
+            head_y_pdf = height - blk["top_y_mm"] * mm
+            c.drawString(blk["x_mm"] * mm, head_y_pdf, f"Q{blk['num']} {label_tipo}")
+
+            # Numerações internas: V/F mostra "Q.1, Q.2..." e Associação mostra "1., 2., ..."
+            if tipo == "vf":
+                c.setFont("Helvetica", 8)
+                for k in range(blk["n_linhas"]):
+                    by_mm = blk["top_y_mm"] + 6 + 4 + k * 8
+                    c.drawRightString((blk["x_mm"] + 16) * mm, (height - by_mm * mm) - 1,
+                                       f"{blk['num']}.{k+1}")
+            elif tipo == "associacao":
+                c.setFont("Helvetica", 8)
+                for k in range(blk["n_linhas"]):
+                    by_mm = blk["top_y_mm"] + 6 + 4 + k * 8
+                    c.drawRightString((blk["x_mm"] + 16) * mm, (height - by_mm * mm) - 1,
+                                       f"{k+1}.")
+            # Múltipla escolha: numeração "Q1" no cabeçalho do bloco já basta (sem duplicar com "1.")
+
+            # Cabeçalho de letras: centralizadas EXATAMENTE acima de cada bolha (uma por coluna).
+            # Pega primeira ocorrência de cada x_mm distinto (= primeira linha de bolhas) preservando ordem.
+            seen_x = set()
+            col_labels = []
+            for b in blk["bubbles"]:
+                if b["x_mm"] not in seen_x:
+                    seen_x.add(b["x_mm"])
+                    col_labels.append(b)
+            c.setFont("Helvetica-Bold", 9)
+            c.setFillColorRGB(0.35, 0.35, 0.35)
+            for b in col_labels:
+                bx_pdf = b["x_mm"] * mm
+                label_y_pdf = height - (b["y_mm"] - 4.5) * mm
+                c.drawCentredString(bx_pdf, label_y_pdf, b["label"])
+            c.setFillColorRGB(0, 0, 0)
+
+            # Bolhas
+            for b in blk["bubbles"]:
+                # Converte mm → PDF point (origem do PDF é canto inf esquerdo)
+                bx_pdf = b["x_mm"] * mm
+                by_pdf = height - b["y_mm"] * mm
+                c.circle(bx_pdf, by_pdf, bubble_radius, stroke=1, fill=0)
+
+        # Rodapé
+        c.setFont("Helvetica", 7)
+        c.setFillColorRGB(0.5, 0.5, 0.5)
+        c.drawString(margin + marker_size + 4*mm, margin + 2*mm,
+                     f"Cartão resposta · Aluno {aluno['id']} · Aplicação {apl['id']} · {n_questoes_no_cartao} questões")
+        c.setFillColorRGB(0, 0, 0)
+
+        c.showPage()
+
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+
+@app.get("/aplicacoes/{aplicacao_id}/cartao-resposta")
+def cartao_resposta_pdf(aplicacao_id: int):
+    """Gera PDF com cartões resposta de todos os alunos da turma."""
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
+    questoes = conn.execute("SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem", (apl["prova_id"],)).fetchall()
+
+    if not alunos:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty"><p>Esta turma não tem alunos cadastrados.</p><a href="/aplicacoes/' + str(aplicacao_id) + '" class="btn">← Voltar</a></div>', active="aplicacoes"))
+    if not questoes:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty"><p>Esta prova não tem questões.</p><a href="/aplicacoes/' + str(aplicacao_id) + '" class="btn">← Voltar</a></div>', active="aplicacoes"))
+
+    apl_dict = dict(apl)
+    apl_dict["id"] = aplicacao_id
+    questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+    conn.close()
+    buffer = _gerar_cartao_resposta_pdf(apl_dict, alunos, questoes_info)
+
+    base_name = (apl["titulo"] or apl["prova_titulo"]).lower().replace(" ", "_")
+    # Remove acentos e caracteres não-ASCII (Content-Disposition exige ASCII puro)
+    import unicodedata as _ud
+    base_name = _ud.normalize('NFKD', base_name).encode('ascii', 'ignore').decode('ascii')
+    safe = "".join(c for c in base_name if c.isalnum() or c in "_-")[:40] or f"cartoes"
+    filename = f"cartoes_resposta_{safe}_{aplicacao_id}.pdf"
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# ==========================================
+#  FASE C2: OMR — LEITURA AUTOMÁTICA DE CARTÕES
+# ==========================================
+
+def _corrigir_orientacao_exif(image_bytes):
+    """Lê a tag EXIF Orientation de um JPG e retorna a rotação necessária em graus
+    (0, 90, 180, 270) para que a imagem fique na orientação correta.
+    Celulares gravam a foto com o sensor em paisagem e registram a orientação real
+    no EXIF; cv2.imdecode() ignora esse metadado, fazendo a foto chegar deitada."""
+    try:
+        from PIL import Image
+        import io
+        pil_img = Image.open(io.BytesIO(image_bytes))
+        exif = pil_img.getexif()
+        orient = exif.get(274)  # 274 = tag Orientation
+        # Mapeamento EXIF Orientation → rotação necessária:
+        # 1=normal, 3=180°, 6=90° horário, 8=90° anti-horário
+        if orient == 3:
+            return 180
+        elif orient == 6:
+            return 90
+        elif orient == 8:
+            return 270
+    except Exception:
+        pass
+    return 0
+
+
+def _decode_image_universal(image_bytes, filename=""):
+    """Decodifica imagem em bytes → numpy array BGR (cv2). Suporta JPG, PNG, HEIC.
+    Retorna (img_np, erro_str). Se erro_str não for None, img_np é None.
+    HEIC: tenta usar pillow_heif se instalado; se não, sugere conversão.
+    EXIF: corrige automaticamente a orientação gravada pelo celular (12/08/2026)."""
+    import cv2
+    import numpy as np
+
+    # Detectar HEIC pelos magic bytes (ftypheic, ftypheix, ftypmif1 nas posições 4-12)
+    is_heic = False
+    if len(image_bytes) > 12:
+        marker = image_bytes[4:12]
+        if b"ftyp" in marker and (b"heic" in marker or b"heix" in marker or b"mif1" in marker or b"heif" in marker):
+            is_heic = True
+    if not is_heic and filename and filename.lower().endswith((".heic", ".heif")):
+        is_heic = True
+
+    if is_heic:
+        try:
+            from pillow_heif import register_heif_opener
+            from PIL import Image
+            import io
+            register_heif_opener()
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            # HEIC via Pillow já aplica a orientação no .open() — sem necessidade de
+            # correção EXIF manual aqui.
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            arr = np.array(pil_img)
+            img = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            return img, None
+        except ImportError:
+            return None, ("Foto em formato HEIC (iPhone). Para o sistema ler HEIC, "
+                          "rode no terminal do Codespaces: <code>pip install pillow-heif --break-system-packages</code> "
+                          "e reinicie o servidor. Como alternativa imediata: no iPhone, vá em "
+                          "<em>Ajustes → Câmera → Formatos → Mais Compatível</em> (passa a tirar em JPG).")
+        except Exception as e:
+            return None, f"Erro ao decodificar HEIC: {e}"
+
+    # === Ler orientação EXIF ANTES de decodificar com cv2 ===
+    rotacao = _corrigir_orientacao_exif(image_bytes)
+
+    # Caminho padrão JPG/PNG via cv2
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return None, "Formato de imagem não reconhecido. Use JPG, PNG ou HEIC."
+
+    # Aplicar rotação EXIF para que a foto fique na orientação real
+    if rotacao == 90:
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    elif rotacao == 180:
+        img = cv2.rotate(img, cv2.ROTATE_180)
+    elif rotacao == 270:
+        img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    return img, None
+
+
+def _detectar_qr_robusto(img_bgr):
+    """Tenta ler QR code de uma imagem BGR usando múltiplas estratégias (12/08/2026).
+    Retorna (qr_data_str, qr_center_tuple_ou_None).
+    - Estratégia 1: pyzbar (zbar) — mais robusto com fotos reais de celular
+    - Estratégia 2: cv2.QRCodeDetector — fallback nativo do OpenCV
+    - Estratégia 3: pré-processamento (contraste/nitidez) + pyzbar
+    Se nenhuma funcionar retorna ("", None)."""
+    import cv2
+    import numpy as np
+
+    qr_data = ""
+    qr_center = None
+
+    # --- Estratégia 1: pyzbar (zbar) ---
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode
+        from pyzbar.pyzbar import ZBarSymbol
+        resultados = zbar_decode(img_bgr, symbols=[ZBarSymbol.QRCODE])
+        if resultados:
+            qr_data = resultados[0].data.decode("utf-8", errors="replace")
+            # Calcular centro a partir do polígono
+            pts = resultados[0].polygon
+            if pts:
+                cx = sum(p.x for p in pts) / len(pts)
+                cy = sum(p.y for p in pts) / len(pts)
+                qr_center = (cx, cy)
+            if qr_data:
+                return qr_data, qr_center
+    except ImportError:
+        pass  # pyzbar não instalado — segue pro fallback
+    except Exception:
+        pass
+
+    # --- Estratégia 2: cv2.QRCodeDetector (fallback) ---
+    try:
+        det = cv2.QRCodeDetector()
+        result = det.detectAndDecode(img_bgr)
+        qr_data = result[0] if result else ""
+        if len(result) > 1 and result[1] is not None:
+            pts_arr = np.array(result[1]).reshape(-1, 2)
+            if len(pts_arr) > 0:
+                qr_center = tuple(pts_arr.mean(axis=0))
+        if qr_data:
+            return qr_data, qr_center
+    except Exception:
+        pass
+
+    # --- Estratégia 3: pré-processamento (equalização + sharpen) + pyzbar ---
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode
+        from pyzbar.pyzbar import ZBarSymbol
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        # Equalização de histograma pra melhorar contraste em fotos escuras
+        eq = cv2.equalizeHist(gray)
+        # Binarização adaptativa pra isolar o QR
+        binar = cv2.adaptiveThreshold(eq, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, 51, 10)
+        resultados = zbar_decode(binar, symbols=[ZBarSymbol.QRCODE])
+        if resultados:
+            qr_data = resultados[0].data.decode("utf-8", errors="replace")
+            pts = resultados[0].polygon
+            if pts:
+                cx = sum(p.x for p in pts) / len(pts)
+                cy = sum(p.y for p in pts) / len(pts)
+                qr_center = (cx, cy)
+            if qr_data:
+                return qr_data, qr_center
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # --- Estratégia 4: pré-processamento + cv2.QRCodeDetector (último recurso) ---
+    try:
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        eq = cv2.equalizeHist(gray)
+        eq_bgr = cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+        det = cv2.QRCodeDetector()
+        result = det.detectAndDecode(eq_bgr)
+        qr_data = result[0] if result else ""
+        if len(result) > 1 and result[1] is not None:
+            pts_arr = np.array(result[1]).reshape(-1, 2)
+            if len(pts_arr) > 0:
+                qr_center = tuple(pts_arr.mean(axis=0))
+        if qr_data:
+            return qr_data, qr_center
+    except Exception:
+        pass
+
+    return "", None
+
+
+def _processar_cartao_resposta(image_bytes, n_questoes_esperado, filename="", threshold_modo="normal", questoes_info=None):
+    """Processa imagem de cartão resposta preenchido:
+    - Detecta marcadores de canto
+    - Corrige perspectiva
+    - Lê QR Code (CR:aluno_id:aplicacao_id)
+    - Detecta bolhas marcadas
+    Retorna dict com success, aluno_id, aplicacao_id, answers, warnings, preview_base64.
+    """
+    import cv2
+    import numpy as np
+    import base64
+
+    # Decode image (suporta JPG/PNG/HEIC)
+    img, erro = _decode_image_universal(image_bytes, filename)
+    if img is None:
+        return {"success": False, "error": erro or "Erro ao abrir imagem."}
+
+    h, w = img.shape[:2]
+    if h < 400 or w < 300:
+        return {"success": False, "error": f"Imagem muito pequena ({w}×{h}px). Use uma foto com pelo menos 400×300px."}
+
+    # === STEP 1: Detect corner markers — VERSÃO ROBUSTA A DISTÂNCIA (28/07/2026) ===
+    # Antes usava um único limiar (Otsu) pra foto INTEIRA. Isso quebra assim que
+    # aparece bastante fundo (mesa, mão, chão) ao redor do cartão — comportamento
+    # normal de quem fotografa com margem de segurança — porque o Otsu passa a
+    # confundir "fundo" com "marcador escuro" e tudo vira um borrão só (contorno
+    # único). Trocado por threshold ADAPTATIVO (compara cada pixel só com sua
+    # vizinhança local, não a foto toda) — funciona igual não importa quanto fundo
+    # apareça na foto.
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    block_size = int(w * 0.025)
+    if block_size % 2 == 0:
+        block_size += 1
+    block_size = max(11, block_size)
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        block_size, 12
+    )
+    # RETR_LIST em vez de RETR_EXTERNAL: a moldura decorativa do cartão forma um
+    # contorno fechado que, com RETR_EXTERNAL, "esconde" tudo que está dentro dela.
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 100:
+            continue
+        x, y, ww, hh = cv2.boundingRect(cnt)
+        if ww == 0 or hh == 0:
+            continue
+        aspect = ww / hh
+        if not (0.7 < aspect < 1.3):
+            continue
+        rect_area = ww * hh
+        if area / rect_area < 0.7:
+            continue
+        if ww < 8 or ww > w * 0.15:
+            continue
+        cx, cy = x + ww/2, y + hh/2
+        candidates.append((cx, cy, area))
+
+    if len(candidates) < 4:
+        return {"success": False, "error": f"Detectados apenas {len(candidates)} candidatos a marcador (esperados 4 ou mais). Verifique se a foto mostra a folha inteira, está bem iluminada e nítida."}
+
+    # Acha os 4 EXTREMOS do grupo de candidatos (não mais "o mais perto de cada
+    # canto DA FOTO" — isso falhava quando havia muito fundo ao redor, porque a
+    # distância até o canto real da folha cresce e passa do limite de busca).
+    # Robusto a qualquer zoom/distância, desde que os 4 marcadores tenham sido
+    # detectados.
+    tl_c = min(candidates, key=lambda c: c[0] + c[1])
+    br_c = max(candidates, key=lambda c: c[0] + c[1])
+    tr_c = max(candidates, key=lambda c: c[0] - c[1])
+    bl_c = min(candidates, key=lambda c: c[0] - c[1])
+    tl, tr, bl, br = (tl_c[0], tl_c[1]), (tr_c[0], tr_c[1]), (bl_c[0], bl_c[1]), (br_c[0], br_c[1])
+
+    if len({tl, tr, bl, br}) < 4:
+        found = len({tl, tr, bl, br})
+        return {"success": False, "error": f"Não foi possível identificar os 4 marcadores de canto da folha. Encontrei {found} de 4. Verifique se a foto inclui os 4 cantos da folha, com boa iluminação."}
+
+    # Validação de FORMA (substitui a antiga exigência de "ocupar 60% da FOTO", que
+    # obrigava fotografar bem de perto): lados opostos com comprimento parecido +
+    # proporção compatível com folha A4. Funciona em qualquer distância/zoom, e
+    # ainda pega o caso original que a checagem antiga tentava evitar (marcador
+    # ausente "casando" com um blob errado, gerando um retângulo torto).
+    largura_topo = tr[0] - tl[0]
+    largura_base = br[0] - bl[0]
+    altura_esq = bl[1] - tl[1]
+    altura_dir = br[1] - tr[1]
+
+    def _lado_valido(a, b, tolerancia=0.20):
+        if a <= 0 or b <= 0:
+            return False
+        menor, maior = min(a, b), max(a, b)
+        return (menor / maior) >= (1 - tolerancia)
+
+    if not _lado_valido(largura_topo, largura_base) or not _lado_valido(altura_esq, altura_dir):
+        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo consistente — pode ser que algum marcador tenha sido confundido com outra coisa na foto. Tente novamente com boa iluminação e o cartão sem dobras."}
+
+    ASPECT_A4 = 210 / 297
+    largura_media = (largura_topo + largura_base) / 2
+    altura_media = (altura_esq + altura_dir) / 2
+    proporcao = (largura_media / altura_media) if altura_media else 0
+    if not (ASPECT_A4 * 0.75 < proporcao < ASPECT_A4 * 1.25):
+        return {"success": False, "error": f"A proporção entre os marcadores não bate com uma folha A4 — pode ser que algum marcador tenha sido confundido com outra coisa na foto (proporção detectada: {proporcao:.2f}, esperado perto de {ASPECT_A4:.2f})."}
+
+    if largura_media < w * 0.10 or altura_media < h * 0.10:
+        return {"success": False, "error": "O cartão está pequeno demais na foto — aproxime um pouco mais e tente novamente."}
+
+    # === STEP 2: Perspective transform to canonical A4 ===
+    # Canonical A4 at ~144 DPI: 1191 x 1684 px
+    canon_w, canon_h = 1191, 1684
+    # Markers are at 10mm (margin) + 4mm (half of 8mm marker) = 14mm from edges
+    margin_canon = int(14 / 210 * canon_w)  # ~79
+    src_pts = np.float32([tl, tr, bl, br])
+    dst_pts = np.float32([
+        [margin_canon, margin_canon],
+        [canon_w - margin_canon, margin_canon],
+        [margin_canon, canon_h - margin_canon],
+        [canon_w - margin_canon, canon_h - margin_canon],
+    ])
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    warped = cv2.warpPerspective(img, M, (canon_w, canon_h))
+    warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+    # === STEP 3: Read QR code — detecção robusta (12/08/2026) ===
+    qr_data, qr_center = _detectar_qr_robusto(warped)
+
+    if not qr_data:
+        # Fallback: tentar na imagem original (antes da correção de perspectiva)
+        qr_data, _ = _detectar_qr_robusto(img)
+
+    if not qr_data or not qr_data.startswith("CR:"):
+        return {"success": False, "error": f"Não foi possível ler o QR Code do cartão. Tente uma foto mais nítida ou com mais resolução. (Dado lido: '{qr_data[:30]}')"}
+
+    # === STEP 3B: Detectar cartão de cabeça pra baixo (180°) e corrigir ===
+    # O QR é sempre impresso no canto superior-direito do cartão (ver _gerar_cartao_resposta_pdf).
+    # Se, na imagem já corrigida por perspectiva, o QR aparece no canto inferior-esquerdo,
+    # a folha foi escaneada/fotografada de cabeça pra baixo (comum em scanners de mesa, ex. Epson).
+    if qr_center is not None:
+        cx, cy = qr_center
+        if cx < canon_w * 0.5 and cy > canon_h * 0.5:
+            warped = cv2.rotate(warped, cv2.ROTATE_180)
+            warped_gray = cv2.rotate(warped_gray, cv2.ROTATE_180)
+
+    try:
+        parts = qr_data.split(":")
+        if len(parts) != 3:
+            raise ValueError("formato inesperado")
+        aluno_id = int(parts[1])
+        aplicacao_id_qr = int(parts[2])
+    except (ValueError, AttributeError) as e:
+        return {"success": False, "error": f"QR Code com formato inválido: '{qr_data}' ({e})"}
+
+    # === STEP 4: Sample bubbles ===
+    def mm_to_px_x(mm_x):
+        return int(mm_x / 210 * canon_w)
+
+    def mm_to_px_y(mm_y_from_bottom):
+        return int((297 - mm_y_from_bottom) / 297 * canon_h)
+
+    # Importante: mm_to_px_y aceita coord medida a partir do topo da página (igual layout do cartão).
+    # Se o sistema usar "mm_y_from_bottom" em coord, converter por subtração.
+    def mm_top_to_px_y(mm_y_from_top):
+        return int(mm_y_from_top / 297 * canon_h)
+
+    # === NOVO: layout dinâmico baseado em questoes_info se foi passado ===
+    # Fallback: legado, layout fixo A/B/C/D pra n_questoes_esperado
+    bubble_positions = []  # (q_num, letra/label, x_px, y_px, afirm, item, tipo)
+
+    if questoes_info is not None and len(questoes_info) > 0:
+        # Usa o mesmo cálculo do gerador pra ter mesmas coordenadas
+        blocos = _calcular_layout_cartao(questoes_info)
+        bubble_radius_mm = 2.2
+        bubble_radius_px = int(bubble_radius_mm / 210 * canon_w)
+        for blk in blocos:
+            for b in blk["bubbles"]:
+                x_px = mm_to_px_x(b["x_mm"])
+                y_px = mm_top_to_px_y(b["y_mm"])
+                bubble_positions.append({
+                    "q": blk["num"], "tipo": blk["tipo"],
+                    "label": b["label"], "afirm": b["afirm"], "item": b["item"],
+                    "x": x_px, "y": y_px
+                })
+    else:
+        # Modo legado: layout antigo (1 ou 2 colunas, A/B/C/D só)
+        n_cols = 1 if n_questoes_esperado <= 25 else 2
+        questions_per_col = (n_questoes_esperado + n_cols - 1) // n_cols
+        block_x_mm_start = 55 if n_cols == 1 else 25
+        block_width_mm = 80
+        bubble_radius_mm = 2.5
+        bubble_radius_px = int(bubble_radius_mm / 210 * canon_w)
+        col_letter_spacing_mm = 12
+        start_y_mm = 222
+        row_height_mm = 8
+
+        for col_idx in range(n_cols):
+            block_x_mm = block_x_mm_start + col_idx * block_width_mm
+            start_q = col_idx * questions_per_col
+            end_q = min(start_q + questions_per_col, n_questoes_esperado)
+            for offset in range(end_q - start_q):
+                q_num = start_q + offset + 1
+                y_mm = start_y_mm - offset * row_height_mm
+                y_px = mm_to_px_y(y_mm)
+                for i, letra in enumerate(["A", "B", "C", "D"]):
+                    x_mm = block_x_mm + 22 + i * col_letter_spacing_mm
+                    x_px = mm_to_px_x(x_mm)
+                    bubble_positions.append({
+                        "q": q_num, "tipo": "multipla_escolha",
+                        "label": letra, "afirm": None, "item": None,
+                        "x": x_px, "y": y_px
+                    })
+
+    # Sample darkness for each bubble
+    sample_radius = max(3, bubble_radius_px - 2)
+    bubble_data = []
+    for bp in bubble_positions:
+        x, y = bp["x"], bp["y"]
+        y1 = max(0, y - sample_radius)
+        y2 = min(canon_h, y + sample_radius)
+        x1 = max(0, x - sample_radius)
+        x2 = min(canon_w, x + sample_radius)
+        region = warped_gray[y1:y2, x1:x2]
+        if region.size == 0:
+            continue
+        mean = float(region.mean())
+        bubble_data.append({**bp, "mean": mean, "marked": False})
+
+    # Agrupa por (questao, afirmação/item) — cada grupo decide independentemente
+    # Pra multipla_escolha: agrupar só por q
+    # Pra vf: agrupar por (q, afirm) — 2 bolhas por grupo (V/F)
+    # Pra associacao: agrupar por (q, item) — N bolhas por grupo
+    grupos = {}
+    for b in bubble_data:
+        if b["tipo"] == "multipla_escolha":
+            key = (b["q"], None, None)
+        elif b["tipo"] == "vf":
+            key = (b["q"], b["afirm"], None)
+        elif b["tipo"] == "associacao":
+            key = (b["q"], None, b["item"])
+        else:
+            continue
+        grupos.setdefault(key, []).append(b)
+
+    # Thresholds
+    if threshold_modo == "permissivo":
+        DARK_THRESHOLD = 140
+        AMBIGUOUS_THRESHOLD = 165
+        LIGHT_THRESHOLD = 200
+    else:
+        DARK_THRESHOLD = 110
+        AMBIGUOUS_THRESHOLD = 140
+        LIGHT_THRESHOLD = 180
+
+    # answers estruturada por tipo:
+    # - multipla_escolha: { q_num: "A"/None }
+    # - vf: { q_num: {"0": "V", "1": "F", ...} }
+    # - associacao: { q_num: {"0": "b", "1": "a", ...} }
+    answers = {}
+    warnings = []
+    for (q_num, afirm, item), bubbles in sorted(grupos.items(), key=lambda x: (x[0][0], x[0][1] if x[0][1] is not None else -1, x[0][2] if x[0][2] is not None else -1)):
+        bubbles.sort(key=lambda b: b["mean"])
+        darkest = bubbles[0]
+        second = bubbles[1] if len(bubbles) > 1 else None
+        tipo = darkest["tipo"]
+
+        # Decide marcação deste grupo
+        if darkest["mean"] > LIGHT_THRESHOLD:
+            marcado = None
+        elif darkest["mean"] < DARK_THRESHOLD:
+            marcado = darkest["label"]
+            darkest["marked"] = True
+            if second and second["mean"] < AMBIGUOUS_THRESHOLD:
+                ctx = f"Q{q_num}"
+                if afirm is not None: ctx += f".{afirm+1}"
+                if item is not None: ctx += f" item {item+1}"
+                warnings.append(f"{ctx}: marcação ambígua entre {darkest['label']} e {second['label']} (confira)")
+        else:
+            marcado = darkest["label"]
+            darkest["marked"] = True
+            ctx = f"Q{q_num}"
+            if afirm is not None: ctx += f".{afirm+1}"
+            if item is not None: ctx += f" item {item+1}"
+            warnings.append(f"{ctx}: marca fraca em {darkest['label']} (confira)")
+
+        # Salva conforme tipo
+        if tipo == "multipla_escolha":
+            answers[q_num] = marcado
+        elif tipo == "vf":
+            if q_num not in answers or not isinstance(answers[q_num], dict):
+                answers[q_num] = {}
+            answers[q_num][str(afirm)] = marcado
+        elif tipo == "associacao":
+            if q_num not in answers or not isinstance(answers[q_num], dict):
+                answers[q_num] = {}
+            answers[q_num][str(item)] = marcado
+
+    # === STEP 5: Build preview with overlays ===
+    preview = warped.copy()
+    for b in bubble_data:
+        if b["marked"]:
+            cv2.circle(preview, (b["x"], b["y"]), bubble_radius_px + 1, (0, 200, 0), 3)
+        else:
+            cv2.circle(preview, (b["x"], b["y"]), bubble_radius_px, (180, 180, 180), 1)
+
+    # Resize for HTML (max 800px wide)
+    if canon_w > 800:
+        scale = 800 / canon_w
+        new_w, new_h = int(canon_w * scale), int(canon_h * scale)
+        preview = cv2.resize(preview, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    _, encoded = cv2.imencode('.jpg', preview, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    preview_b64 = base64.b64encode(encoded.tobytes()).decode()
+
+    return {
+        "success": True,
+        "aluno_id": aluno_id,
+        "aplicacao_id_qr": aplicacao_id_qr,
+        "qr_data": qr_data,
+        "answers": answers,
+        "warnings": warnings,
+        "preview_base64": preview_b64,
+    }
+
+
+@app.get("/escanear/status/{lote_id}", response_class=HTMLResponse)
+def tela_status_lote(lote_id: str):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    job = FILAS_ESCANEAMENTO.get(lote_id)
+    if not job:
+        content = '<div class="empty">Lote não encontrado (pode ter expirado após um reinício do sistema). Volte e envie as fotos novamente.</div>'
+        return render_page("Processando", content, active="aplicacoes")
+
+    titulo_lote = job["contexto"].get("titulo_exibicao", "Digitalização")
+    content = f"""
+    <div class="page-header">
+        <h1>📷 Processando cartões...</h1>
+        <p class="subtitle">{titulo_lote}</p>
+    </div>
+    <div class="card" style="max-width:520px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span id="st-contagem" style="font-weight:600;">Carregando...</span>
+            <span id="st-posicao" style="color:var(--text-muted); font-size:13px;"></span>
+        </div>
+        <div style="height:14px; background:var(--border); border-radius:7px; overflow:hidden;">
+            <div id="st-barra" style="height:14px; width:0%; background:var(--primary, #4C6EF5); transition:width 0.4s;"></div>
+        </div>
+        <p id="st-eta" style="margin-top:14px; color:var(--text-muted); font-size:13px;"></p>
+        <div id="st-lista" style="margin-top:14px; border-top:1px solid var(--border); padding-top:10px; display:none;">
+            <p style="font-size:11px; color:var(--text-muted); margin:0 0 6px; text-transform:uppercase; letter-spacing:0.4px;">Últimos processados</p>
+            <ul id="st-lista-itens" style="list-style:none; margin:0; padding:0; font-size:13px; max-height:220px; overflow-y:auto;"></ul>
+        </div>
+        <p style="margin-top:14px; font-size:12px; color:var(--text-muted);">Pode fechar esta aba e voltar depois — o processamento continua em segundo plano. Essa mesma tela reabre no ponto em que parou.</p>
+    </div>
+    <script>
+        const loteId = {lote_id!r};
+        function formatarTempo(s) {{
+            if (s < 60) return s + 's';
+            const m = Math.floor(s / 60), r = s % 60;
+            return m + 'min ' + r + 's';
+        }}
+        function renderizarLista(itens) {{
+            const container = document.getElementById('st-lista');
+            const ul = document.getElementById('st-lista-itens');
+            if (!itens || itens.length === 0) {{
+                container.style.display = 'none';
+                return;
+            }}
+            container.style.display = 'block';
+            // Mostra os mais recentes primeiro (mais fácil ver o que acabou de rodar)
+            const ordenados = itens.slice().reverse();
+            ul.innerHTML = ordenados.map(function(it) {{
+                if (it.ok) {{
+                    return '<li style="padding:4px 0; border-bottom:1px solid var(--border);">✅ ' + it.nome + '</li>';
+                }} else {{
+                    return '<li style="padding:4px 0; border-bottom:1px solid var(--border); color:var(--orange, #E8590C);">⚠️ ' + it.nome + ' — ' + it.erro + '</li>';
+                }}
+            }}).join('');
+        }}
+        async function checarStatus() {{
+            try {{
+                const resp = await fetch(`/escanear/status/${{loteId}}/json`);
+                const d = await resp.json();
+                if (d.erro) {{
+                    document.getElementById('st-contagem').textContent = 'Lote não encontrado.';
+                    return;
+                }}
+                const pct = d.total ? Math.round(d.processados / d.total * 100) : 100;
+                document.getElementById('st-contagem').textContent = `${{d.processados}} de ${{d.total}} cartões processados`;
+                document.getElementById('st-barra').style.width = pct + '%';
+                renderizarLista(d.concluidos_recentes);
+                if (d.posicao_fila > 0) {{
+                    document.getElementById('st-posicao').textContent = `${{d.posicao_fila}} cartão(ões) de outros professores na sua frente`;
+                }} else {{
+                    document.getElementById('st-posicao').textContent = '';
+                }}
+                if (!d.concluido) {{
+                    document.getElementById('st-eta').textContent = `Tempo estimado: ~${{formatarTempo(d.eta_segundos)}}`;
+                    setTimeout(checarStatus, 1500);
+                }} else {{
+                    document.getElementById('st-eta').textContent = 'Concluído! Redirecionando...';
+                    window.location.href = d.redirect_url;
+                }}
+            }} catch (e) {{
+                setTimeout(checarStatus, 3000);
+            }}
+        }}
+        checarStatus();
+    </script>
+    """
+    return render_page("Processando", content, active="aplicacoes")
+
+
+@app.get("/escanear/status/{lote_id}/json")
+def status_lote_json(lote_id: str):
+    status = _status_lote_escaneamento(lote_id)
+    if not status:
+        return JSONResponse({"erro": "lote não encontrado"})
+    return JSONResponse(status)
+
+
+@app.get("/aplicacoes/{aplicacao_id}/escanear", response_class=HTMLResponse)
+def form_escanear(aplicacao_id: int):
+    """Formulário pra upload de foto do cartão resposta."""
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+    conn.close()
+
+    content = f"""
+        <div class="page-header">
+            <h1>📷 Escanear cartão resposta</h1>
+            <p class="subtitle">{apl["prova_titulo"]} · {apl["turma_nome"]} ({apl["ano_letivo"]})</p>
+            <div class="page-actions"><a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar</a></div>
+        </div>
+
+        <div class="tip">
+            <strong>Dicas pra uma boa leitura:</strong>
+            <ul style="margin:8px 0 0 18px;">
+                <li>Tire a foto com boa luz, sem sombras sobre a folha</li>
+                <li>Mantenha o celular paralelo à folha (sem inclinar)</li>
+                <li>Inclua os 4 marcadores pretos dos cantos no enquadramento</li>
+                <li>O QR Code precisa estar legível (sem reflexo nem desfoque)</li>
+                <li><strong>HEIC do iPhone agora é suportado</strong> (se o sistema acusar, instala <code>pillow-heif</code>)</li>
+            </ul>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-top:24px;">
+
+            <form id="form-single" action="/aplicacoes/{aplicacao_id}/escanear" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+                <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
+                <p class="muted-line" style="font-size:13px;">Recomendado pra correção ao vivo, durante a aplicação.</p>
+                <label>Foto<input type="file" name="foto" accept="image/*" capture="environment" required></label>
+                <p class="muted-line" style="font-size:11px;">No celular abre a câmera direto.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Processar 1 foto</button>
+            </form>
+
+            <form id="form-lote" action="/aplicacoes/{aplicacao_id}/escanear-lote" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+                <h3 style="margin-top:0;">📁 Lote (várias de uma vez)</h3>
+                <p class="muted-line" style="font-size:13px;">Recomendado quando você já tem todas as fotos prontas (galeria).</p>
+                <label>Fotos ou PDF<input type="file" name="fotos" accept="image/*,.pdf" multiple required></label>
+                <p class="muted-line" style="font-size:11px;">Selecione imagens (JPEG/HEIC) <strong>ou</strong> um PDF com várias páginas.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Processar lote</button>
+            </form>
+
+            <script>
+            (function() {{
+                function travar(form) {{
+                    form.addEventListener('submit', function() {{
+                        var btn = form.querySelector('button[type="submit"]');
+                        if (btn) {{
+                            btn.disabled = true;
+                            btn.textContent = '⏳ Processando…';
+                            btn.style.opacity = '0.7';
+                        }}
+                    }});
+                }}
+                var fs = document.getElementById('form-single');
+                var fl = document.getElementById('form-lote');
+                if (fs) travar(fs);
+                if (fl) travar(fl);
+            }})();
+            </script>
+
+        </div>
+    """
+    return render_page("Escanear cartão", content, active="aplicacoes")
+
+
+@app.post("/aplicacoes/{aplicacao_id}/escanear", response_class=HTMLResponse)
+async def processar_escaneamento(aplicacao_id: int, foto: UploadFile = File(...)):
+    """Recebe foto, processa OMR e mostra tela de revisão antes de salvar."""
+    image_bytes = await foto.read()
+    if not image_bytes:
+        return HTMLResponse(render_page("Erro", '<div class="empty"><p>Arquivo vazio.</p><a href="javascript:history.back()" class="btn">← Voltar</a></div>', active="aplicacoes"))
+
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    questoes = conn.execute(
+        "SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem",
+        (apl["prova_id"],)
+    ).fetchall()
+    n_questoes = len(questoes)
+    questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+
+    result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
+
+    if not result["success"]:
+        conn.close()
+        content = f"""
+            <div class="page-header">
+                <h1>❌ Erro na leitura do cartão</h1>
+            </div>
+            <div style="border:1px solid var(--red); background:var(--red-bg); padding:16px; border-radius:6px; margin:16px 0; color:var(--red);">
+                <strong>Problema:</strong> {result.get("error", "Erro desconhecido")}
+            </div>
+            <p>Tente novamente com uma foto mais nítida, com melhor iluminação ou de um ângulo mais frontal.</p>
+            <div class="page-actions">
+                <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn btn-primary">📷 Tentar outra foto</a>
+                <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar para a aplicação</a>
+            </div>
+        """
+        return render_page("Erro no escaneamento", content, active="aplicacoes")
+
+    # Validar que o aluno pertence à turma desta aplicação
+    aluno = conn.execute(
+        "SELECT * FROM alunos WHERE id = ? AND turma_id = ?",
+        (result["aluno_id"], apl["turma_id"])
+    ).fetchone()
+
+    if not aluno:
+        conn.close()
+        content = f"""
+            <div class="page-header"><h1>⚠️ Cartão de outra turma</h1></div>
+            <div style="border:1px solid var(--red); background:var(--red-bg); padding:16px; border-radius:6px; color:var(--red);">
+                <p>O QR Code deste cartão aponta para o aluno <code>{result["aluno_id"]}</code>, que não pertence à turma <strong>{apl["turma_nome"]}</strong> desta aplicação.</p>
+                <p>Verifique se você está na aplicação certa antes de escanear.</p>
+            </div>
+            <div class="page-actions">
+                <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">📷 Tentar outra foto</a>
+                <a href="/aplicacoes" class="btn">Lista de aplicações</a>
+            </div>
+        """
+        return render_page("Cartão de outra turma", content, active="aplicacoes")
+
+    if result["aplicacao_id_qr"] != aplicacao_id:
+        conn.close()
+        content = f"""
+            <div class="page-header"><h1>⚠️ Cartão de outra aplicação</h1></div>
+            <div style="border:1px solid var(--red); background:var(--red-bg); padding:16px; border-radius:6px; color:var(--red);">
+                <p>Este cartão foi gerado para a aplicação <code>{result["aplicacao_id_qr"]}</code>, mas você está na aplicação <code>{aplicacao_id}</code>.</p>
+            </div>
+            <div class="page-actions">
+                <a href="/aplicacoes/{result["aplicacao_id_qr"]}/escanear" class="btn btn-primary">Ir para aplicação {result["aplicacao_id_qr"]}</a>
+                <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">Tentar outra foto</a>
+            </div>
+        """
+        return render_page("Cartão de outra aplicação", content, active="aplicacoes")
+
+    # Verificar se já existe entrega pra esse aluno (override?)
+    ja_entregue = conn.execute(
+        "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+        (aplicacao_id, result["aluno_id"])
+    ).fetchone()
+    conn.close()
+
+    answers = result["answers"]
+
+    # Build tabela editável de respostas
+    # Mapear questões com aviso para destacar na tabela
+    qs_com_aviso = {}
+    for w in result.get("warnings", []):
+        import re as _re
+        m = _re.match(r"Q(\d+)", w)
+        if m:
+            qn = int(m.group(1))
+            qs_com_aviso[qn] = w
+
+    rows_html = ""
+    for q_num in range(1, n_questoes + 1):
+        detected = answers.get(q_num)
+        tem_aviso = q_num in qs_com_aviso
+        row_style = ' style="background:var(--orange-bg);"' if tem_aviso else ""
+        cells = ""
+        for letra in ["A", "B", "C", "D"]:
+            checked = " checked" if detected == letra else ""
+            cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
+        em_branco_checked = " checked" if detected is None else ""
+        cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco_checked}></td>'
+        if tem_aviso:
+            aviso_txt = qs_com_aviso[q_num]
+            marca_status = f'<span style="color:var(--orange);font-weight:600;">⚠️ {aviso_txt}</span>'
+        else:
+            marca_status = f"Detectado: <strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
+        rows_html += f'<tr{row_style}><td style="padding:6px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 8px;">{marca_status}</td></tr>'
+
+    avisos_html = ""
+    if result["warnings"]:
+        items = "".join(f"<li>{w}</li>" for w in result["warnings"])
+        avisos_html = f'<div style="border:1px solid var(--orange); background:var(--orange-bg); padding:12px; border-radius:6px; margin:16px 0; color:var(--orange);"><strong>⚠️ Avisos da leitura:</strong><ul style="margin:6px 0 0 18px;">{items}</ul></div>'
+
+    override_aviso = ""
+    if ja_entregue:
+        override_aviso = f'<div style="border:1px solid var(--orange); background:var(--orange-bg); padding:12px; border-radius:6px; margin:16px 0; color:var(--orange);"><strong>⚠️ Atenção:</strong> este aluno já tem entrega registrada ({ja_entregue["finalizada_em"]}). Confirmar irá <strong>sobrescrever</strong> as respostas anteriores.</div>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>Revisão da leitura</h1>
+            <p class="subtitle">{apl["prova_titulo"]} · Aluno: <strong>{aluno["nome"]}</strong> (Nº {aluno["numero"] or "—"}, Código {aluno["codigo_unico"]})</p>
+        </div>
+
+        {avisos_html}
+        {override_aviso}
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:24px; align-items:flex-start;">
+            <div>
+                <h2 style="margin-top:0;">Imagem processada</h2>
+                <p class="muted-line">Bolhas detectadas como marcadas estão em verde. Confira se está correto antes de confirmar.</p>
+                <img src="data:image/jpeg;base64,{result["preview_base64"]}" style="max-width:100%; border:1px solid var(--border); border-radius:6px;">
+            </div>
+
+            <div>
+                <h2 style="margin-top:0;">Respostas detectadas</h2>
+                <p class="muted-line">Você pode corrigir qualquer marcação antes de salvar.</p>
+                <form action="/aplicacoes/{aplicacao_id}/escanear/confirmar" method="post">
+                    <input type="hidden" name="aluno_id" value="{result["aluno_id"]}">
+                    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                        <thead>
+                            <tr style="background:var(--bg-subtle);">
+                                <th style="padding:6px;">Q</th>
+                                <th style="padding:6px;">A</th>
+                                <th style="padding:6px;">B</th>
+                                <th style="padding:6px;">C</th>
+                                <th style="padding:6px;">D</th>
+                                <th style="padding:6px;">∅</th>
+                                <th style="padding:6px;">Detectado</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                    <div class="page-actions" style="margin-top:16px;">
+                        <button type="submit" class="btn btn-primary">✓ Confirmar e salvar</button>
+                        <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">📷 Tentar outra foto</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    """
+    return render_page("Revisão", content, active="aplicacoes")
+
+
+@app.post("/aplicacoes/{aplicacao_id}/escanear/confirmar", response_class=HTMLResponse)
+async def confirmar_escaneamento(aplicacao_id: int, request: Request, aluno_id: int = Form(...)):
+    """Salva as respostas confirmadas pelo professor após revisão."""
+    form = await request.form()
+
+    conn = get_db()
+    apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
+    aluno = conn.execute("SELECT * FROM alunos WHERE id = ? AND turma_id = ?", (aluno_id, apl["turma_id"])).fetchone() if apl else None
+
+    if not apl or not aluno:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    questoes = conn.execute(
+        "SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem",
+        (apl["prova_id"],)
+    ).fetchall()
+    questao_ids = [q["id"] for q in questoes]
+
+    # Limpar respostas antigas deste aluno nesta aplicação (override completo)
+    conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
+
+    # Inserir respostas novas
+    for q_num, q_id in enumerate(questao_ids, start=1):
+        letra = form.get(f"q_{q_num}", "").strip()
+        if letra in ("A", "B", "C", "D"):
+            conn.execute(
+                "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?, ?, ?, ?)",
+                (aplicacao_id, aluno_id, q_id, letra)
+            )
+
+    # Inserir ou atualizar entrega
+    existing = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id)).fetchone()
+    if not existing:
+        conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?, ?)", (aplicacao_id, aluno_id))
+    else:
+        conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
+
+    conn.commit()
+
+    score, total = _calcular_nota(conn, aplicacao_id, aluno_id)
+    conn.close()
+
+    content = f"""
+        <div class="page-header"><h1>✅ Cartão registrado</h1></div>
+        <div style="border:1px solid var(--green); background:var(--green-bg); padding:20px; border-radius:6px; margin:16px 0; color:var(--green);">
+            <p style="margin:0;"><strong>Aluno:</strong> {aluno["nome"]} (Nº {aluno["numero"] or "—"})</p>
+            <p style="margin:8px 0 0;"><strong>Nota:</strong> <span style="font-size:24px; font-weight:600;">{score}/{total}</span> ({(score/total*100 if total > 0 else 0):.0f}%)</p>
+        </div>
+        <div class="page-actions">
+            <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn btn-primary">📷 Escanear próximo cartão</a>
+            <a href="/aplicacoes/{aplicacao_id}/aluno/{aluno_id}" class="btn">Ver detalhe da prova deste aluno</a>
+            <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar para a aplicação</a>
+        </div>
+    """
+    return render_page("Cartão registrado", content, active="aplicacoes")
+
+
+# ==========================================
+#  FASE R1: GESTÃO COMPLETA DE TURMAS E ALUNOS
+# ==========================================
+
+@app.post("/turmas/{turma_id}/deletar")
+def deletar_turma(request: Request, turma_id: int):
+    """Cascade delete. Restrito a admin."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+
+    # Aplicações desta turma → suas respostas, entregas, e a aplicação
+    aplicacoes_ids = [r["id"] for r in conn.execute("SELECT id FROM aplicacoes WHERE turma_id = ?", (turma_id,)).fetchall()]
+    for apl_id in aplicacoes_ids:
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ?", (apl_id,))
+        conn.execute("DELETE FROM entregas WHERE aplicacao_id = ?", (apl_id,))
+        conn.execute("DELETE FROM aplicacoes WHERE id = ?", (apl_id,))
+
+    # Alunos atualmente nesta turma → suas respostas/entregas em quaisquer aplicações + o aluno
+    alunos_ids = [r["id"] for r in conn.execute("SELECT id FROM alunos WHERE turma_id = ?", (turma_id,)).fetchall()]
+    for aluno_id in alunos_ids:
+        conn.execute("DELETE FROM respostas WHERE aluno_id = ?", (aluno_id,))
+        conn.execute("DELETE FROM entregas WHERE aluno_id = ?", (aluno_id,))
+        conn.execute("DELETE FROM alunos WHERE id = ?", (aluno_id,))
+
+    conn.execute("DELETE FROM turmas WHERE id = ?", (turma_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/turmas", status_code=303)
+
+
+@app.get("/alunos/{aluno_id}/editar", response_class=HTMLResponse)
+def form_editar_aluno(request: Request, aluno_id: int):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT a.*, t.nome AS turma_nome, t.id AS turma_id_atual FROM alunos a JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    conn.close()
+
+    racas_opts = '<option value="">Não informada</option>' + "".join(
+        f'<option value="{r}"{(" selected" if aluno["raca"] == r else "")}>{r}</option>' for r in RACAS
+    )
+
+    content = f"""
+        <div class="page-header">
+            <h1>Editar aluno</h1>
+            <p class="subtitle">Turma atual: <strong>{aluno["turma_nome"]}</strong> · Código único: <code>{aluno["codigo_unico"]}</code> (imutável)</p>
+        </div>
+        <div class="tip">O <strong>código único</strong> não pode ser alterado — ele é usado nos QR Codes já distribuídos. Para mudar a turma, use a opção <strong>Transferir</strong>.</div>
+
+        <form action="/alunos/{aluno_id}/editar" method="post">
+            <div style="display:grid; grid-template-columns: 100px 1fr; gap:12px;">
+                <label>Número<input type="number" name="numero" value="{aluno["numero"] or ''}" min="1"></label>
+                <label>Nome<input type="text" name="nome" required value="{aluno["nome"]}"></label>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px;">
+                <label>Raça<select name="raca">{racas_opts}</select></label>
+                <label>E-mail<input type="email" name="email" value="{aluno["email"] or ''}"></label>
+                <label>Data de nascimento<input type="date" name="data_nascimento" value="{aluno["data_nascimento"] or ''}"></label>
+            </div>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar alterações</button>
+                <a href="/turmas/{aluno['turma_id_atual']}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Editar aluno", content, active="turmas")
+
+
+@app.post("/alunos/{aluno_id}/editar")
+def atualizar_aluno(
+    aluno_id: int,
+    nome: str = Form(...),
+    numero: Optional[int] = Form(None),
+    raca: str = Form(""),
+    email: str = Form(""),
+    data_nascimento: str = Form(""),
+):
+    conn = get_db()
+    aluno = conn.execute("SELECT turma_id FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    conn.execute(
+        "UPDATE alunos SET nome = ?, numero = ?, raca = ?, email = ?, data_nascimento = ? WHERE id = ?",
+        (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None, aluno_id),
+    )
+    conn.commit()
+    turma_id = aluno["turma_id"]
+    conn.close()
+    return RedirectResponse(f"/turmas/{turma_id}", status_code=303)
+
+
+@app.post("/alunos/{aluno_id}/deletar", response_class=HTMLResponse)
+def deletar_aluno(request: Request, aluno_id: int, forcar: int = 0):
+    """Por padrão mostra confirmação se há entregas. Com ?forcar=1 apaga em cascade.
+    Restrito a admin (turmas/alunos são da escola)."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT turma_id, nome FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    turma_id = aluno["turma_id"]
+
+    n_entregas = conn.execute("SELECT COUNT(*) AS c FROM entregas WHERE aluno_id = ?", (aluno_id,)).fetchone()["c"]
+
+    if n_entregas > 0 and not forcar:
+        # Mostra tela de confirmação com opção de forçar
+        n_respostas = conn.execute("SELECT COUNT(*) AS c FROM respostas WHERE aluno_id = ?", (aluno_id,)).fetchone()["c"]
+        conn.close()
+        content = f"""
+            <div class="page-header"><h1>⚠️ Confirmação necessária</h1></div>
+
+            <div style="border:1px solid var(--orange); background:var(--orange-bg); padding:16px; border-radius:6px; color:var(--orange);">
+                <p style="margin:0;"><strong>{aluno["nome"]}</strong> tem <strong>{n_entregas} entrega(s)</strong> e <strong>{n_respostas} resposta(s)</strong> registradas no histórico.</p>
+            </div>
+
+            <div style="margin-top:18px;">
+                <h3 style="margin-bottom:8px;">Opções:</h3>
+
+                <div style="border:1px solid var(--border); padding:14px; border-radius:6px; margin-bottom:10px;">
+                    <strong>Transferir para outra turma</strong> (recomendado se ele só mudou de turma)
+                    <p style="margin:6px 0 10px 0; font-size:13px; color:var(--text-muted);">Preserva todo o histórico. Você pode criar uma turma "Inativos 2026" e mover ele pra lá.</p>
+                    <a href="/alunos/{aluno_id}/transferir" class="btn">→ Ir para transferência</a>
+                </div>
+
+                <div style="border:1px solid var(--red); padding:14px; border-radius:6px; background:var(--red-bg); color:var(--red);">
+                    <strong>Excluir definitivamente</strong> (use quando o aluno saiu da escola e o histórico não importa mais)
+                    <p style="margin:6px 0 10px 0; font-size:13px;">
+                        ⚠ Esta ação <strong>apaga permanentemente</strong>:<br>
+                        • O cadastro do aluno<br>
+                        • Todas as {n_respostas} respostas em provas/tarefas<br>
+                        • Todas as {n_entregas} entregas registradas<br>
+                        • As notas calculadas dessas aplicações deixarão de existir<br>
+                        <strong>Não há como recuperar.</strong>
+                    </p>
+                    <form action="/alunos/{aluno_id}/deletar?forcar=1" method="post" style="display:inline; margin:0;"
+                          onsubmit="return confirm('CONFIRMAÇÃO FINAL\\n\\nVocê está prestes a EXCLUIR PERMANENTEMENTE o aluno {aluno["nome"]} e TODOS os seus dados ({n_entregas} entregas, {n_respostas} respostas).\\n\\nEsta ação NÃO PODE ser desfeita.\\n\\nDeseja prosseguir?');">
+                        <button type="submit" class="btn" style="background:var(--red); color:white; border-color:var(--red);">
+                            Sim, excluir tudo definitivamente
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="page-actions" style="margin-top:18px;">
+                <a href="/turmas/{turma_id}" class="btn">← Voltar para a turma</a>
+            </div>
+        """
+        return render_page("Confirmar exclusão", content, active="turmas")
+
+    # Excluir em cascade (sem entregas OU forçado pelo botão de confirmação)
+    conn.execute("DELETE FROM respostas WHERE aluno_id = ?", (aluno_id,))
+    conn.execute("DELETE FROM entregas WHERE aluno_id = ?", (aluno_id,))
+    conn.execute("DELETE FROM alunos WHERE id = ?", (aluno_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/turmas/{turma_id}", status_code=303)
+
+
+@app.get("/alunos/{aluno_id}/transferir", response_class=HTMLResponse)
+def form_transferir_aluno(request: Request, aluno_id: int):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT a.*, t.nome AS turma_nome_atual FROM alunos a JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    outras_turmas = conn.execute("SELECT * FROM turmas WHERE id != ? ORDER BY ano_letivo DESC, nome", (aluno["turma_id"],)).fetchall()
+    conn.close()
+
+    if not outras_turmas:
+        content = f"""
+            <div class="page-header"><h1>Transferir {aluno["nome"]}</h1></div>
+            <div class="empty">
+                <p>Não há outra turma cadastrada para transferir. Crie uma turma de destino primeiro.</p>
+                <a href="/turmas/nova" class="btn btn-primary">Criar nova turma</a>
+                <a href="/turmas/{aluno['turma_id']}" class="btn">← Voltar</a>
+            </div>
+        """
+        return render_page("Transferir aluno", content, active="turmas")
+
+    options = "".join(
+        f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in outras_turmas
+    )
+
+    content = f"""
+        <div class="page-header">
+            <h1>Transferir aluno</h1>
+            <p class="subtitle"><strong>{aluno["nome"]}</strong> · Turma atual: {aluno["turma_nome_atual"]}</p>
+        </div>
+        <div class="tip">
+            Após a transferência:
+            <ul style="margin:8px 0 0 18px;">
+                <li>O aluno aparece na lista da nova turma</li>
+                <li>Aplicações já feitas na turma anterior continuam mostrando suas notas e respostas</li>
+                <li>O <code>código único</code> e os QR Codes já impressos continuam válidos</li>
+                <li>Esta ação pode ser desfeita transferindo de volta a qualquer momento</li>
+            </ul>
+        </div>
+        <form action="/alunos/{aluno_id}/transferir" method="post" style="margin-top:24px;">
+            <label>Nova turma<select name="nova_turma_id" required>{options}</select></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Transferir</button>
+                <a href="/turmas/{aluno['turma_id']}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Transferir aluno", content, active="turmas")
+
+
+@app.post("/alunos/{aluno_id}/transferir")
+def transferir_aluno(request: Request, aluno_id: int, nova_turma_id: int = Form(...)):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT turma_id FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    turma_destino = conn.execute("SELECT id FROM turmas WHERE id = ?", (nova_turma_id,)).fetchone()
+    if not aluno or not turma_destino:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    conn.execute("UPDATE alunos SET turma_id = ? WHERE id = ?", (nova_turma_id, aluno_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/turmas/{nova_turma_id}", status_code=303)
+
+
+# ==========================================
+#  FASE R3: IMPORTAÇÃO DE HABILIDADES BNCC
+# ==========================================
+
+from fastapi.responses import JSONResponse
+
+
+# Mapa de nome de disciplina (em pt-BR, normalizado) → 2 letras do código BNCC.
+# A posição 5-6 do código identifica o componente curricular:
+# EF06MA01 → MA (Matemática), EF06LP01 → LP (Língua Portuguesa), etc.
+BNCC_COMPONENTE_POR_DISCIPLINA = {
+    "matematica": "MA",
+    "lingua portuguesa": "LP", "portugues": "LP",
+    "ciencias": "CI",
+    "historia": "HI",
+    "geografia": "GE",
+    "arte": "AR", "artes": "AR",
+    "educacao fisica": "EF", "ed fisica": "EF",
+    "ingles": "LI", "lingua inglesa": "LI",
+    "ensino religioso": "ER", "religiao": "ER",
+    "computacao": "CO",
+}
+
+
+def _bncc_componente_de_disciplina(nome):
+    """Recebe nome de disciplina (livre) e retorna o código BNCC do componente, ou None."""
+    if not nome:
+        return None
+    # Normaliza: remove acentos e lowercase
+    import unicodedata
+    norm = unicodedata.normalize("NFD", nome).encode("ASCII", "ignore").decode("ASCII").strip().lower()
+    return BNCC_COMPONENTE_POR_DISCIPLINA.get(norm)
+
+
+@app.get("/habilidades/buscar")
+def buscar_habilidades_json(codigos: str = "", q: str = "", disciplina_id: Optional[int] = None):
+    """Endpoint JSON usado pelo JS na criação/edição de questão.
+    Dois modos:
+    - ?codigos=EF06MA01,EF06MA02 → retorna {codigo: descricao} pra validar códigos digitados
+    - ?q=palavra&disciplina_id=N → retorna {"results": [...]} com até 30 habilidades cuja descrição
+      contém a palavra. Se disciplina_id for fornecido, filtra pelo componente BNCC mapeado.
+    """
+    conn = get_db()
+
+    # Modo 1: lookup direto por códigos
+    if codigos.strip():
+        codigos_list = [c.strip().upper() for c in codigos.split(",") if c.strip()]
+        if not codigos_list:
+            conn.close()
+            return JSONResponse({})
+        placeholders = ",".join("?" * len(codigos_list))
+        rows = conn.execute(
+            f"SELECT codigo, descricao FROM habilidades_bncc WHERE codigo IN ({placeholders})",
+            codigos_list
+        ).fetchall()
+        conn.close()
+        return JSONResponse({r["codigo"]: (r["descricao"] or "") for r in rows})
+
+    # Modo 2: busca por palavra (opcionalmente filtrada por disciplina)
+    if q.strip():
+        sql = "SELECT codigo, descricao FROM habilidades_bncc WHERE descricao LIKE ? AND descricao IS NOT NULL"
+        params = [f"%{q.strip()}%"]
+
+        if disciplina_id:
+            disc = conn.execute("SELECT nome FROM disciplinas WHERE id = ?", (disciplina_id,)).fetchone()
+            if disc:
+                comp = _bncc_componente_de_disciplina(disc["nome"])
+                if comp:
+                    # Filtra códigos com componente igual (posição 5-6 do código)
+                    sql += " AND substr(codigo, 5, 2) = ?"
+                    params.append(comp)
+
+        sql += " ORDER BY codigo LIMIT 30"
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return JSONResponse({
+            "results": [{"codigo": r["codigo"], "descricao": r["descricao"]} for r in rows]
+        })
+
+    conn.close()
+    return JSONResponse({})
+
+
+@app.get("/habilidades/importar", response_class=HTMLResponse)
+def form_importar_habilidades():
+    content = """
+        <div class="page-header">
+            <h1>Importar habilidades BNCC</h1>
+            <p class="subtitle">Sobe a planilha oficial do MEC (ou um Excel/CSV próprio) e o sistema cadastra/atualiza tudo.</p>
+            <div class="page-actions"><a href="/habilidades" class="btn">← Voltar</a></div>
+        </div>
+
+        <div class="tip" style="background:var(--accent-bg); color:var(--accent); border-color:var(--accent);">
+            <strong>Formatos aceitos:</strong>
+            <ul style="margin:8px 0 0 18px; line-height:1.6; color:var(--accent);">
+                <li><strong>Planilha oficial do MEC</strong> (downloadbncc.mec.gov.br) — basta ter uma coluna chamada <code>Habilidade</code> no formato <code>(CODIGO) descrição</code>. As outras colunas (Disciplina, Ano, etc.) são ignoradas.</li>
+                <li><strong>Excel/CSV personalizado</strong> — deve ter colunas <code>codigo</code> e <code>descricao</code> (nessa grafia).</li>
+            </ul>
+        </div>
+
+        <div class="tip" style="background:var(--orange-bg); color:var(--orange); border-color:var(--orange);">
+            <strong>Comportamento da importação:</strong>
+            <ul style="margin:8px 0 0 18px; line-height:1.6; color:var(--orange);">
+                <li>Códigos novos → <strong>cadastrados</strong></li>
+                <li>Códigos já existentes <strong>sem descrição</strong> → descrição é <strong>preenchida</strong></li>
+                <li>Códigos já existentes <strong>com descrição</strong> → mantida (não sobrescreve)</li>
+                <li>Vínculos com questões já cadastradas → preservados</li>
+            </ul>
+        </div>
+
+        <form action="/habilidades/importar" method="post" enctype="multipart/form-data" style="margin-top:20px;">
+            <label>Arquivo<input type="file" name="arquivo" accept=".xlsx,.xls,.csv" required></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Processar arquivo</button>
+                <a href="/habilidades" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Importar BNCC", content, active="habilidades")
+
+
+def _extrair_habilidades_de_xlsx(file_bytes):
+    """Detecta automaticamente o formato da planilha e extrai pares (codigo, descricao).
+    Suporta:
+    1. Planilha do MEC: coluna 'Habilidade' com formato '(CODIGO) descrição'
+    2. Planilha custom: colunas 'codigo' + 'descricao'
+    """
+    import io
+    wb = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    sheet = wb[wb.sheetnames[0]]
+
+    rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return [], "Planilha vazia."
+
+    # Procurar a linha de cabeçalho (pode estar em row 0 ou row 1+)
+    header_row_idx = None
+    header_cols = {}
+    for idx, row in enumerate(rows[:5]):  # busca nas 5 primeiras linhas
+        cells_lower = [(str(c).strip().lower() if c is not None else "") for c in row]
+        # Formato MEC: coluna "habilidade"
+        if "habilidade" in cells_lower:
+            header_row_idx = idx
+            header_cols["habilidade"] = cells_lower.index("habilidade")
+            break
+        # Formato custom: "codigo" + "descricao"
+        elif "codigo" in cells_lower or "código" in cells_lower:
+            header_row_idx = idx
+            for nome in ("codigo", "código"):
+                if nome in cells_lower:
+                    header_cols["codigo"] = cells_lower.index(nome)
+                    break
+            for nome in ("descricao", "descrição", "description"):
+                if nome in cells_lower:
+                    header_cols["descricao"] = cells_lower.index(nome)
+                    break
+            break
+
+    if header_row_idx is None:
+        return [], 'Não encontrei a coluna "Habilidade" (formato MEC) nem "codigo" (formato customizado) nas primeiras linhas. Confira o cabeçalho.'
+
+    pad = re.compile(r'^\(([A-Z]{2}\d{2,3}[A-Z]{2,3}\d{2,3})\)\s*(.+)$', re.DOTALL)
+    encontrados = []
+    for row in rows[header_row_idx + 1:]:
+        if "habilidade" in header_cols:
+            cell = row[header_cols["habilidade"]] if header_cols["habilidade"] < len(row) else None
+            if cell is None:
+                continue
+            txt = str(cell).strip()
+            if not txt:
+                continue
+            m = pad.match(txt)
+            if not m:
+                continue
+            codigo = m.group(1).strip().upper()
+            desc = m.group(2).strip().replace("\n", " ")
+            while "  " in desc:
+                desc = desc.replace("  ", " ")
+            encontrados.append((codigo, desc))
+        else:
+            codigo_idx = header_cols.get("codigo")
+            desc_idx = header_cols.get("descricao")
+            if codigo_idx is None:
+                continue
+            codigo_val = row[codigo_idx] if codigo_idx < len(row) else None
+            if not codigo_val:
+                continue
+            codigo = str(codigo_val).strip().upper()
+            if not re.match(r'^[A-Z]{2}\d{2,3}[A-Z]{2,3}\d{2,3}$', codigo):
+                continue  # código inválido, pula
+            desc = ""
+            if desc_idx is not None and desc_idx < len(row) and row[desc_idx] is not None:
+                desc = str(row[desc_idx]).strip()
+            encontrados.append((codigo, desc))
+
+    return encontrados, None
+
+
+@app.post("/habilidades/importar", response_class=HTMLResponse)
+async def processar_importacao_habilidades(arquivo: UploadFile = File(...)):
+    if not arquivo or not arquivo.filename:
+        return HTMLResponse(render_page("Erro", '<div class="empty"><p>Nenhum arquivo enviado.</p><a href="/habilidades/importar" class="btn">← Voltar</a></div>', active="habilidades"))
+
+    file_bytes = await arquivo.read()
+    if not file_bytes:
+        return HTMLResponse(render_page("Erro", '<div class="empty"><p>Arquivo vazio.</p><a href="/habilidades/importar" class="btn">← Voltar</a></div>', active="habilidades"))
+
+    nome = arquivo.filename.lower()
+    if nome.endswith(".csv"):
+        # Suporte simples a CSV: converter pra lista (codigo, descricao)
+        import csv, io
+        try:
+            text = file_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = file_bytes.decode("latin-1")
+        reader = csv.reader(io.StringIO(text))
+        rows = list(reader)
+        if not rows:
+            return HTMLResponse(render_page("Erro", '<div class="empty"><p>CSV vazio.</p><a href="/habilidades/importar" class="btn">← Voltar</a></div>', active="habilidades"))
+        header = [c.strip().lower() for c in rows[0]]
+        if "codigo" not in header and "código" not in header:
+            return HTMLResponse(render_page("Erro", '<div class="empty"><p>CSV precisa ter coluna "codigo".</p><a href="/habilidades/importar" class="btn">← Voltar</a></div>', active="habilidades"))
+        codigo_idx = header.index("codigo") if "codigo" in header else header.index("código")
+        desc_idx = -1
+        for nome_col in ("descricao", "descrição", "description"):
+            if nome_col in header:
+                desc_idx = header.index(nome_col)
+                break
+        encontrados = []
+        for row in rows[1:]:
+            if codigo_idx >= len(row): continue
+            codigo = (row[codigo_idx] or "").strip().upper()
+            if not re.match(r'^[A-Z]{2}\d{2,3}[A-Z]{2,3}\d{2,3}$', codigo):
+                continue
+            desc = (row[desc_idx].strip() if desc_idx >= 0 and desc_idx < len(row) else "")
+            encontrados.append((codigo, desc))
+        erro = None
+    else:
+        encontrados, erro = _extrair_habilidades_de_xlsx(file_bytes)
+
+    if erro:
+        return HTMLResponse(render_page("Erro", f'<div class="empty"><p>{erro}</p><a href="/habilidades/importar" class="btn">← Tentar outro arquivo</a></div>', active="habilidades"))
+
+    if not encontrados:
+        return HTMLResponse(render_page("Sem dados", '<div class="empty"><p>O arquivo foi lido mas nenhum código BNCC válido foi encontrado. Verifique se as células no formato <code>(CODIGO) descrição</code> estão preenchidas.</p><a href="/habilidades/importar" class="btn">← Voltar</a></div>', active="habilidades"))
+
+    # UPSERT no banco
+    conn = get_db()
+    novas, atualizadas, mantidas = 0, 0, 0
+    for codigo, desc in encontrados:
+        existing = conn.execute("SELECT id, descricao FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+        if existing:
+            cur_desc = (existing["descricao"] or "").strip()
+            if not cur_desc and desc:
+                conn.execute("UPDATE habilidades_bncc SET descricao = ? WHERE id = ?", (desc, existing["id"]))
+                atualizadas += 1
+            else:
+                mantidas += 1
+        else:
+            conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, desc or None))
+            novas += 1
+    conn.commit()
+    total_apos = conn.execute("SELECT COUNT(*) AS c FROM habilidades_bncc").fetchone()["c"]
+    conn.close()
+
+    # Amostras
+    amostras = ""
+    for codigo, desc in encontrados[:5]:
+        amostras += f'<li><strong>{codigo}</strong>: {desc[:140]}{"..." if len(desc)>140 else ""}</li>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>✅ Importação concluída</h1>
+            <p class="subtitle">Arquivo <code>{arquivo.filename}</code> processado com sucesso.</p>
+        </div>
+
+        <div class="metric-grid">
+            <div class="metric"><div class="metric-label">Lidas do arquivo</div><div class="metric-value">{len(encontrados)}</div></div>
+            <div class="metric"><div class="metric-label">Novas cadastradas</div><div class="metric-value" style="color:var(--green);">{novas}</div></div>
+            <div class="metric"><div class="metric-label">Atualizadas (descrição)</div><div class="metric-value" style="color:var(--orange);">{atualizadas}</div></div>
+            <div class="metric"><div class="metric-label">Já existiam (mantidas)</div><div class="metric-value" style="color:var(--text-muted);">{mantidas}</div></div>
+        </div>
+
+        <div class="tip" style="margin-top:18px;">
+            Total no banco agora: <strong>{total_apos}</strong> habilidades.
+        </div>
+
+        <h3 style="margin-top:24px;">Primeiras 5 lidas (amostra):</h3>
+        <ul style="line-height:1.6;">{amostras}</ul>
+
+        <div class="page-actions" style="margin-top:18px;">
+            <a href="/habilidades" class="btn btn-primary">Ver catálogo</a>
+            <a href="/habilidades/importar" class="btn">Importar outro arquivo</a>
+        </div>
+    """
+    return render_page("Importação concluída", content, active="habilidades")
+
+
+# ==========================================
+#  FASE C3: OMR EM LOTE
+# ==========================================
+
+def _extrair_imagens_de_arquivo(file_bytes: bytes, filename: str) -> list:
+    """Recebe bytes de um arquivo (imagem ou PDF) e retorna lista de (nome_exibicao, bytes_jpeg).
+    OTIMIZADO (28/07/2026): converte o PDF PÁGINA POR PÁGINA em vez de converter
+    todas de uma vez com convert_from_bytes() sem limite de páginas. Antes, um PDF
+    de 11 páginas chegava a usar ~845MB de RAM só nessa etapa (medido) — todas as
+    páginas decodificadas a 300 DPI ao mesmo tempo — o que é inviável numa VM
+    pequena (e2-micro/e2-small). Processando 1 página por vez (first_page=last_page=i)
+    e descartando cada uma antes de converter a próxima, o pico medido caiu pra ~100MB
+    (~88% menor), com o MESMO resultado pixel a pixel (testado e confirmado)."""
+    fname_lower = (filename or "").lower()
+    if fname_lower.endswith(".pdf"):
+        try:
+            from pdf2image import convert_from_bytes, pdfinfo_from_bytes
+            import io as _io
+            info = pdfinfo_from_bytes(file_bytes)
+            n_paginas = info.get("Pages", 1)
+            resultado = []
+            for i in range(1, n_paginas + 1):
+                pagina = convert_from_bytes(file_bytes, dpi=300, fmt="jpeg", first_page=i, last_page=i)[0]
+                buf = _io.BytesIO()
+                pagina.save(buf, format="JPEG", quality=95)
+                resultado.append((f"{filename} — pág. {i}", buf.getvalue()))
+                del pagina  # libera a página da memória antes de converter a próxima
+            return resultado
+        except ImportError:
+            return [(filename, None)]
+        except Exception:
+            return [(filename, None)]
+    else:
+        return [(filename, file_bytes)]
+
+
+@app.post("/aplicacoes/{aplicacao_id}/escanear-lote", response_class=HTMLResponse)
+async def processar_escaneamento_lote(aplicacao_id: int, fotos: List[UploadFile] = File(...)):
+    """Recebe N fotos ou PDF multipágina e enfileira o processamento em segundo plano
+    (não trava o servidor pros outros professores). Redireciona pra tela de progresso."""
+    if not fotos:
+        return HTMLResponse(render_page("Erro", '<div class="empty"><p>Nenhum arquivo enviado.</p></div>', active="aplicacoes"))
+
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    questoes = conn.execute(
+        "SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem",
+        (apl["prova_id"],)
+    ).fetchall()
+    n_questoes = len(questoes)
+    questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+    conn.close()
+
+    arquivos_expandidos = []
+    for foto in fotos:
+        raw = await foto.read()
+        if not raw:
+            arquivos_expandidos.append((foto.filename or "sem nome", None))
+            continue
+        arquivos_expandidos.extend(_extrair_imagens_de_arquivo(raw, foto.filename or ""))
+
+    if not arquivos_expandidos:
+        return HTMLResponse(render_page("Lote vazio",
+            '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
+
+    lote_id = _novo_lote_escaneamento("prova", {
+        "aplicacao_id": aplicacao_id,
+        "n_questoes": n_questoes,
+        "questoes_info": questoes_info,
+        "titulo_exibicao": f"{apl['prova_titulo']} · {apl['turma_nome']}",
+        "revisar_url": "",  # preenchido abaixo, depois de saber o lote_id
+    }, arquivos_expandidos)
+    FILAS_ESCANEAMENTO[lote_id]["contexto"]["revisar_url"] = f"/aplicacoes/{aplicacao_id}/escanear-lote/{lote_id}/revisar"
+
+    return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+
+@app.get("/aplicacoes/{aplicacao_id}/escanear-lote/{lote_id}/revisar", response_class=HTMLResponse)
+async def revisar_lote_escaneado(aplicacao_id: int, lote_id: str):
+    """Depois que o lote terminou de processar em segundo plano, mostra a mesma
+    tela de revisão de sempre (editar/confirmar antes de salvar)."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    job = FILAS_ESCANEAMENTO.get(lote_id)
+    if not job or not job["concluido"]:
+        return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    n_questoes = job["contexto"]["n_questoes"]
+    questoes_info = job["contexto"]["questoes_info"]
+
+    cards_html_parts = []
+    n_ok = 0
+    n_warn = 0
+    n_erro = 0
+    alunos_ja_no_lote = set()
+
+    for item in job["itens"]:
+        idx = item["idx"]
+        nome_exib = item["filename"]
+        result = item["resultado"]
+
+        if not result or not result.get("success"):
+            n_erro += 1
+            cards_html_parts.append(_render_card_erro(idx, nome_exib, (result or {}).get("error", "Erro desconhecido")))
+            continue
+
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ? AND turma_id = ?",
+                             (result["aluno_id"], apl["turma_id"])).fetchone()
+        if not aluno:
+            n_erro += 1
+            cards_html_parts.append(_render_card_erro(
+                idx, nome_exib,
+                f"QR aponta para aluno {result['aluno_id']} que NÃO pertence à turma {apl['turma_nome']}.",
+                preview_b64=result.get("preview_base64")
+            ))
+            continue
+
+        if result["aplicacao_id_qr"] != aplicacao_id:
+            n_erro += 1
+            cards_html_parts.append(_render_card_erro(
+                idx, nome_exib,
+                f"Cartão de OUTRA aplicação (id {result['aplicacao_id_qr']}).",
+                preview_b64=result.get("preview_base64")
+            ))
+            continue
+
+        ja_entregue = conn.execute(
+            "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+            (aplicacao_id, result["aluno_id"])
+        ).fetchone()
+        duplicata_lote = result["aluno_id"] in alunos_ja_no_lote
+        alunos_ja_no_lote.add(result["aluno_id"])
+
+        if result["warnings"] or duplicata_lote:
+            n_warn += 1
+        else:
+            n_ok += 1
+
+        cards_html_parts.append(_render_card_revisao_lote(
+            idx, nome_exib, aluno, result, n_questoes,
+            ja_entregue=ja_entregue, duplicata_lote=duplicata_lote,
+            questoes_info=questoes_info
+        ))
+
+    conn.close()
+    del FILAS_ESCANEAMENTO[lote_id]  # lote já foi consumido, libera a memória
+
+    if not cards_html_parts:
+        return HTMLResponse(render_page("Lote vazio",
+            '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
+
+    resumo = f"""
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{job["total"]}</div></div>
+            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
+            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
+        </div>
+    """
+
+    legenda = """
+        <div class="tip" style="font-size:12px;">
+            <strong>Como usar:</strong>
+            Cartões em <strong style="color:var(--red);">vermelho</strong> têm questão em branco ou marcação ambígua/dupla — confira com atenção. Cartões em <strong style="color:var(--orange);">laranja</strong> têm avisos mais leves. Cartões cinza (erro) NÃO serão salvos. Clique no nome pra expandir e ver a foto + corrigir. Ao final, clique em <strong>"Salvar todos confirmados"</strong>.
+        </div>
+    """
+
+    cards_html = "".join(cards_html_parts)
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Revisão do lote</h1>
+            <p class="subtitle">{apl["prova_titulo"]} · {apl["turma_nome"]} ({apl["ano_letivo"]})</p>
+            <div class="page-actions"><a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">← Voltar para escanear</a></div>
+        </div>
+
+        {resumo}
+        {legenda}
+
+        <form action="/aplicacoes/{aplicacao_id}/escanear-lote/confirmar" method="post">
+            <input type="hidden" name="n_questoes" value="{n_questoes}">
+            <div style="margin-bottom:10px; display:flex; gap:8px;">
+                <button type="button" id="btn-marcar-todos" class="btn" style="font-size:12px;">☑ Marcar todos</button>
+                <button type="button" id="btn-desmarcar-todos" class="btn" style="font-size:12px;">☐ Desmarcar todos</button>
+            </div>
+            {cards_html}
+            <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
+                <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
+                <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">📷 Escanear mais</a>
+                <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar</a>
+                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">Cards desmarcados NÃO serão salvos. Cards com erro são puramente informativos.</span>
+            </div>
+        </form>
+
+        <script>
+        document.getElementById('btn-marcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = true);
+        }});
+        document.getElementById('btn-desmarcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = false);
+        }});
+        // Expansão dos cards de revisão
+        document.addEventListener('click', e => {{
+            const btn = e.target.closest('[data-toggle-card]');
+            if (!btn) return;
+            const card = btn.closest('.lote-card');
+            const body = card.querySelector('.lote-card-body');
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'block';
+            btn.textContent = open ? '▼ Expandir' : '▲ Recolher';
+        }});
+        </script>
+    """
+    return render_page("Revisão do lote", content, active="aplicacoes")
+
+
+
+
+def _render_card_erro(idx, filename, mensagem_erro, preview_b64=None):
+    """Card visual de uma foto que falhou no processamento. NÃO inclui no form (sem fields)."""
+    nome_seguro = (filename or f"foto_{idx+1}").replace("<", "&lt;")
+    preview_img = ""
+    if preview_b64:
+        preview_img = f'<img src="data:image/jpeg;base64,{preview_b64}" style="max-width:200px; max-height:150px; border:1px solid var(--border); margin-top:8px; border-radius:4px;">'
+    return f"""
+    <div class="lote-card" style="border:1px solid var(--red); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--red-bg); color:var(--red);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <strong style="color:var(--red);">✗ Foto {idx+1}: {nome_seguro}</strong>
+                <div style="font-size:13px; color:var(--red); margin-top:4px;">{mensagem_erro}</div>
+                {preview_img}
+            </div>
+            <span style="font-size:12px; color:var(--red); flex-shrink:0;">Não será salvo</span>
+        </div>
+    </div>
+    """
+
+
+def _render_card_revisao_lote(idx, filename, aluno, result, n_questoes, ja_entregue=None, duplicata_lote=False, questoes_info=None):
+    """Card visual de uma foto lida com sucesso. Inclui form fields editáveis.
+    questoes_info: lista [{id, num, tipo, vf_count, assoc_a_count, assoc_b_count}] pra renderizar conforme tipo."""
+    nome_seguro = (filename or f"foto_{idx+1}").replace("<", "&lt;")
+    aluno_id = result["aluno_id"]
+    warnings_lista = result.get("warnings", []) or []
+
+    # Detecta questão em branco (considerando os 3 tipos) e marcação ambígua/dupla
+    answers_check = result["answers"]
+    info_by_num_check = {i["num"]: i for i in (questoes_info or [])}
+    tem_branco = False
+    for q_num in range(1, n_questoes + 1):
+        info_c = info_by_num_check.get(q_num, {"tipo": "multipla_escolha"})
+        tipo_c = info_c.get("tipo", "multipla_escolha")
+        val = answers_check.get(q_num)
+        if tipo_c == "multipla_escolha":
+            if val is None:
+                tem_branco = True
+                break
+        elif tipo_c in ("vf", "associacao"):
+            val_dict = val if isinstance(val, dict) else {}
+            n_sub = info_c.get("vf_count", 0) if tipo_c == "vf" else info_c.get("assoc_a_count", 0)
+            if any(not val_dict.get(str(k)) for k in range(n_sub)):
+                tem_branco = True
+                break
+    tem_dupla = any("marcação ambígua" in w or "dupla marcação" in w for w in warnings_lista)
+
+    tem_avisos = bool(warnings_lista) or duplicata_lote or ja_entregue
+    if tem_branco or tem_dupla:
+        border_color = "var(--red)"
+        bg = "var(--red-bg)"
+        status_icon = "✗"
+        status_color = "var(--red)"
+    elif tem_avisos:
+        border_color = "var(--orange)"
+        bg = "var(--orange-bg)"
+        status_icon = "⚠"
+        status_color = "var(--orange)"
+    else:
+        border_color = "var(--green)"
+        bg = "var(--green-bg)"
+        status_icon = "✓"
+        status_color = "var(--green)"
+    body_default_display = "none"  # sempre colapsado por padrão
+    toggle_label = "▼ Expandir"
+
+    # Avisos
+    avisos = []
+    if duplicata_lote:
+        avisos.append("⚠ Foto repetida no lote: já apareceu um cartão deste aluno antes (a última marcação prevalece).")
+    if ja_entregue:
+        avisos.append(f"⚠ Aluno já tem entrega registrada ({ja_entregue['finalizada_em']}). Confirmar irá sobrescrever as respostas anteriores.")
+    avisos.extend(warnings_lista)
+    avisos_html = ""
+    if avisos:
+        items = "".join(f"<li>{w}</li>" for w in avisos)
+        avisos_html = f'<ul style="margin:8px 0 0 18px; font-size:12px; color:var(--orange);">{items}</ul>'
+
+    # Grid de respostas editáveis — adapta conforme tipo
+    answers = result["answers"]
+    info_by_num = {i["num"]: i for i in (questoes_info or [])}
+    import re as _re_warn2
+    questoes_com_aviso = set()
+    for w in warnings_lista:
+        m = _re_warn2.match(r"Q(\d+)", w)
+        if m:
+            questoes_com_aviso.add(int(m.group(1)))
+    tabela_html = ""
+    for q_num in range(1, n_questoes + 1):
+        info = info_by_num.get(q_num, {"tipo": "multipla_escolha"})
+        tipo_q = info.get("tipo", "multipla_escolha")
+        detected = answers.get(q_num)
+
+        if tipo_q == "multipla_escolha":
+            if detected is None:
+                row_bg = ' style="background:var(--red-bg);"'
+            elif q_num in questoes_com_aviso:
+                row_bg = ' style="background:var(--orange-bg);"'
+            else:
+                row_bg = ""
+            cells = ""
+            for letra in ["A", "B", "C", "D"]:
+                checked = " checked" if detected == letra else ""
+                cells += f'<td style="text-align:center; padding:2px;"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value="{letra}"{checked} style="width:auto; margin:0;"> {letra}</label></td>'
+            em_branco_checked = " checked" if detected is None else ""
+            cells += f'<td style="text-align:center; padding:2px; background:var(--bg-subtle);"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value=""{em_branco_checked} style="width:auto; margin:0;"> ∅</label></td>'
+            tabela_html += f'<tr{row_bg}><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
+        elif tipo_q == "vf":
+            n_afirms = info.get("vf_count", 0)
+            detected_dict = detected if isinstance(detected, dict) else {}
+            sub_rows = ""
+            for k in range(n_afirms):
+                val = detected_dict.get(str(k))
+                ck_v = " checked" if val == "V" else ""
+                ck_f = " checked" if val == "F" else ""
+                ck_n = " checked" if not val else ""
+                sub_rows += (
+                    f'<tr><td style="padding:3px 6px; font-weight:600; color:var(--text-muted);">Q{q_num}.{k+1}</td>'
+                    f'<td colspan="5" style="padding:2px;">'
+                    f'<label style="margin-right:14px;"><input type="radio" name="card_{idx}_q_{q_num}_vf_{k}" value="V"{ck_v} style="width:auto; margin:0 3px 0 0;">V</label>'
+                    f'<label style="margin-right:14px;"><input type="radio" name="card_{idx}_q_{q_num}_vf_{k}" value="F"{ck_f} style="width:auto; margin:0 3px 0 0;">F</label>'
+                    f'<label><input type="radio" name="card_{idx}_q_{q_num}_vf_{k}" value=""{ck_n} style="width:auto; margin:0 3px 0 0;">∅</label>'
+                    f'</td></tr>'
+                )
+            tabela_html += sub_rows
+        elif tipo_q == "associacao":
+            n_a = info.get("assoc_a_count", 0)
+            n_b = info.get("assoc_b_count", 0)
+            detected_dict = detected if isinstance(detected, dict) else {}
+            letras = [chr(97+i) for i in range(n_b)]
+            sub_rows = ""
+            for k in range(n_a):
+                val = detected_dict.get(str(k))
+                opts = ""
+                for letra in letras:
+                    ck = " checked" if val == letra else ""
+                    opts += f'<label style="margin-right:10px;"><input type="radio" name="card_{idx}_q_{q_num}_assoc_{k}" value="{letra}"{ck} style="width:auto; margin:0 3px 0 0;">{letra}</label>'
+                ck_n = " checked" if not val else ""
+                opts += f'<label><input type="radio" name="card_{idx}_q_{q_num}_assoc_{k}" value=""{ck_n} style="width:auto; margin:0 3px 0 0;">∅</label>'
+                sub_rows += (
+                    f'<tr><td style="padding:3px 6px; font-weight:600; color:var(--text-muted);">Q{q_num}.{k+1}</td>'
+                    f'<td colspan="5" style="padding:2px;">{opts}</td></tr>'
+                )
+            tabela_html += sub_rows
+        elif tipo_q == "discursiva":
+            tabela_html += (
+                f'<tr><td style="padding:3px 6px; font-weight:600; color:var(--text-muted);">Q{q_num}</td>'
+                f'<td colspan="5" style="padding:3px 6px; font-size:11px; color:var(--text-muted); font-style:italic;">📝 Discursiva — correção manual</td></tr>'
+            )
+
+    return f"""
+    <div class="lote-card" style="border:2px solid {border_color}; border-radius:8px; padding:14px; margin-bottom:10px; background:{bg};">
+        <input type="hidden" name="card_{idx}_aluno_id" value="{aluno_id}">
+
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+            <div style="flex:1; min-width:0;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin:0; font-size:15px;">
+                    <input type="checkbox" name="card_{idx}_confirmar" value="1" checked class="card-confirmar-checkbox" style="width:auto; margin:0;">
+                    <span style="color:{status_color}; font-size:18px;">{status_icon}</span>
+                    <strong>{aluno["nome"]}</strong>
+                </label>
+            </div>
+            <button type="button" data-toggle-card class="btn" style="padding:4px 10px; font-size:12px; flex-shrink:0;">{toggle_label}</button>
+        </div>
+
+        <div class="lote-card-body" style="display:{body_default_display}; margin-top:12px;">
+            <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px 0;">Nº {aluno["numero"] or "—"} · {aluno["codigo_unico"]} · foto: {nome_seguro}</p>
+            {avisos_html}
+            <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:14px; margin-top:10px;">
+                <div>
+                    <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Imagem processada (verde = detectado como marcado)</p>
+                    <img src="data:image/jpeg;base64,{result['preview_base64']}" style="width:100%; border:1px solid var(--border); border-radius:4px;">
+                </div>
+                <div>
+                    <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Respostas (corrija se necessário)</p>
+                    <table style="width:100%; border-collapse:collapse; font-size:12px; background:var(--bg);">
+                        <thead><tr style="background:var(--bg-subtle);"><th style="padding:3px;">Q</th><th style="padding:3px;">A</th><th style="padding:3px;">B</th><th style="padding:3px;">C</th><th style="padding:3px;">D</th><th style="padding:3px;">∅</th></tr></thead>
+                        <tbody>{tabela_html}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+
+
+@app.post("/aplicacoes/{aplicacao_id}/escanear-lote/confirmar", response_class=HTMLResponse)
+async def confirmar_lote(aplicacao_id: int, request: Request):
+    """Salva no banco todos os cards confirmados (checkbox marcado) do lote."""
+    form = await request.form()
+    n_questoes = int(form.get("n_questoes", 0))
+
+    conn = get_db()
+    apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse("/aplicacoes", status_code=303)
+
+    questoes = conn.execute(
+        "SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem",
+        (apl["prova_id"],)
+    ).fetchall()
+    questao_ids = [q["id"] for q in questoes]
+
+    # Identificar cards confirmados varrendo os campos card_X_confirmar=1
+    confirmados_idx = set()
+    for key in form.keys():
+        if key.startswith("card_") and key.endswith("_confirmar"):
+            try:
+                idx = int(key.split("_")[1])
+                confirmados_idx.add(idx)
+            except (ValueError, IndexError):
+                continue
+
+    salvos = []
+    for idx in sorted(confirmados_idx):
+        aluno_id_str = form.get(f"card_{idx}_aluno_id")
+        if not aluno_id_str:
+            continue
+        try:
+            aluno_id = int(aluno_id_str)
+        except ValueError:
+            continue
+
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ? AND turma_id = ?",
+                             (aluno_id, apl["turma_id"])).fetchone()
+        if not aluno:
+            continue
+
+        # Override completo de respostas anteriores deste aluno
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
+
+        # Coleta tipos das questões da prova
+        tipos_q = {q["id"]: (q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha")
+                   for q in conn.execute("""
+                       SELECT q.id, q.tipo FROM prova_questoes pq
+                       JOIN questoes q ON q.id = pq.questao_id
+                       WHERE pq.prova_id = ? ORDER BY pq.ordem
+                   """, (apl["prova_id"],)).fetchall()}
+
+        for q_num, q_id in enumerate(questao_ids, start=1):
+            tipo_q = tipos_q.get(q_id, "multipla_escolha")
+            if tipo_q == "multipla_escolha":
+                letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
+                _gravar_resposta_questao(conn, aplicacao_id, aluno_id, q_id, tipo_q, letra or None)
+            elif tipo_q == "vf":
+                # form tem campos card_X_q_Y_vf_N = "V" ou "F" pra cada afirmação N
+                marcadas = {}
+                for k in range(VF_MAX_AFIRMACOES):
+                    v = form.get(f"card_{idx}_q_{q_num}_vf_{k}", "").strip().upper()
+                    if v in ("V", "F"):
+                        marcadas[str(k)] = v
+                if marcadas:
+                    _gravar_resposta_questao(conn, aplicacao_id, aluno_id, q_id, tipo_q, marcadas)
+            elif tipo_q == "associacao":
+                # form tem campos card_X_q_Y_assoc_N = letra pra cada item N
+                marcadas = {}
+                for k in range(ASSOC_MAX_PARES):
+                    v = form.get(f"card_{idx}_q_{q_num}_assoc_{k}", "").strip().lower()
+                    if v:
+                        marcadas[str(k)] = v
+                if marcadas:
+                    _gravar_resposta_questao(conn, aplicacao_id, aluno_id, q_id, tipo_q, marcadas)
+            # discursiva: nada (correção manual)
+
+        existing = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+                                (aplicacao_id, aluno_id)).fetchone()
+        if not existing:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?, ?)", (aplicacao_id, aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?",
+                         (aplicacao_id, aluno_id))
+
+        score, total = _calcular_nota(conn, aplicacao_id, aluno_id)
+        salvos.append({"aluno": aluno["nome"], "numero": aluno["numero"], "score": score, "total": total})
+
+    conn.commit()
+    conn.close()
+
+    # Resumo
+    if not salvos:
+        content = f"""
+            <div class="page-header"><h1>⚠️ Nada salvo</h1></div>
+            <div class="empty">Nenhum cartão foi confirmado pra salvar. Talvez todos estejam desmarcados ou em erro.</div>
+            <div class="page-actions">
+                <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn btn-primary">📷 Tentar de novo</a>
+                <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar</a>
+            </div>
+        """
+        return render_page("Nada salvo", content, active="aplicacoes")
+
+    linhas = "".join(
+        f'<tr><td>{s["aluno"]}</td><td>{s["numero"] or "—"}</td><td><strong>{s["score"]}/{s["total"]}</strong> ({(s["score"]/s["total"]*100 if s["total"]>0 else 0):.0f}%)</td></tr>'
+        for s in salvos
+    )
+
+    content = f"""
+        <div class="page-header"><h1>✅ {len(salvos)} cartão(ões) salvos</h1></div>
+        <div style="border:1px solid var(--green); background:var(--green-bg); padding:16px; border-radius:6px; margin:16px 0; color:var(--green);">
+            <p style="margin:0 0 10px 0;"><strong>Resultados:</strong></p>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg);"><th style="padding:6px; text-align:left;">Aluno</th><th style="padding:6px;">Nº</th><th style="padding:6px;">Nota</th></tr></thead>
+                <tbody>{linhas}</tbody>
+            </table>
+        </div>
+        <div class="page-actions">
+            <a href="/aplicacoes/{aplicacao_id}" class="btn btn-primary">Ver aplicação</a>
+            <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">📷 Escanear mais</a>
+        </div>
+    """
+    return render_page("Lote salvo", content, active="aplicacoes")
+
+# ==========================================
+#  SIMULADOS
+# ==========================================
+
+def _valor_por_questao(pontuacao_total: float, n_blocos: int = 4, n_questoes: int = 10) -> float:
+    total_q = n_blocos * n_questoes
+    return round(pontuacao_total / total_q, 4) if total_q else 0
+
+
+def _arredondar_comercial(valor: float, casas: int = 1) -> float:
+    """Arredonda 'pra cima' no meio do caminho (0,65 -> 0,7 | 0,35 -> 0,4) — arredondamento
+    comercial. O round() padrão do Python usa arredondamento bancário (half-to-even) e pode
+    dar resultado diferente do esperado numa planilha de notas (ex: round(0.65,1) pode dar
+    0.6). Convertemos pra string antes de virar Decimal pra evitar erro de ponto flutuante
+    binário (0.65 internamente não é exatamente 0.65)."""
+    quantizador = Decimal("1").scaleb(-casas)  # ex: casas=1 -> Decimal('0.1')
+    return float(Decimal(str(valor)).quantize(quantizador, rounding=ROUND_HALF_UP))
+
+
+def _status_bloco_badge(status: str) -> str:
+    cores = {
+        "aguardando":    ("var(--text-muted)",  "var(--bg-subtle)",  "⏳"),
+        "em_contribuicao":("var(--orange)",     "var(--orange-bg)", "✏️"),
+        "completo":      ("var(--green)",       "var(--green-bg)",  "✅"),
+        "aprovado":      ("var(--accent)",      "var(--accent-bg)", "🔒"),
+    }
+    color, bg, icon = cores.get(status, ("var(--text-muted)", "var(--bg-subtle)", "❓"))
+    labels = {"aguardando": "Aguardando", "em_contribuicao": "Em contribuição",
+              "completo": "Completo", "aprovado": "Aprovado"}
+    label = labels.get(status, status)
+    return f'<span style="background:{bg};color:{color};border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600;">{icon} {label}</span>'
+
+
+
+def _ano_esc_label(ano: int) -> str:
+    labels = {6: "6º ano", 7: "7º ano", 8: "8º ano", 9: "9º ano"}
+    return labels.get(ano, "—")
+
+def _turmas_do_ano(conn, ano_escolaridade: int):
+    """Retorna todas as turmas cujo nome começa com o dígito do ano de escolaridade."""
+    todas = conn.execute("SELECT * FROM turmas ORDER BY nome").fetchall()
+    return [t for t in todas if str(t["nome"]).startswith(str(ano_escolaridade))]
+
+
+# ==========================================
+#  PAINEL GLOBAL DA ESCOLA (visão consolidada por rodada de simulado)
+# ==========================================
+
+def _calcular_idade_referencia(data_nasc_iso, ano_letivo):
+    """Calcula a idade do aluno em 1º de abril do ano letivo (referência padrão usada
+    em análises de distorção idade-série no Brasil). Retorna None se a data for inválida."""
+    if not data_nasc_iso:
+        return None
+    try:
+        nasc = datetime.fromisoformat(data_nasc_iso)
+    except (ValueError, TypeError):
+        return None
+    referencia = date(ano_letivo, 4, 1)
+    idade = referencia.year - nasc.year - ((referencia.month, referencia.day) < (nasc.month, nasc.day))
+    return idade
+
+
+def _coletar_dados_painel_global(conn, trimestre: int, ano: int, dia: int) -> list:
+    """Coleta um registro por (aluno × simulado) de uma rodada (trimestre+ano+dia),
+    cruzando todos os anos de escolaridade e turmas. Cada registro já vem com nota,
+    faixa SAEB, raça, idade/distorção idade-série e acertos por disciplina —
+    pronto pra qualquer agregação (global, por ano, por raça, por turma etc)."""
+    simulados = conn.execute(
+        "SELECT * FROM simulados WHERE trimestre = ? AND ano = ? AND dia = ?", (trimestre, ano, dia)
+    ).fetchall()
+
+    registros = []
+    for sim in simulados:
+        prova = conn.execute("SELECT id FROM provas WHERE titulo LIKE ?", (f"%[SIM-{sim['id']}]%",)).fetchone()
+        if not prova:
+            continue
+        prova_id = prova["id"]
+        total_questoes = conn.execute("SELECT COUNT(*) c FROM prova_questoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
+        if not total_questoes:
+            continue
+
+        qs = conn.execute("""
+            SELECT pq.questao_id, d.nome AS disciplina
+            FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id
+            WHERE pq.prova_id = ?
+        """, (prova_id,)).fetchall()
+        disc_por_questao = {q["questao_id"]: q["disciplina"] for q in qs}
+        total_por_disc = {}
+        for d in disc_por_questao.values():
+            total_por_disc[d] = total_por_disc.get(d, 0) + 1
+
+        aplicacoes = conn.execute("""
+            SELECT a.id, a.turma_id, t.nome AS turma_nome
+            FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.prova_id = ? AND a.titulo LIKE ?
+        """, (prova_id, f"%[SIM-{sim['id']}]%")).fetchall()
+
+        for apl in aplicacoes:
+            entregas = conn.execute("""
+                SELECT e.aluno_id, al.nome, al.raca, al.data_nascimento
+                FROM entregas e JOIN alunos al ON al.id = e.aluno_id
+                WHERE e.aplicacao_id = ?
+            """, (apl["id"],)).fetchall()
+
+            for e in entregas:
+                respostas = conn.execute("""
+                    SELECT r.questao_id, alt.correta
+                    FROM respostas r JOIN alternativas alt ON alt.questao_id = r.questao_id AND alt.letra = r.alternativa_letra
+                    WHERE r.aplicacao_id = ? AND r.aluno_id = ?
+                """, (apl["id"], e["aluno_id"])).fetchall()
+
+                acertos_por_disc = {}
+                total_acertos = 0
+                for r in respostas:
+                    if r["correta"]:
+                        total_acertos += 1
+                        d = disc_por_questao.get(r["questao_id"])
+                        if d:
+                            acertos_por_disc[d] = acertos_por_disc.get(d, 0) + 1
+
+                nota_10 = round(total_acertos / total_questoes * 10, 2)
+                idade = _calcular_idade_referencia(e["data_nascimento"], ano)
+                idade_esperada = (sim["ano_escolaridade"] or 0) + 5
+                defasagem = bool(idade is not None and idade > idade_esperada)
+
+                registros.append({
+                    "aluno_id": e["aluno_id"], "nome": e["nome"],
+                    "raca": e["raca"] or "Não informada",
+                    "turma": apl["turma_nome"], "turma_id": apl["turma_id"],
+                    "aplicacao_id": apl["id"],
+                    "ano_escolaridade": sim["ano_escolaridade"],
+                    "nota_10": nota_10, "faixa": _faixa_saeb(nota_10)["nome"],
+                    "idade": idade, "defasagem_idade_serie": defasagem,
+                    "acertos_por_disc": acertos_por_disc, "total_por_disc": total_por_disc,
+                })
+    return registros
+
+
+def _agregar_faixas(registros):
+    """Retorna dict {faixa_nome: contagem} pra uma lista de registros."""
+    dist = {f["nome"]: 0 for f in FAIXAS_SAEB}
+    for r in registros:
+        dist[r["faixa"]] = dist.get(r["faixa"], 0) + 1
+    return dist
+
+
+def _media_nota(registros):
+    if not registros:
+        return 0.0
+    return round(sum(r["nota_10"] for r in registros) / len(registros), 2)
+
+
+def _coletar_dados_painel_combinado(conn, trimestre: int, ano: int) -> list:
+    """Combina Dia 1 + Dia 2 de uma mesma rodada (trimestre+ano) por aluno: nota média
+    entre os dias que ele tiver feito (1 ou 2). Útil pra uma visão global por turma que
+    não fique presa a um único dia — mistura Língua Portuguesa/Inglesa (normalmente no
+    Dia 1) com as outras disciplinas do Dia 2, por exemplo."""
+    regs_dia1 = _coletar_dados_painel_global(conn, trimestre, ano, 1)
+    regs_dia2 = _coletar_dados_painel_global(conn, trimestre, ano, 2)
+
+    por_aluno = {}
+    for r in regs_dia1 + regs_dia2:
+        if r["aluno_id"] not in por_aluno:
+            por_aluno[r["aluno_id"]] = {
+                "aluno_id": r["aluno_id"], "nome": r["nome"], "raca": r["raca"],
+                "turma": r["turma"], "turma_id": r["turma_id"],
+                "ano_escolaridade": r["ano_escolaridade"],
+                "idade": r["idade"], "defasagem_idade_serie": r["defasagem_idade_serie"],
+                "notas": [],
+            }
+        por_aluno[r["aluno_id"]]["notas"].append(r["nota_10"])
+
+    registros = []
+    for dados in por_aluno.values():
+        notas = dados.pop("notas")
+        nota_media = round(sum(notas) / len(notas), 2)
+        dados["nota_10"] = nota_media
+        dados["faixa"] = _faixa_saeb(nota_media)["nome"]
+        dados["n_dias"] = len(notas)
+        dados["completo"] = len(notas) == 2
+        registros.append(dados)
+    return registros
+
+
+def _analise_disciplinas_turma(conn, aplicacao_id: int, prova_id: int) -> list:
+    """Análise detalhada por disciplina de UMA turma/aplicação específica: % geral de
+    acerto, alunos sugeridos pra reforço (abaixo de 50%) e — quando as questões têm
+    habilidades BNCC cadastradas — as 2 habilidades com mais dificuldade e as 2 melhor
+    consolidadas."""
+    alunos = conn.execute("""
+        SELECT DISTINCT e.aluno_id, al.nome FROM entregas e
+        JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = ?
+    """, (aplicacao_id,)).fetchall()
+    aluno_nomes = {a["aluno_id"]: a["nome"] for a in alunos}
+    if not aluno_nomes:
+        return []
+
+    questoes = conn.execute("""
+        SELECT q.id AS questao_id, d.nome AS disciplina
+        FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE pq.prova_id = ?
+    """, (prova_id,)).fetchall()
+    questoes_por_disc = {}
+    for q in questoes:
+        questoes_por_disc.setdefault(q["disciplina"], []).append(q["questao_id"])
+
+    hab_por_questao = {}
+    rows_hab = conn.execute("""
+        SELECT qh.questao_id, h.codigo, h.descricao
+        FROM questao_habilidades qh JOIN habilidades_bncc h ON h.id = qh.habilidade_id
+    """).fetchall()
+    for r in rows_hab:
+        hab_por_questao.setdefault(r["questao_id"], []).append((r["codigo"], r["descricao"] or ""))
+
+    resultado = []
+    for disc, qids in questoes_por_disc.items():
+        total_por_aluno = len(qids)
+        acertos_por_aluno = {aid: 0 for aid in aluno_nomes}
+        acertos_total = 0
+        acertos_por_hab = {}
+
+        for qid in qids:
+            respostas_q = conn.execute("""
+                SELECT r.aluno_id, alt.correta FROM respostas r
+                JOIN alternativas alt ON alt.questao_id = r.questao_id AND alt.letra = r.alternativa_letra
+                WHERE r.questao_id = ? AND r.aplicacao_id = ?
+            """, (qid, aplicacao_id)).fetchall()
+            habs = hab_por_questao.get(qid, [])
+            for h in habs:
+                acertos_por_hab.setdefault(h, [0, 0])
+            for rr in respostas_q:
+                if rr["aluno_id"] not in acertos_por_aluno:
+                    continue
+                acertou = bool(rr["correta"])
+                if acertou:
+                    acertos_por_aluno[rr["aluno_id"]] += 1
+                    acertos_total += 1
+                for h in habs:
+                    acertos_por_hab[h][1] += 1
+                    if acertou:
+                        acertos_por_hab[h][0] += 1
+
+        pct_geral = round(acertos_total / (total_por_aluno * len(aluno_nomes)) * 100, 1) if total_por_aluno and aluno_nomes else 0
+        sugeridos = sorted(
+            aluno_nomes[aid] for aid, ac in acertos_por_aluno.items()
+            if total_por_aluno and (ac / total_por_aluno) < 0.5
+        )
+
+        ranking_hab = [
+            {"codigo": cod, "descricao": desc, "pct": round(ac / tot * 100, 1)}
+            for (cod, desc), (ac, tot) in acertos_por_hab.items() if tot
+        ]
+        ranking_hab.sort(key=lambda x: x["pct"])
+
+        piores_habilidades = ranking_hab[:2]
+        codigos_piores = {h["codigo"] for h in piores_habilidades}
+        # As "melhores" nunca repetem uma habilidade já listada como "pior" (evita mostrar
+        # a mesma habilidade nas duas colunas quando só existe 1 ou 2 cadastradas no total).
+        melhores_habilidades = [h for h in sorted(ranking_hab, key=lambda x: -x["pct"]) if h["codigo"] not in codigos_piores][:2]
+
+        resultado.append({
+            "disciplina": disc, "pct_geral": pct_geral,
+            "n_alunos": len(aluno_nomes), "total_questoes": total_por_aluno,
+            "sugeridos": sugeridos,
+            "piores_habilidades": piores_habilidades,
+            "melhores_habilidades": melhores_habilidades,
+            "tem_habilidades": bool(ranking_hab),
+            "so_uma_habilidade": len(ranking_hab) == 1,
+        })
+
+    resultado.sort(key=lambda x: x["pct_geral"])
+    return resultado
+
+
+@app.get("/simulados/painel-global", response_class=HTMLResponse)
+def painel_global_seletor():
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    rodadas = conn.execute("""
+        SELECT trimestre, ano, dia, GROUP_CONCAT(DISTINCT ano_escolaridade) AS anos_lista
+        FROM simulados GROUP BY trimestre, ano, dia ORDER BY ano DESC, trimestre DESC, dia
+    """).fetchall()
+    trimestres_anos = conn.execute("""
+        SELECT DISTINCT trimestre, ano FROM simulados
+        WHERE dia = 1 AND EXISTS (SELECT 1 FROM simulados s2 WHERE s2.trimestre = simulados.trimestre AND s2.ano = simulados.ano AND s2.dia = 2)
+        ORDER BY ano DESC, trimestre DESC
+    """).fetchall()
+    conn.close()
+
+    opcoes = ""
+    for r in rodadas:
+        anos_vals = sorted(set(int(a) for a in (r["anos_lista"] or "").split(",") if a))
+        anos_fmt = ", ".join(_ano_esc_label(a) for a in anos_vals)
+        label = f"{r['trimestre']}º Trimestre {r['ano']} · Dia {r['dia']} ({anos_fmt})"
+        opcoes += f'<option value="{r["trimestre"]}:{r["ano"]}:{r["dia"]}">{label}</option>'
+
+    opcoes_combinado = "".join(
+        f'<option value="{r["trimestre"]}:{r["ano"]}">{r["trimestre"]}º Trimestre {r["ano"]} (Dia 01 + Dia 02)</option>'
+        for r in trimestres_anos
+    )
+
+    if not opcoes:
+        content = '<div class="empty">Nenhum simulado cadastrado ainda.</div>'
+        return render_page("Painel Global", content, active="simulados")
+
+    bloco_combinado = ""
+    if opcoes_combinado:
+        bloco_combinado = f"""
+        <div class="card" style="max-width:520px; margin-top:16px;">
+            <h3 style="margin-top:0; font-size:14px;">Visão combinada — Dia 01 + Dia 02</h3>
+            <p class="muted-line" style="font-size:12px;">Uma nota média por aluno juntando os dois dias, comparando as turmas de forma global (não só um dia isolado).</p>
+            <form method="get" action="/simulados/painel-global/combinado/ver">
+                <label>Trimestre
+                    <select name="trimestre_ano" required style="width:100%;">{opcoes_combinado}</select>
+                </label>
+                <button type="submit" class="btn btn-primary" style="margin-top:14px;">Ver visão combinada</button>
+            </form>
+        </div>
+        """
+
+    content = f"""
+    <div class="page-header"><h1>🏫 Painel Global da Escola</h1>
+        <p class="subtitle">Visão consolidada de todos os anos de escolaridade e turmas numa mesma rodada de simulado — por raça, distorção idade-série e sugestões de agrupamento por disciplina.</p>
+    </div>
+    <div class="card" style="max-width:520px;">
+        <h3 style="margin-top:0; font-size:14px;">Um dia específico</h3>
+        <form method="get" action="/simulados/painel-global/ver">
+            <label>Rodada do simulado
+                <select name="rodada" required style="width:100%;">{opcoes}</select>
+            </label>
+            <button type="submit" class="btn btn-primary" style="margin-top:14px;">Ver painel</button>
+        </form>
+    </div>
+    {bloco_combinado}
+    """
+    return render_page("Painel Global", content, active="simulados")
+
+
+@app.get("/simulados/painel-global/combinado/ver", response_class=HTMLResponse)
+def painel_global_combinado_ver(trimestre_ano: str):
+    """Visão global por turma combinando Dia 1 + Dia 2 (nota média entre os dias que
+    o aluno tiver feito), pra comparar turmas sem depender de olhar um dia isolado."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        trimestre_s, ano_s = trimestre_ano.split(":")
+        trimestre, ano = int(trimestre_s), int(ano_s)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    conn = get_db()
+    registros = _coletar_dados_painel_combinado(conn, trimestre, ano)
+    conn.close()
+
+    if not registros:
+        content = '<div class="empty">Nenhum dado encontrado pra essa combinação de Dia 01 + Dia 02.</div>'
+        return render_page("Painel Global Combinado", content, active="simulados")
+
+    n_total = len(registros)
+    n_incompletos = sum(1 for r in registros if not r["completo"])
+    media_global = _media_nota(registros)
+    dist_global = _agregar_faixas(registros)
+    dist_legenda_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]}: {dist_global.get(f["nome"], 0)} ({round(dist_global.get(f["nome"], 0) / n_total * 100, 1) if n_total else 0}%)</span>'
+        for f in FAIXAS_SAEB
+    )
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_global.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+
+    turmas_nomes = sorted(set(r["turma"] for r in registros))
+    por_turma = []
+    for t in turmas_nomes:
+        regs_t = [r for r in registros if r["turma"] == t]
+        n_incompletos_t = sum(1 for r in regs_t if not r["completo"])
+        por_turma.append({
+            "turma": t, "turma_id": regs_t[0]["turma_id"], "n_alunos": len(regs_t), "media": _media_nota(regs_t),
+            "n_incompletos": n_incompletos_t,
+            "pct_insuf": round(_agregar_faixas(regs_t).get("Insuficiente", 0) / len(regs_t) * 100, 1) if regs_t else 0,
+        })
+    por_turma.sort(key=lambda x: x["media"])
+
+    turma_labels_js = ", ".join(f'"{t["turma"]}"' for t in por_turma)
+    turma_medias_js = ", ".join(str(t["media"]) for t in por_turma)
+
+    linhas_turma = ""
+    for t in por_turma:
+        cor = "var(--red)" if t["media"] < 5 else ("var(--orange)" if t["media"] < 7 else "var(--green)")
+        aviso_incompleto = f' <span style="color:var(--orange); font-size:11px;">⚠ {t["n_incompletos"]} só fizeram 1 dia</span>' if t["n_incompletos"] else ""
+        linhas_turma += f"""<tr>
+            <td style="padding:6px 10px;"><a href="/simulados/painel-global/turma-combinado?trimestre_ano={trimestre}:{ano}&turma_id={t['turma_id']}">{t['turma']}</a></td>
+            <td style="padding:6px 10px; text-align:center;">{t['n_alunos']}</td>
+            <td style="padding:6px 10px; text-align:center; font-weight:700; color:{cor};">{t['media']}</td>
+            <td style="padding:6px 10px; text-align:center; color:var(--red);">{t['pct_insuf']}%</td>
+            <td style="padding:6px 10px;">{aviso_incompleto}</td>
+        </tr>"""
+
+    aviso_incompletos_geral = ""
+    if n_incompletos:
+        aviso_incompletos_geral = f'<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ {n_incompletos} aluno(s) só têm nota de um dos dois dias (a média considera só o dia que ele fez).</p>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>🏫 Painel Global — Dia 01 + Dia 02</h1>
+            <p class="subtitle">{trimestre}º Trimestre {ano} · nota média combinando os dois dias, por turma</p>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{n_total}</div></div>
+            <div class="metric"><div class="metric-label">Nota média combinada</div><div class="metric-value">{media_global}</div></div>
+        </div>
+        {aviso_incompletos_geral}
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Distribuição de faixas SAEB — combinada</h3>
+            <div style="max-width:380px; height:260px; margin:0 auto; position:relative;">
+                <canvas id="chart-dist-comb"></canvas>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-top:10px; font-size:12px; color:var(--text-muted);">{dist_legenda_html}</div>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Nota média combinada por turma</h3>
+            <div style="height:280px; position:relative; margin-bottom:14px;">
+                <canvas id="chart-turma-comb"></canvas>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px 10px; text-align:left;">Turma</th>
+                    <th style="padding:6px 10px;">Alunos</th>
+                    <th style="padding:6px 10px;">Nota média</th>
+                    <th style="padding:6px 10px;">% Insuficiente</th>
+                    <th style="padding:6px 10px;"></th>
+                </tr></thead>
+                <tbody>{linhas_turma}</tbody>
+            </table>
+        </div>
+
+        <div style="margin-top:16px;"><a href="/simulados/painel-global" class="btn">← Voltar</a></div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-comb'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+            }});
+            new Chart(document.getElementById('chart-turma-comb'), {{
+                type: 'bar',
+                data: {{ labels: [{turma_labels_js}], datasets: [{{ label: 'Nota média', data: [{turma_medias_js}], backgroundColor: '#0284c7', borderRadius: 4 }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true, max: 10 }} }} }}
+            }});
+        </script>
+    """
+    return render_page("Painel Global Combinado", content, active="simulados")
+
+
+@app.get("/simulados/painel-global/ver", response_class=HTMLResponse)
+def painel_global_ver(rodada: str):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        trimestre_s, ano_s, dia_s = rodada.split(":")
+        trimestre, ano, dia = int(trimestre_s), int(ano_s), int(dia_s)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    conn = get_db()
+    registros = _coletar_dados_painel_global(conn, trimestre, ano, dia)
+    conn.close()
+
+    if not registros:
+        content = '<div class="empty">Nenhum dado encontrado pra essa rodada — verifique se já há entregas escaneadas e confirmadas.</div>'
+        return render_page("Painel Global", content, active="simulados")
+
+    dist_global = _agregar_faixas(registros)
+    media_global = _media_nota(registros)
+    n_total = len(registros)
+    pct_insuf_global = round(dist_global.get("Insuficiente", 0) / n_total * 100, 1) if n_total else 0
+
+    anos = sorted(set(r["ano_escolaridade"] for r in registros if r["ano_escolaridade"]))
+    por_ano = {a: {"media": _media_nota([r for r in registros if r["ano_escolaridade"] == a]),
+                   "n": len([r for r in registros if r["ano_escolaridade"] == a])} for a in anos}
+
+    racas_presentes = sorted(set(r["raca"] for r in registros))
+    por_raca = []
+    for rc in racas_presentes:
+        regs_r = [r for r in registros if r["raca"] == rc]
+        dist_r = _agregar_faixas(regs_r)
+        pct_insuf = round(dist_r.get("Insuficiente", 0) / len(regs_r) * 100, 1) if regs_r else 0
+        por_raca.append({"raca": rc, "n": len(regs_r), "media": _media_nota(regs_r), "pct_insuf": pct_insuf})
+    por_raca.sort(key=lambda x: -x["n"])
+
+    com_idade = [r for r in registros if r["idade"] is not None]
+    sem_defasagem = [r for r in com_idade if not r["defasagem_idade_serie"]]
+    com_defasagem = [r for r in com_idade if r["defasagem_idade_serie"]]
+    n_sem_idade = n_total - len(com_idade)
+
+    turmas_nomes = sorted(set(r["turma"] for r in registros))
+    turma_diagnostico = []
+    for t in turmas_nomes:
+        regs_t = [r for r in registros if r["turma"] == t]
+        disc_acertos, disc_totais = {}, {}
+        for r in regs_t:
+            for d, tot in r["total_por_disc"].items():
+                disc_totais[d] = disc_totais.get(d, 0) + tot
+                disc_acertos[d] = disc_acertos.get(d, 0) + r["acertos_por_disc"].get(d, 0)
+        percentuais = {d: (disc_acertos[d] / disc_totais[d] * 100 if disc_totais[d] else 0) for d in disc_totais}
+        if not percentuais:
+            continue
+        disc_fraca = min(percentuais, key=percentuais.get)
+        pct_fraca = round(percentuais[disc_fraca], 1)
+        sugeridos = []
+        for r in regs_t:
+            tot_d = r["total_por_disc"].get(disc_fraca, 0)
+            ac_d = r["acertos_por_disc"].get(disc_fraca, 0)
+            if tot_d and (ac_d / tot_d) < 0.5:
+                sugeridos.append(r["nome"])
+        turma_diagnostico.append({
+            "turma": t, "turma_id": regs_t[0]["turma_id"], "aplicacao_id": regs_t[0]["aplicacao_id"],
+            "disciplina_fraca": disc_fraca, "pct_fraca": pct_fraca,
+            "sugeridos": sugeridos, "n_alunos": len(regs_t),
+        })
+    turma_diagnostico.sort(key=lambda x: x["pct_fraca"])
+
+    # ---- HTML: KPIs + gráfico de distribuição global ----
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_global.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+    dist_legenda_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]}: {dist_global.get(f["nome"], 0)} aluno(s) ({round(dist_global.get(f["nome"], 0) / n_total * 100, 1) if n_total else 0}%)</span>'
+        for f in FAIXAS_SAEB
+    )
+
+    kpis_html = f"""
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{n_total}</div></div>
+            <div class="metric"><div class="metric-label">Nota média da escola</div><div class="metric-value">{media_global}</div></div>
+            <div class="metric" style="border-color:var(--red);"><div class="metric-label">% Insuficiente (geral)</div><div class="metric-value" style="color:var(--red);">{pct_insuf_global}%</div></div>
+        </div>
+    """
+
+    # ---- Por ano de escolaridade ----
+    ano_labels_js = ", ".join(f'"{_ano_esc_label(a)}"' for a in anos)
+    ano_medias_js = ", ".join(str(por_ano[a]["media"]) for a in anos)
+    por_ano_tabela = "".join(
+        f"<tr><td style='padding:6px 10px;'>{_ano_esc_label(a)}</td><td style='padding:6px 10px;text-align:center;'>{por_ano[a]['n']}</td><td style='padding:6px 10px;text-align:center;font-weight:600;'>{por_ano[a]['media']}</td></tr>"
+        for a in anos
+    )
+
+    # ---- Por raça ----
+    raca_labels_js = ", ".join(f'"{r["raca"]}"' for r in por_raca)
+    raca_medias_js = ", ".join(str(r["media"]) for r in por_raca)
+    por_raca_tabela = "".join(
+        f"<tr><td style='padding:6px 10px;'>{r['raca']}</td><td style='padding:6px 10px;text-align:center;'>{r['n']}</td>"
+        f"<td style='padding:6px 10px;text-align:center;font-weight:600;'>{r['media']}</td>"
+        f"<td style='padding:6px 10px;text-align:center;color:var(--red);'>{r['pct_insuf']}%</td></tr>"
+        for r in por_raca
+    )
+
+    # ---- Distorção idade-série ----
+    media_sem_def = _media_nota(sem_defasagem)
+    media_com_def = _media_nota(com_defasagem)
+    pct_insuf_sem_def = round(_agregar_faixas(sem_defasagem).get("Insuficiente", 0) / len(sem_defasagem) * 100, 1) if sem_defasagem else 0
+    pct_insuf_com_def = round(_agregar_faixas(com_defasagem).get("Insuficiente", 0) / len(com_defasagem) * 100, 1) if com_defasagem else 0
+    idade_serie_html = f"""
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px 10px; text-align:left;">Grupo</th><th style="padding:6px 10px;">Alunos</th><th style="padding:6px 10px;">Nota média</th><th style="padding:6px 10px;">% Insuficiente</th></tr></thead>
+            <tbody>
+                <tr><td style="padding:6px 10px;">Idade adequada à série</td><td style="padding:6px 10px;text-align:center;">{len(sem_defasagem)}</td><td style="padding:6px 10px;text-align:center;font-weight:600;">{media_sem_def}</td><td style="padding:6px 10px;text-align:center;">{pct_insuf_sem_def}%</td></tr>
+                <tr style="background:var(--orange-bg);"><td style="padding:6px 10px;">Com distorção idade-série</td><td style="padding:6px 10px;text-align:center;">{len(com_defasagem)}</td><td style="padding:6px 10px;text-align:center;font-weight:600;">{media_com_def}</td><td style="padding:6px 10px;text-align:center;color:var(--red);">{pct_insuf_com_def}%</td></tr>
+            </tbody>
+        </table>
+        <p class="muted-line" style="font-size:11px; margin-top:6px;">{n_sem_idade} aluno(s) sem data de nascimento cadastrada, não entram nessa comparação. Distorção = idade acima da esperada pro ano de escolaridade em 1º de abril de {ano}.</p>
+    """
+
+    # ---- Por turma: disciplina mais fraca + sugestão de agrupamento ----
+    turma_html = ""
+    for i, td in enumerate(turma_diagnostico):
+        lista_id = f"sugeridos-{i}"
+        cor = "var(--red)" if td["pct_fraca"] < 50 else ("var(--orange)" if td["pct_fraca"] < 70 else "var(--green)")
+        alunos_li = "".join(f"<li>{nome}</li>" for nome in td["sugeridos"]) or "<li>Nenhum abaixo de 50% de acerto nessa disciplina.</li>"
+        turma_html += f"""
+        <div style="border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <strong>{td['turma']}</strong>
+                    <span style="font-size:12px; color:var(--text-muted);"> · {td['n_alunos']} alunos avaliados</span>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:13px;">Disciplina mais fraca: <strong>{td['disciplina_fraca']}</strong></div>
+                    <div style="font-size:12px; color:{cor}; font-weight:600;">{td['pct_fraca']}% de acerto nessa disciplina</div>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+                <button type="button" class="btn" style="font-size:11px; padding:3px 10px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
+                    👥 {len(td['sugeridos'])} aluno(s) sugerido(s) pra reforço nessa disciplina
+                </button>
+                <a href="/simulados/painel-global/turma?rodada={rodada}&turma_id={td['turma_id']}&aplicacao_id={td['aplicacao_id']}" class="btn btn-primary" style="font-size:11px; padding:3px 10px;">
+                    📊 Ver todas as disciplinas dessa turma
+                </a>
+            </div>
+            <ul id="{lista_id}" style="display:none; margin:8px 0 0 18px; font-size:13px;">{alunos_li}</ul>
+        </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🏫 Painel Global da Escola</h1>
+            <p class="subtitle">{trimestre}º Trimestre {ano} · Dia {dia} · {len(anos)} ano(s) de escolaridade · {len(turmas_nomes)} turma(s)</p>
+        </div>
+
+        {kpis_html}
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Distribuição de faixas SAEB — Escola toda</h3>
+            <div style="max-width:380px; height:260px; margin:0 auto; position:relative;">
+                <canvas id="chart-dist-global"></canvas>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-top:10px; font-size:12px; color:var(--text-muted);">{dist_legenda_html}</div>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Por ano de escolaridade</h3>
+            <div style="height:260px; position:relative; margin-bottom:14px;">
+                <canvas id="chart-por-ano"></canvas>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px 10px; text-align:left;">Ano</th><th style="padding:6px 10px;">Alunos</th><th style="padding:6px 10px;">Nota média</th></tr></thead>
+                <tbody>{por_ano_tabela}</tbody>
+            </table>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Por raça</h3>
+            <div style="height:260px; position:relative; margin-bottom:14px;">
+                <canvas id="chart-por-raca"></canvas>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px 10px; text-align:left;">Raça</th><th style="padding:6px 10px;">Alunos</th><th style="padding:6px 10px;">Nota média</th><th style="padding:6px 10px;">% Insuficiente</th></tr></thead>
+                <tbody>{por_raca_tabela}</tbody>
+            </table>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Distorção idade-série</h3>
+            {idade_serie_html}
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">Por turma — disciplina que mais precisa de atenção</h3>
+            <p class="muted-line" style="font-size:12px;">Ordenado da turma com maior dificuldade pra menor. Clique no botão pra ver os alunos sugeridos pra um grupo de reforço (intra-turma).</p>
+            {turma_html}
+        </div>
+
+        <div style="margin-top:16px;"><a href="/simulados/painel-global" class="btn">← Trocar rodada</a></div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-global'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+            }});
+            new Chart(document.getElementById('chart-por-ano'), {{
+                type: 'bar',
+                data: {{ labels: [{ano_labels_js}], datasets: [{{ label: 'Nota média (de 10)', data: [{ano_medias_js}], backgroundColor: '#0284c7' }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true, max: 10 }} }} }}
+            }});
+            new Chart(document.getElementById('chart-por-raca'), {{
+                type: 'bar',
+                data: {{ labels: [{raca_labels_js}], datasets: [{{ label: 'Nota média (de 10)', data: [{raca_medias_js}], backgroundColor: '#7048E8' }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true, max: 10 }} }} }}
+            }});
+        </script>
+    """
+    return render_page("Painel Global da Escola", content, active="simulados")
+
+
+def _renderizar_disciplinas_cards_html(disciplinas: list) -> str:
+    """Monta o HTML dos cards 'por disciplina' (usado tanto na análise de um dia único
+    quanto na combinada Dia 01 + Dia 02) — extraído aqui pra não duplicar a lógica."""
+    disciplinas_html = ""
+    for idx_d, d in enumerate(disciplinas):
+        cor = "var(--red)" if d["pct_geral"] < 50 else ("var(--orange)" if d["pct_geral"] < 70 else "var(--green)")
+        cor_bg = "var(--red-bg)" if d["pct_geral"] < 50 else ("var(--orange-bg)" if d["pct_geral"] < 70 else "var(--green-bg)")
+
+        if d["so_uma_habilidade"]:
+            unica = d["piores_habilidades"][0]
+            habilidades_html = f"""
+                <div style="margin-top:10px;">
+                    <p style="font-size:12px; font-weight:600; color:var(--text-muted); margin:0 0 4px 0;">📌 Única habilidade BNCC cadastrada nessa disciplina</p>
+                    <ul style="margin:0 0 0 18px; font-size:12px;"><li><strong>{unica['codigo']}</strong> — {unica['descricao'] or 'sem descrição'} ({unica['pct']}% de acerto)</li></ul>
+                    <p class="muted-line" style="font-size:11px; margin-top:4px;">Cadastre mais habilidades nas questões pra comparar dificuldade entre elas.</p>
+                </div>
+            """
+        elif d["tem_habilidades"]:
+            piores_li = "".join(
+                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--red);">({h["pct"]}% de acerto)</span></li>'
+                for h in d["piores_habilidades"]
+            ) or "<li>—</li>"
+            melhores_li = "".join(
+                f'<li><strong>{h["codigo"]}</strong> — {h["descricao"] or "sem descrição"} <span style="color:var(--green);">({h["pct"]}% de acerto)</span></li>'
+                for h in d["melhores_habilidades"]
+            ) or "<li>Nenhuma outra habilidade se destacou.</li>"
+            habilidades_html = f"""
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-top:10px;">
+                    <div>
+                        <p style="font-size:12px; font-weight:600; color:var(--red); margin:0 0 4px 0;">🔴 Maior dificuldade</p>
+                        <ul style="margin:0 0 0 18px; font-size:12px;">{piores_li}</ul>
+                    </div>
+                    <div>
+                        <p style="font-size:12px; font-weight:600; color:var(--green); margin:0 0 4px 0;">🟢 Bem consolidado</p>
+                        <ul style="margin:0 0 0 18px; font-size:12px;">{melhores_li}</ul>
+                    </div>
+                </div>
+            """
+        else:
+            habilidades_html = '<p class="muted-line" style="font-size:12px; margin-top:8px;">Nenhuma habilidade BNCC cadastrada nas questões dessa disciplina — cadastre nas questões pra ver esse detalhamento aqui.</p>'
+
+        sugeridos_html = "".join(f"<li>{nome}</li>" for nome in d["sugeridos"]) or "<li>Nenhum abaixo de 50% de acerto.</li>"
+        lista_id = f"sug-disc-{re.sub(r'[^a-zA-Z0-9]', '', d['disciplina'])}-{idx_d}"
+
+        disciplinas_html += f"""
+        <div style="border:2px solid {cor}; background:{cor_bg}; border-radius:8px; padding:14px; margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <strong style="font-size:15px;">{d['disciplina']}</strong>
+                <span style="font-weight:700; color:{cor}; font-size:15px;">{d['pct_geral']}% de acerto</span>
+            </div>
+            {habilidades_html}
+            <button type="button" class="btn" style="font-size:11px; padding:3px 10px; margin-top:10px;" onclick="document.getElementById('{lista_id}').style.display = document.getElementById('{lista_id}').style.display==='none' ? 'block' : 'none';">
+                👥 {len(d['sugeridos'])} aluno(s) sugerido(s) pra reforço em {d['disciplina']}
+            </button>
+            <ul id="{lista_id}" style="display:none; margin:8px 0 0 18px; font-size:13px;">{sugeridos_html}</ul>
+        </div>"""
+    return disciplinas_html
+
+
+def _achar_aplicacao_turma_dia(conn, trimestre: int, ano: int, dia: int, turma_id: int):
+    """Acha a aplicação (e a prova) do simulado de um DIA específico pra uma turma
+    específica, dentro de uma rodada trimestre+ano. Retorna (aplicacao_id, prova_id) —
+    ou (None, None) se essa turma não tiver simulado nesse dia."""
+    sims = conn.execute("SELECT id FROM simulados WHERE trimestre = ? AND ano = ? AND dia = ?", (trimestre, ano, dia)).fetchall()
+    for sim in sims:
+        prova_id = _prova_id_do_simulado(conn, sim["id"])
+        if not prova_id:
+            continue
+        apl = conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)).fetchone()
+        if apl:
+            return apl["id"], prova_id
+    return None, None
+
+
+@app.get("/simulados/painel-global/turma", response_class=HTMLResponse)
+def painel_global_turma(rodada: str, turma_id: int, aplicacao_id: int):
+    """Visão detalhada de uma turma específica dentro de uma rodada de simulado:
+    dados gerais + análise disciplina por disciplina, com sugestão de agrupamento
+    e (quando cadastradas) as habilidades BNCC com mais e menos dificuldade."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+
+    conn = get_db()
+    apl = conn.execute("""
+        SELECT a.*, t.nome AS turma_nome, p.titulo AS prova_titulo
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id JOIN provas p ON p.id = a.prova_id
+        WHERE a.id = ?
+    """, (aplicacao_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse(f"/simulados/painel-global/ver?rodada={rodada}", status_code=303)
+
+    disciplinas = _analise_disciplinas_turma(conn, aplicacao_id, apl["prova_id"])
+
+    # Dados gerais da turma (reaproveita a coleta da rodada, filtrando por turma)
+    try:
+        trimestre_s, ano_s, dia_s = rodada.split(":")
+        trimestre, ano, dia = int(trimestre_s), int(ano_s), int(dia_s)
+        registros = _coletar_dados_painel_global(conn, trimestre, ano, dia)
+    except (ValueError, AttributeError):
+        registros = []
+    conn.close()
+
+    regs_turma = [r for r in registros if r["turma_id"] == turma_id]
+    media_turma = _media_nota(regs_turma)
+    dist_turma = _agregar_faixas(regs_turma)
+
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_turma.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+    n_turma = len(regs_turma)
+    dist_legenda_turma_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]}: {dist_turma.get(f["nome"], 0)} ({round(dist_turma.get(f["nome"], 0) / n_turma * 100, 1) if n_turma else 0}%)</span>'
+        for f in FAIXAS_SAEB
+    )
+
+    disc_labels_js = ", ".join(f'"{d["disciplina"]}"' for d in disciplinas)
+    disc_pcts_js = ", ".join(str(d["pct_geral"]) for d in disciplinas)
+    disc_cores_js = ", ".join(
+        '"#dc2626"' if d["pct_geral"] < 50 else ('"#ea580c"' if d["pct_geral"] < 70 else '"#16a34a"')
+        for d in disciplinas
+    )
+
+    disciplinas_html = _renderizar_disciplinas_cards_html(disciplinas)
+
+    content = f"""
+        <div class="page-header">
+            <h1>📊 {apl['turma_nome']} — {apl['prova_titulo']}</h1>
+            <p class="subtitle">Visão detalhada por disciplina, pra saber rápido em quem focar.</p>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{len(regs_turma)}</div></div>
+            <div class="metric"><div class="metric-label">Nota média da turma</div><div class="metric-value">{media_turma}</div></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-bottom:18px;">
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">Distribuição de faixas SAEB</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-dist-turma"></canvas></div>
+                <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:8px; font-size:11px; color:var(--text-muted);">{dist_legenda_turma_html}</div>
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">% de acerto por disciplina</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-disc-turma"></canvas></div>
+            </div>
+        </div>
+
+        <h3>Por disciplina — o que precisa de atenção</h3>
+        {disciplinas_html}
+
+        <div style="margin-top:16px;"><a href="/simulados/painel-global/ver?rodada={rodada}" class="btn">← Voltar ao painel global</a></div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-turma'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+            }});
+            new Chart(document.getElementById('chart-disc-turma'), {{
+                type: 'bar',
+                data: {{ labels: [{disc_labels_js}], datasets: [{{ label: '% de acerto', data: [{disc_pcts_js}], backgroundColor: [{disc_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true, max: 100 }} }} }}
+            }});
+        </script>
+    """
+    return render_page(f"{apl['turma_nome']} — Análise por disciplina", content, active="simulados")
+
+
+@app.get("/simulados/painel-global/turma-combinado", response_class=HTMLResponse)
+def painel_global_turma_combinado(trimestre_ano: str, turma_id: int):
+    """Igual a /simulados/painel-global/turma, mas combinando Dia 01 + Dia 02 — junta
+    as disciplinas dos dois dias (normalmente não se repetem entre os dias) numa visão
+    só, e a nota/distribuição usa a média dos dias que o aluno tiver feito."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        trimestre_s, ano_s = trimestre_ano.split(":")
+        trimestre, ano = int(trimestre_s), int(ano_s)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/simulados/painel-global", status_code=303)
+
+    apl_dia1, prova_dia1 = _achar_aplicacao_turma_dia(conn, trimestre, ano, 1, turma_id)
+    apl_dia2, prova_dia2 = _achar_aplicacao_turma_dia(conn, trimestre, ano, 2, turma_id)
+
+    disciplinas = []
+    if apl_dia1 and prova_dia1:
+        disciplinas += _analise_disciplinas_turma(conn, apl_dia1, prova_dia1)
+    if apl_dia2 and prova_dia2:
+        disciplinas += _analise_disciplinas_turma(conn, apl_dia2, prova_dia2)
+
+    registros = _coletar_dados_painel_combinado(conn, trimestre, ano)
+    conn.close()
+
+    if not apl_dia1 and not apl_dia2:
+        content = f'<div class="page-header"><h1>{turma["nome"]}</h1></div><div class="empty">Essa turma não tem simulado lançado nem no Dia 01 nem no Dia 02 dessa rodada.</div>'
+        return render_page(turma["nome"], content, active="simulados")
+
+    regs_turma = [r for r in registros if r["turma_id"] == turma_id]
+    media_turma = _media_nota(regs_turma)
+    dist_turma = _agregar_faixas(regs_turma)
+    n_turma = len(regs_turma)
+    n_incompletos = sum(1 for r in regs_turma if not r["completo"])
+
+    dist_labels_js = ", ".join(f'"{f["emoji"]} {f["nome"]}"' for f in FAIXAS_SAEB)
+    dist_data_js = ", ".join(str(dist_turma.get(f["nome"], 0)) for f in FAIXAS_SAEB)
+    dist_cores_js = ", ".join(f'"{f["hex"]}"' for f in FAIXAS_SAEB)
+    dist_legenda_turma_html = "".join(
+        f'<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:2px; background:{f["hex"]};"></span>{f["emoji"]} {f["nome"]}: {dist_turma.get(f["nome"], 0)} ({round(dist_turma.get(f["nome"], 0) / n_turma * 100, 1) if n_turma else 0}%)</span>'
+        for f in FAIXAS_SAEB
+    )
+
+    disc_labels_js = ", ".join(f'"{d["disciplina"]}"' for d in disciplinas)
+    disc_pcts_js = ", ".join(str(d["pct_geral"]) for d in disciplinas)
+    disc_cores_js = ", ".join(
+        '"#dc2626"' if d["pct_geral"] < 50 else ('"#ea580c"' if d["pct_geral"] < 70 else '"#16a34a"')
+        for d in disciplinas
+    )
+
+    disciplinas_html = _renderizar_disciplinas_cards_html(disciplinas)
+
+    aviso_dias = ""
+    if not apl_dia1:
+        aviso_dias = '<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ Essa turma não tem simulado do Dia 01 nessa rodada — mostrando só o Dia 02.</p>'
+    elif not apl_dia2:
+        aviso_dias = '<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ Essa turma não tem simulado do Dia 02 nessa rodada — mostrando só o Dia 01.</p>'
+    elif n_incompletos:
+        aviso_dias = f'<p class="muted-line" style="font-size:12px; color:var(--orange);">⚠ {n_incompletos} aluno(s) só têm nota de um dos dois dias (a média considera só o dia que ele fez).</p>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>📊 {turma['nome']} — Dia 01 + Dia 02</h1>
+            <p class="subtitle">{trimestre}º Trimestre {ano} · visão combinada dos dois dias, por disciplina.</p>
+        </div>
+        {aviso_dias}
+
+        <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Alunos avaliados</div><div class="metric-value">{n_turma}</div></div>
+            <div class="metric"><div class="metric-label">Nota média da turma</div><div class="metric-value">{media_turma}</div></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-bottom:18px;">
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">Distribuição de faixas SAEB</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-dist-turma-comb"></canvas></div>
+                <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:8px; font-size:11px; color:var(--text-muted);">{dist_legenda_turma_html}</div>
+            </div>
+            <div class="card">
+                <h3 style="margin-top:0; font-size:14px;">% de acerto por disciplina (Dia 01 + Dia 02)</h3>
+                <div style="height:220px; position:relative;"><canvas id="chart-disc-turma-comb"></canvas></div>
+            </div>
+        </div>
+
+        <h3>Por disciplina — o que precisa de atenção</h3>
+        {disciplinas_html}
+
+        <div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap;">
+            <a href="/simulados/painel-global/combinado/ver?trimestre_ano={trimestre}:{ano}" class="btn">← Voltar ao painel combinado</a>
+            {f'<a href="/simulados/painel-global/turma?rodada={trimestre}:{ano}:1&turma_id={turma_id}&aplicacao_id={apl_dia1}" class="btn">Ver só Dia 01</a>' if apl_dia1 else ''}
+            {f'<a href="/simulados/painel-global/turma?rodada={trimestre}:{ano}:2&turma_id={turma_id}&aplicacao_id={apl_dia2}" class="btn">Ver só Dia 02</a>' if apl_dia2 else ''}
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+        <script>
+            new Chart(document.getElementById('chart-dist-turma-comb'), {{
+                type: 'doughnut',
+                data: {{ labels: [{dist_labels_js}], datasets: [{{ data: [{dist_data_js}], backgroundColor: [{dist_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+            }});
+            new Chart(document.getElementById('chart-disc-turma-comb'), {{
+                type: 'bar',
+                data: {{ labels: [{disc_labels_js}], datasets: [{{ label: '% de acerto', data: [{disc_pcts_js}], backgroundColor: [{disc_cores_js}] }}] }},
+                options: {{ responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true, max: 100 }} }} }}
+            }});
+        </script>
+    """
+    return render_page(f"{turma['nome']} — Dia 01 + Dia 02", content, active="simulados")
+
+
+
+
+def _prova_id_do_simulado(conn, sim_id: int) -> Optional[int]:
+    row = conn.execute("SELECT id FROM provas WHERE titulo LIKE ?", (f"%[SIM-{sim_id}]%",)).fetchone()
+    return row["id"] if row else None
+
+
+def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
+    """Calcula a nota simples de cada aluno da turma em um simulado específico:
+    soma de acertos × valor da questão (prova de valor 'x', cada questão vale 'y').
+    Retorna dict aluno_id -> {nome, numero, acertos, total_questoes, nota}."""
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        return {}
+    prova_id = _prova_id_do_simulado(conn, sim_id)
+    if not prova_id:
+        return {}
+    aplicacao = conn.execute(
+        "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)
+    ).fetchone()
+    if not aplicacao:
+        return {}
+    aplicacao_id = aplicacao["id"]
+
+    total_questoes = conn.execute(
+        """SELECT COUNT(*) AS c FROM simulado_questoes sq
+           JOIN simulado_blocos b ON b.id = sq.bloco_id
+           WHERE b.simulado_id = ?""", (sim_id,)
+    ).fetchone()["c"]
+    # Cada simulado (por dia) vale sempre 1,0 ponto no total, dividido igualmente entre
+    # as questões — ex: 40 questões = 0,025 por questão. Não usamos o campo configurável
+    # "pontuacao_total" aqui porque essa é uma convenção fixa desse relatório específico
+    # (Dia 01 + Dia 02 = 2,0 pontos), não algo que varia por simulado.
+    valor_questao = (1.0 / total_questoes) if total_questoes else 0
+
+    alunos = conn.execute(
+        "SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)
+    ).fetchall()
+
+    resultado = {}
+    for aluno in alunos:
+        acertos = conn.execute(
+            """SELECT COUNT(*) AS c FROM respostas r
+               JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
+               WHERE r.aplicacao_id = ? AND r.aluno_id = ?""",
+            (aplicacao_id, aluno["id"])
+        ).fetchone()["c"]
+        resultado[aluno["id"]] = {
+            "nome": aluno["nome"], "numero": aluno["numero"],
+            "acertos": acertos, "total_questoes": total_questoes,
+            # Nota "crua" (não arredondada ainda) — o arredondamento pra 1 casa decimal
+            # (comercial, half-up) acontece só na hora de exibir, pra não perder precisão
+            # antes da soma dos dois dias.
+            "nota": round(acertos * valor_questao, 4),
+        }
+    return resultado
+
+
+def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) -> dict:
+    """Composição da nota de um aluno em um simulado (um dia), por disciplina de cada bloco.
+    Retorna dict disciplina_nome -> pontos obtidos naquele bloco."""
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        return {}
+    prova_id = _prova_id_do_simulado(conn, sim_id)
+    if not prova_id:
+        return {}
+    aplicacao = conn.execute(
+        "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)
+    ).fetchone()
+    if not aplicacao:
+        return {}
+    aplicacao_id = aplicacao["id"]
+
+    total_questoes = conn.execute(
+        """SELECT COUNT(*) AS c FROM simulado_questoes sq
+           JOIN simulado_blocos b ON b.id = sq.bloco_id
+           WHERE b.simulado_id = ?""", (sim_id,)
+    ).fetchone()["c"]
+    valor_questao = (1.0 / total_questoes) if total_questoes else 0
+
+    blocos = conn.execute(
+        """SELECT b.id AS bloco_id, d.nome AS disciplina_nome
+           FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+           WHERE b.simulado_id = ?""", (sim_id,)
+    ).fetchall()
+
+    composicao = {}
+    for b in blocos:
+        acertos = conn.execute(
+            """SELECT COUNT(*) AS c FROM respostas r
+               JOIN simulado_questoes sq ON sq.questao_id = r.questao_id AND sq.bloco_id = ?
+               JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
+               WHERE r.aplicacao_id = ? AND r.aluno_id = ?""",
+            (b["bloco_id"], aplicacao_id, aluno_id)
+        ).fetchone()["c"]
+        pontos = round(acertos * valor_questao, 2)
+        composicao[b["disciplina_nome"]] = composicao.get(b["disciplina_nome"], 0) + pontos
+    return composicao
+
+
+@app.get("/simulados/relatorio-notas/aluno", response_class=HTMLResponse)
+def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        sim1_id_str, sim2_id_str = par.split(":")
+        sim1_id, sim2_id = int(sim1_id_str), int(sim2_id_str)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    sim1 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim1_id,)).fetchone()
+    sim2 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim2_id,)).fetchone()
+    aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not turma or not sim1 or not sim2 or not aluno:
+        conn.close()
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    comp1 = _composicao_nota_aluno_dia(conn, sim1_id, turma_id, aluno_id)
+    comp2 = _composicao_nota_aluno_dia(conn, sim2_id, turma_id, aluno_id)
+    conn.close()
+
+    disciplinas = sorted(set(comp1.keys()) | set(comp2.keys()))
+    nota1_total = _arredondar_comercial(sum(comp1.values()), 1)
+    nota2_total = _arredondar_comercial(sum(comp2.values()), 1)
+    # Total = soma exata do que aparece nas colunas do Dia 01 e Dia 02, já arredondadas
+    # (evita "0,4 + 0,4" parecer dar um total diferente na tela).
+    nota_total = _arredondar_comercial(nota1_total + nota2_total, 1)
+
+    cores = ["#4C6EF5", "#F76707", "#2F9E44", "#E64980", "#0CA678", "#F59F00", "#7048E8"]
+    datasets_js = ""
+    linhas_tabela = ""
+    for i, d in enumerate(disciplinas):
+        v1 = comp1.get(d, 0)
+        v2 = comp2.get(d, 0)
+        cor = cores[i % len(cores)]
+        datasets_js += f"{{label:{d!r}, data:[{v1},{v2}], borderColor:'{cor}', backgroundColor:'{cor}', tension:0.3, fill:false, pointRadius:5}},"
+        linhas_tabela += f"""<tr>
+            <td style="padding:6px;">{d}</td>
+            <td style="padding:6px; text-align:center;">{v1}</td>
+            <td style="padding:6px; text-align:center;">{v2}</td>
+            <td style="padding:6px; text-align:center; font-weight:600;">{_arredondar_comercial(v1 + v2, 2)}</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Composição da nota — {aluno['nome']}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
+  table {{ width:100%; border-collapse:collapse; font-size:13px; margin-top:20px; }}
+  th, td {{ border:1px solid #ccc; }}
+  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:20px; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head>
+<body>
+  <div class="header">
+    <img src="/static/imagens/logo_walmir.png" style="max-height:60px;" alt="Walmir">
+    <div>
+      <h2 style="margin:0;">Composição da nota — {aluno['nome']}</h2>
+      <div style="color:#555; font-size:13px;">{turma['nome']} · {sim1['trimestre']}º Trimestre · {sim1['ano']} · Nota total: <strong>{nota_total}</strong></div>
+    </div>
+  </div>
+  <div class="no-print" style="margin-bottom:16px;">
+    <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="javascript:history.back()">← Voltar</a>
+  </div>
+  <div style="max-width:700px; height:360px; position:relative;">
+    <canvas id="chart"></canvas>
+  </div>
+  <table>
+    <thead><tr style="background:#f0f0f0;">
+        <th style="padding:6px; text-align:left;">Disciplina</th>
+        <th style="padding:6px;">Dia 01</th>
+        <th style="padding:6px;">Dia 02</th>
+        <th style="padding:6px;">Total</th>
+    </tr></thead>
+    <tbody>{linhas_tabela}</tbody>
+  </table>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+  <script>
+    new Chart(document.getElementById('chart'), {{
+      type: 'line',
+      data: {{ labels: ['Dia 01', 'Dia 02'], datasets: [{datasets_js}] }},
+      options: {{
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: {{ duration: 400 }},
+        plugins: {{
+          legend: {{ position: 'bottom' }},
+          title: {{ display: true, text: 'Pontos obtidos por disciplina, por dia' }}
+        }},
+        scales: {{ y: {{ beginAtZero: true }} }}
+      }}
+    }});
+  </script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.get("/simulados/relatorio-notas", response_class=HTMLResponse)
+def form_relatorio_notas_simulado():
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    sims = conn.execute(
+        "SELECT * FROM simulados ORDER BY ano DESC, trimestre DESC, ano_escolaridade, dia"
+    ).fetchall()
+    grupos = {}
+    for s in sims:
+        chave = (s["trimestre"], s["ano"], s["ano_escolaridade"])
+        grupos.setdefault(chave, {})[s["dia"]] = s
+    turmas = conn.execute("SELECT * FROM turmas ORDER BY nome").fetchall()
+    conn.close()
+
+    opcoes_grupo = ""
+    for (tri, ano, ano_esc), dias in sorted(grupos.items(), reverse=True):
+        if 1 in dias and 2 in dias:
+            label = f"{_ano_esc_label(ano_esc or 0)} · {tri}º Trimestre · {ano} (Dia 01 + Dia 02)"
+            opcoes_grupo += f'<option value="{dias[1]["id"]}:{dias[2]["id"]}">{label}</option>'
+    if not opcoes_grupo:
+        opcoes_grupo = '<option value="">Nenhum par Dia 01 + Dia 02 encontrado</option>'
+    opcoes_turma = "".join(f'<option value="{t["id"]}">{t["nome"]}</option>' for t in turmas)
+
+    content = f"""
+    <div class="page-header"><h1>📄 Relatório de Notas — Simulado</h1>
+        <p class="subtitle">Nota Dia 01 + Dia 02 = Total, por turma. Opcionalmente exibe a divisão de referência 50% (Gram/Alg) · 50% (Leit/Geom) da nota total.</p>
+    </div>
+    <div class="card">
+        <form method="get" action="/simulados/relatorio-notas/gerar" style="display:flex; flex-direction:column; gap:14px; max-width:480px;">
+            <label>Simulado (par Dia 01 + Dia 02)
+                <select name="par" required style="width:100%;">{opcoes_grupo}</select>
+            </label>
+            <label>Turma
+                <select name="turma_id" required style="width:100%;">{opcoes_turma}</select>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" name="ponderado" value="1" style="width:auto;"> Exibir divisão 50/50 (Gram/Alg · Leit/Geom)
+            </label>
+            <button type="submit" class="btn btn-primary">Gerar relatório</button>
+        </form>
+        <p class="muted-line" style="margin-top:10px; font-size:12px;">Mostra qualquer simulado com pelo menos um cartão já confirmado — não precisa estar fechado.</p>
+    </div>
+    """
+    return render_page("Relatório de Notas", content, active="simulados")
+
+
+@app.get("/simulados/relatorio-notas/gerar", response_class=HTMLResponse)
+def gerar_relatorio_notas_simulado(par: str, turma_id: int, ponderado: int = 0):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    try:
+        sim1_id_str, sim2_id_str = par.split(":")
+        sim1_id, sim2_id = int(sim1_id_str), int(sim2_id_str)
+    except (ValueError, AttributeError):
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    sim1 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim1_id,)).fetchone()
+    sim2 = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim2_id,)).fetchone()
+    if not turma or not sim1 or not sim2:
+        conn.close()
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+
+    notas1 = _coletar_notas_simulado_turma(conn, sim1_id, turma_id)
+    notas2 = _coletar_notas_simulado_turma(conn, sim2_id, turma_id)
+    conn.close()
+
+    alunos_ids = set(notas1.keys()) | set(notas2.keys())
+    if not alunos_ids:
+        content = '<div class="empty">Nenhum aluno com respostas registradas para este par de simulados nesta turma.</div>'
+        return render_page("Relatório de Notas", content, active="simulados")
+
+    alunos_ids = sorted(alunos_ids, key=lambda aid: ((notas1.get(aid) or notas2.get(aid))["numero"] or 999))
+
+    linhas = ""
+    for aid in alunos_ids:
+        d1 = notas1.get(aid)
+        d2 = notas2.get(aid)
+        base = d1 or d2
+        nome = base["nome"]
+        numero = base["numero"] if base["numero"] is not None else "—"
+        nota1_bruta = d1["nota"] if d1 else 0
+        nota2_bruta = d2["nota"] if d2 else 0
+        nota1 = _arredondar_comercial(nota1_bruta, 1)
+        nota2 = _arredondar_comercial(nota2_bruta, 1)
+        # O Total precisa ser a soma exata do que aparece nas colunas Dia 01 e Dia 02
+        # (já arredondadas) — se somássemos as notas cruas antes de arredondar, o Total
+        # podia não bater com "Dia01 + Dia02" que a pessoa está vendo na tela (ex:
+        # 0,4 + 0,4 parecendo dar 0,7), mesmo sendo uma conta "tecnicamente" diferente.
+        total_bruto = _arredondar_comercial(nota1 + nota2, 1)
+
+        link_detalhe = f'<a href="/simulados/relatorio-notas/aluno?par={par}&turma_id={turma_id}&aluno_id={aid}" target="_blank">👁 Ver</a>'
+
+        if ponderado:
+            col_cinquenta_1 = _arredondar_comercial(total_bruto * 0.5, 1)
+            col_cinquenta_2 = _arredondar_comercial(total_bruto * 0.5, 1)
+            linhas += f"""<tr>
+                <td style="padding:6px;">{numero}</td>
+                <td style="padding:6px;">{nome}</td>
+                <td style="padding:6px; text-align:center; font-weight:600;">{total_bruto}</td>
+                <td style="padding:6px; text-align:center;">{col_cinquenta_1}</td>
+                <td style="padding:6px; text-align:center;">{col_cinquenta_2}</td>
+                <td style="padding:6px; text-align:center;">{link_detalhe}</td>
+            </tr>"""
+        else:
+            linhas += f"""<tr>
+                <td style="padding:6px;">{numero}</td>
+                <td style="padding:6px;">{nome}</td>
+                <td style="padding:6px; text-align:center;">{nota1}</td>
+                <td style="padding:6px; text-align:center;">{nota2}</td>
+                <td style="padding:6px; text-align:center; font-weight:600;">{total_bruto}</td>
+                <td style="padding:6px; text-align:center;">{link_detalhe}</td>
+            </tr>"""
+
+    if ponderado:
+        cabecalho = """<tr style="background:#f0f0f0;">
+            <th style="padding:6px; text-align:left;">Nº</th>
+            <th style="padding:6px; text-align:left;">Nome</th>
+            <th style="padding:6px;">Nota</th>
+            <th style="padding:6px;">Gram/Alg</th>
+            <th style="padding:6px;">Leit/Geom</th>
+            <th style="padding:6px;">Composição</th>
+        </tr>"""
+    else:
+        cabecalho = """<tr style="background:#f0f0f0;">
+            <th style="padding:6px; text-align:left;">Nº</th>
+            <th style="padding:6px; text-align:left;">Aluno</th>
+            <th style="padding:6px;">Nota Dia 01</th>
+            <th style="padding:6px;">Nota Dia 02</th>
+            <th style="padding:6px;">Total</th>
+            <th style="padding:6px;">Composição</th>
+        </tr>"""
+
+    titulo_relatorio = "Relatório de Notas (50/50)" if ponderado else "Relatório de Notas — Dia 01 + Dia 02"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{titulo_relatorio} — {turma['nome']}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
+  table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+  th, td {{ border:1px solid #ccc; }}
+  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:20px; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head>
+<body>
+  <div class="header">
+    <img src="/static/imagens/logo_walmir.png" style="max-height:60px;" alt="Walmir">
+    <div>
+      <h2 style="margin:0;">{titulo_relatorio}</h2>
+      <div style="color:#555; font-size:13px;">{turma['nome']} · {sim1['trimestre']}º Trimestre · {sim1['ano']} · {_ano_esc_label(sim1['ano_escolaridade'] or 0)}</div>
+    </div>
+  </div>
+  <div class="no-print" style="margin-bottom:16px;">
+    <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="/simulados/relatorio-notas">← Voltar</a>
+  </div>
+  <table>
+    <thead>{cabecalho}</thead>
+    <tbody>{linhas}</tbody>
+  </table>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+
+
+@app.get("/simulados", response_class=HTMLResponse)
+def listar_simulados(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    is_admin = prof.get("is_admin") or prof.get("is_gestor")
+    conn = get_db()
+    if is_admin:
+        simulados = conn.execute("""
+            SELECT s.*,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
+            FROM simulados s
+            ORDER BY s.ordem ASC, s.id DESC
+        """).fetchall()
+    else:
+        # Professores veem simulados abertos (podem contribuir) + os que criaram
+        simulados = conn.execute("""
+            SELECT s.*,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id) AS n_blocos,
+                   (SELECT COUNT(*) FROM simulado_blocos WHERE simulado_id = s.id AND status IN ('completo','aprovado')) AS n_completos
+            FROM simulados s
+            WHERE s.status IN ('aberto', 'publicado')
+               OR s.criado_por_professor_id = ?
+            ORDER BY s.ano DESC, s.trimestre DESC, s.id DESC
+        """, (prof["id"],)).fetchall()
+    conn.close()
+
+    btn_novo = '<a href="/simulados/novo" class="btn btn-primary">+ Novo simulado</a>' if is_admin else ""
+
+    ids_ordem = [s["id"] for s in simulados]
+    cards = ""
+    for idx, s in enumerate(simulados):
+        n_b = s["n_blocos"] or 0
+        n_c = s["n_completos"] or 0
+        pct = int(n_c / n_b * 100) if n_b else 0
+        cor_barra = "var(--green)" if pct == 100 else ("var(--orange)" if pct > 0 else "var(--border)")
+        status_cores = {"montagem": ("var(--text-muted)", "Montagem"),
+                        "aberto": ("var(--orange)", "Aberto para contribuição"),
+                        "fechado": ("var(--red)", "Fechado"),
+                        "publicado": ("var(--green)", "Publicado")}
+        sc, sl = status_cores.get(s["status"], ("var(--text-muted)", s["status"]))
+        eh_primeiro = idx == 0
+        eh_ultimo = idx == len(simulados) - 1
+        btns_ordem = ""
+        if is_admin:
+            btn_cima = "" if eh_primeiro else (
+                f'<form method="post" action="/simulados/{s["id"]}/mover" style="margin:0;">' +
+                f'<input type="hidden" name="direcao" value="cima">' +
+                f'<button type="submit" class="btn" style="padding:2px 8px;font-size:12px;" title="Mover para cima">▲</button></form>'
+            )
+            btn_baixo = "" if eh_ultimo else (
+                f'<form method="post" action="/simulados/{s["id"]}/mover" style="margin:0;">' +
+                f'<input type="hidden" name="direcao" value="baixo">' +
+                f'<button type="submit" class="btn" style="padding:2px 8px;font-size:12px;" title="Mover para baixo">▼</button></form>'
+            )
+            btns_ordem = f'<div style="display:flex;gap:3px;align-items:center;">{btn_cima}{btn_baixo}</div>'
+        cards += f"""
+        <div style="display:flex; gap:8px; align-items:stretch; margin-bottom:12px;">
+            {f'<div style="display:flex;flex-direction:column;justify-content:center;gap:3px;">{btns_ordem}</div>' if is_admin else ""}
+            <a href="/simulados/{s['id']}" style="flex:1; display:block; text-decoration:none; border:1px solid var(--border); border-radius:10px; padding:16px 20px; background:var(--card);">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <div style="font-weight:700; font-size:15px; color:var(--text);">{s['nome']}</div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
+                            Dia {s['dia']:02d} · {_ano_esc_label(s['ano_escolaridade'] or 0)} · {s['trimestre']}º trimestre · {s['ano']}
+                        </div>
+                    </div>
+                    <span style="color:{sc}; font-size:12px; font-weight:600;">{sl}</span>
+                </div>
+                <div style="margin-top:12px;">
+                    <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-muted); margin-bottom:4px;">
+                        <span>Blocos entregues</span><span>{n_c}/{n_b}</span>
+                    </div>
+                    <div style="height:6px; background:var(--border); border-radius:3px;">
+                        <div style="height:6px; width:{pct}%; background:{cor_barra}; border-radius:3px; transition:width 0.3s;"></div>
+                    </div>
+                </div>
+            </a>
+        </div>"""
+
+    if not cards:
+        cards = '<div class="empty">Nenhum simulado encontrado.</div>'
+
+    btn_relatorio = '<a href="/simulados/relatorio-notas" class="btn">📄 Relatório de Notas</a><a href="/simulados/painel-global" class="btn" style="border-color:var(--accent); color:var(--accent);">🏫 Painel Global</a>' if is_admin else ""
+
+    content = f"""
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div><h1>📊 Simulados</h1><p class="subtitle">Provas multidisciplinares trimestrais</p></div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">{btn_relatorio}{btn_novo}</div>
+        </div>
+        {cards}
+    """
+    return render_page("Simulados", content, active="simulados")
+
+
+
+
+@app.post("/simulados/{sim_id}/mover")
+def mover_simulado(sim_id: int, direcao: str = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    sims = conn.execute("SELECT id, ordem FROM simulados ORDER BY ordem ASC, id DESC").fetchall()
+    ids = [s["id"] for s in sims]
+    if sim_id not in ids:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+    idx = ids.index(sim_id)
+    if direcao == "cima" and idx > 0:
+        outro_id = ids[idx - 1]
+        outro_idx = idx - 1
+    elif direcao == "baixo" and idx < len(ids) - 1:
+        outro_id = ids[idx + 1]
+        outro_idx = idx + 1
+    else:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+    ord_atual = sims[idx]["ordem"]
+    ord_outro = sims[outro_idx]["ordem"]
+    # Se ordens iguais (inicial), usa posição
+    if ord_atual == ord_outro:
+        ord_atual = idx
+        ord_outro = outro_idx
+    conn.execute("UPDATE simulados SET ordem = ? WHERE id = ?", (ord_outro, sim_id))
+    conn.execute("UPDATE simulados SET ordem = ? WHERE id = ?", (ord_atual, outro_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/simulados", status_code=303)
+
+@app.get("/simulados/novo", response_class=HTMLResponse)
+def form_novo_simulado(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    conn.close()
+
+
+    disc_opts = "".join(f'<option value="{d["id"]}">{d["nome"]}</option>' for d in disciplinas)
+
+    blocos_html = ""
+    for i in range(1, 5):
+        blocos_html += f"""
+        <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--bg-subtle);">
+            <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">Bloco {i}</div>
+            <div style="color:var(--text-muted); font-size:12px; margin-bottom:8px;">Aberto para todos os professores desta disciplina</div>
+            <label style="margin:0;">Disciplina
+                <select name="bloco_{i}_disciplina_id" required>
+                    <option value="">— selecione —</option>
+                    {disc_opts}
+                </select>
+            </label>
+        </div>"""
+
+    import datetime
+    ano_atual = datetime.date.today().year
+
+    content = f"""
+        <div class="page-header"><h1>+ Novo simulado</h1></div>
+        <form method="post" action="/simulados/novo">
+            <div class="tip" style="margin-bottom:16px; font-size:13px;">
+                💡 O nome será gerado automaticamente: <strong>Simulado — Dia XX · Xº ano · Xº Trimestre</strong>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; margin-bottom:14px;">
+                <label>Trimestre
+                    <select name="trimestre" required>
+                        <option value="1">1º Trimestre</option>
+                        <option value="2">2º Trimestre</option>
+                        <option value="3">3º Trimestre</option>
+                    </select>
+                </label>
+                <label>Dia do simulado
+                    <select name="dia" required>
+                        <option value="1">Dia 01</option>
+                        <option value="2">Dia 02</option>
+                        <option value="3">Dia 03</option>
+                        <option value="4">Dia 04</option>
+                        <option value="5">Dia 05</option>
+                    </select>
+                </label>
+                <label>Ano<input type="number" name="ano" value="{ano_atual}" min="2024" max="2030" required></label>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
+                <label>Ano de escolaridade
+                    <select name="ano_escolaridade" required>
+                        <option value="">— selecione —</option>
+                        <option value="6">6º ano (601 a 605)</option>
+                        <option value="7">7º ano (701 a 706)</option>
+                        <option value="8">8º ano (801 a 806)</option>
+                        <option value="9">9º ano (901 a 906)</option>
+                    </select>
+                </label>
+                <label>Pontuação total
+                    <input type="number" name="pontuacao_total" value="10" step="0.5" min="1" max="100" required>
+                    <small style="color:var(--text-muted);">Valor dividido igualmente pelas 40 questões</small>
+                </label>
+            </div>
+            <h3 style="margin:20px 0 12px;">Configuração dos blocos</h3>
+            {blocos_html}
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button type="submit" class="btn btn-primary">Criar simulado</button>
+                <a href="/simulados" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Novo simulado", content, active="simulados")
+
+
+@app.post("/simulados/novo")
+def criar_simulado(
+    dia: int = Form(1), trimestre: int = Form(...), ano: int = Form(...),
+    ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
+    bloco_1_disciplina_id: int = Form(...),
+    bloco_2_disciplina_id: int = Form(...),
+    bloco_3_disciplina_id: int = Form(...),
+    bloco_4_disciplina_id: int = Form(...),
+):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+    conn = get_db()
+    aesc = int(ano_escolaridade) if ano_escolaridade else None
+    ano_label = _ano_esc_label(aesc) if aesc else "—"
+    nome_auto = f"Simulado — Dia {dia:02d} · {ano_label} · {trimestre}º Trimestre"
+    # Calcular ordem automática: dia * 10 + ano_escolaridade (6→7→8→9)
+    ordem_auto = dia * 10 + (aesc or 0)
+    cur = conn.execute(
+        "INSERT INTO simulados (nome, trimestre, ano, dia, ano_escolaridade, pontuacao_total, ordem, criado_por_professor_id) VALUES (?,?,?,?,?,?,?,?)",
+        (nome_auto, trimestre, ano, dia, aesc, pontuacao_total, ordem_auto, prof["id"])
+    )
+    sim_id = cur.lastrowid
+    blocos = [
+        bloco_1_disciplina_id,
+        bloco_2_disciplina_id,
+        bloco_3_disciplina_id,
+        bloco_4_disciplina_id,
+    ]
+    for i, disc_id in enumerate(blocos, start=1):
+        conn.execute(
+            "INSERT INTO simulado_blocos (simulado_id, numero, disciplina_id, professor_id, status) VALUES (?,?,?,?,?)",
+            (sim_id, i, disc_id, None, "em_contribuicao")
+        )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.get("/simulados/{sim_id}", response_class=HTMLResponse)
+def ver_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    is_admin = prof.get("is_admin") or prof.get("is_gestor")
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome, p.nome AS professor_nome,
+               (SELECT COUNT(*) FROM simulado_questoes WHERE bloco_id = b.id) AS n_questoes_adicionadas
+        FROM simulado_blocos b
+        JOIN disciplinas d ON d.id = b.disciplina_id
+        LEFT JOIN professores p ON p.id = b.professor_id
+        WHERE b.simulado_id = ?
+        ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+    conn.close()
+
+    vpq = _valor_por_questao(sim["pontuacao_total"])
+    todos_completos = all(b["status"] in ("completo", "aprovado") for b in blocos)
+
+    # Ações admin
+    acoes_admin = ""
+    if is_admin:
+        acoes_admin += f'<a href="/simulados/{sim_id}/editar" class="btn">✏️ Editar</a>'
+        acoes_admin += f'<form method="post" action="/simulados/{sim_id}/excluir" style="margin:0;" onsubmit="return confirm(\'Excluir este simulado permanentemente? Esta ação não pode ser desfeita.\')"><button type="submit" class="btn" style="color:var(--red);border-color:var(--red);">🗑️ Excluir</button></form>'
+        if sim["status"] == "aberto":
+            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/encerrar" style="margin:0;" onsubmit="return confirm(\'Encerrar este simulado? Os professores não poderão mais contribuir.\')"><button type="submit" class="btn" style="color:var(--orange);border-color:var(--orange);">⏹ Encerrar</button></form>'
+        if sim["status"] == "montagem":
+            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/abrir" style="margin:0;"><button type="submit" class="btn btn-primary">📤 Abrir para contribuição</button></form>'
+        elif sim["status"] == "aberto" and todos_completos:
+            acoes_admin += f'<form method="post" action="/simulados/{sim_id}/fechar" style="margin:0;"><button type="submit" class="btn" style="color:var(--green);border-color:var(--green);">✅ Fechar e publicar</button></form>'
+        # Preview sempre disponível (em qualquer status)
+        acoes_admin += f'<a href="/simulados/{sim_id}/preview" class="btn" target="_blank">👁️ Preview questões</a>'
+        acoes_admin += f'<a href="/simulados/{sim_id}/cartao-resposta" class="btn" target="_blank">📋 Cartões OMR</a>'
+        if sim["status"] in ("fechado", "publicado"):
+            acoes_admin += f'<a href="/simulados/{sim_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Gerar PDF</a>'
+            acoes_admin += f'<a href="/simulados/{sim_id}/aplicacoes" class="btn" style="color:var(--green);border-color:var(--green);">📋 Aplicações</a>'
+
+    # Cards dos blocos
+    blocos_html = ""
+    for b in blocos:
+        badge = _status_bloco_badge(b["status"])
+        n_add = b["n_questoes_adicionadas"] or 0
+        n_tot = b["n_questoes"]
+        progresso_cor = "var(--green)" if n_add >= n_tot else ("var(--orange)" if n_add > 0 else "var(--border)")
+
+        # Botão de ação por perfil
+        btn_bloco = ""
+        # Qualquer professor pode contribuir para o bloco da sua disciplina
+        pode_contribuir = sim["status"] == "aberto" and b["status"] in ("em_contribuicao", "completo")
+        if pode_contribuir and not is_admin:
+            btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">✏️ Contribuir</a>'
+        elif is_admin:
+            btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn" style="font-size:12px; padding:5px 12px;">⚙️ Gerenciar</a>'
+            if b["status"] == "completo":
+                btn_bloco += f' <form method="post" action="/simulados/{sim_id}/blocos/{b["id"]}/aprovar" style="margin:0;display:inline;"><button type="submit" class="btn" style="font-size:12px;padding:5px 12px;color:var(--accent);border-color:var(--accent);">🔒 Aprovar bloco</button></form>'
+
+        blocos_html += f"""
+        <div style="border:1px solid var(--border); border-radius:10px; padding:16px; background:var(--card); margin-bottom:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <div style="font-weight:700; font-size:14px;">Bloco {b['numero']} — {b['disciplina_nome']}</div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+                        Aberto para professores de {b['disciplina_nome']} · {n_add}/{n_tot} questões
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    {badge}
+                    {btn_bloco}
+                </div>
+            </div>
+            <div style="margin-top:10px; height:5px; background:var(--border); border-radius:3px;">
+                <div style="height:5px; width:{min(100, int(n_add/n_tot*100)) if n_tot else 0}%; background:{progresso_cor}; border-radius:3px;"></div>
+            </div>
+        </div>"""
+
+    status_cores = {"montagem": "var(--text-muted)", "aberto": "var(--orange)", "fechado": "var(--red)", "publicado": "var(--green)"}
+    status_labels = {"montagem": "Em montagem", "aberto": "Aberto", "fechado": "Fechado", "publicado": "Publicado"}
+
+    # Botão preview para todos
+    btn_preview = f'<a href="/simulados/{sim_id}/preview" class="btn" target="_blank" style="font-size:12px;">👁️ Preview questões</a>'
+
+    content = f"""
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h1>📊 {sim['nome']}</h1>
+                <p class="subtitle">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']}
+                    · <span style="color:{status_cores.get(sim['status'],'var(--text-muted)')}; font-weight:600;">{status_labels.get(sim['status'], sim['status'])}</span>
+                </p>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">{acoes_admin if is_admin else btn_preview}</div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin-bottom:20px;">
+            <div class="metric"><div class="metric-label">Pontuação total</div><div class="metric-value">{sim['pontuacao_total']}</div></div>
+            <div class="metric"><div class="metric-label">Valor por questão</div><div class="metric-value">{vpq}</div></div>
+            <div class="metric"><div class="metric-label">Total de questões</div><div class="metric-value">40</div></div>
+        </div>
+        <h3 style="margin-bottom:12px;">Blocos</h3>
+        {blocos_html}
+        <div style="margin-top:16px;">
+            <a href="/simulados" class="btn">← Voltar</a>
+        </div>
+    """
+    return render_page(sim["nome"], content, active="simulados")
+
+
+@app.get("/simulados/{sim_id}/aplicacoes", response_class=HTMLResponse)
+def simulado_aplicacoes(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    # Buscar prova vinculada ao simulado
+    prova_vinculada = conn.execute(
+        "SELECT id, titulo FROM provas WHERE titulo LIKE ? ORDER BY id DESC LIMIT 1",
+        (f"%[SIM-{sim_id}]%",)
+    ).fetchone()
+
+    # Turmas do ano de escolaridade
+    turmas = _turmas_do_ano(conn, sim["ano_escolaridade"] or 0)
+
+    # Aplicações já criadas para este simulado
+    aplicacoes_existentes = {}
+    if prova_vinculada:
+        apps = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome,
+                   (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS n_entregas,
+                   (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS n_alunos
+            FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.prova_id = ? AND a.titulo LIKE ?
+        """, (prova_vinculada["id"], f"%[SIM-{sim_id}]%")).fetchall()
+        for a in apps:
+            aplicacoes_existentes[a["turma_id"]] = a
+    conn.close()
+
+    ano_label = _ano_esc_label(sim["ano_escolaridade"] or 0)
+    todas_criadas = len(turmas) > 0 and all(t["id"] in aplicacoes_existentes for t in turmas)
+
+    # Botão criar em lote
+    btn_criar = ""
+    if not todas_criadas and prova_vinculada:
+        btn_criar = f'<form method="post" action="/simulados/{sim_id}/aplicacoes/criar-lote" style="margin:0;"><button type="submit" class="btn btn-primary">🚀 Criar aplicações para todas as turmas do {ano_label}</button></form>'
+    elif not prova_vinculada:
+        btn_criar = ('<div class="tip" style="background:var(--orange-bg);border-color:var(--orange);">' +
+            '&#9888;&#65039; Nenhuma prova criada ainda para este simulado.<br>' +
+            '<small>Use o botão abaixo para criar as aplicações — a prova será gerada automaticamente.</small>' +
+            '<form method="post" action="/simulados/' + str(sim_id) + '/aplicacoes/criar-lote" style="margin-top:10px;">'
+            '<button type="submit" class="btn btn-primary">Criar aplicacoes e prova agora</button>'
+            '</form></div>')
+
+    # Cards das turmas
+    turmas_html = ""
+    for t in turmas:
+        app = aplicacoes_existentes.get(t["id"])
+        if app:
+            n_e = app["n_entregas"] or 0
+            n_a = app["n_alunos"] or 0
+            pct = int(n_e / n_a * 100) if n_a else 0
+            status_cor = "var(--green)" if app["aberta"] else "var(--text-muted)"
+            status_txt = "Aberta" if app["aberta"] else "Encerrada"
+            turmas_html += f"""
+            <div style="border:1px solid var(--border); border-radius:8px; padding:14px; background:var(--card); margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <div style="font-weight:600;">{t['nome']}</div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+                            {n_e}/{n_a} cartões escaneados ·
+                            <span style="color:{status_cor}; font-weight:600;">{status_txt}</span>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                        <a href="/simulados/{sim_id}/cartao-resposta?turma_id={app['turma_id']}" class="btn" style="font-size:12px; padding:5px 12px;" target="_blank">📄 Cartões</a>
+                        <a href="/simulados/{sim_id}/aplicacoes/{app['id']}/escanear" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">📷 Escanear</a>
+                        <a href="/aplicacoes/{app['id']}/analise" class="btn" style="font-size:12px; padding:5px 12px;">📈 Análise</a>
+                        <a href="/aplicacoes/{app['id']}" class="btn" style="font-size:12px; padding:5px 12px;">Ver →</a>
+                    </div>
+                </div>
+                <div style="margin-top:8px; height:5px; background:var(--border); border-radius:3px;">
+                    <div style="height:5px; width:{pct}%; background:var(--green); border-radius:3px;"></div>
+                </div>
+            </div>"""
+        else:
+            turmas_html += f"""
+            <div style="border:1px solid var(--border); border-radius:8px; padding:14px; background:var(--bg-subtle); margin-bottom:8px; opacity:0.7;">
+                <div style="font-weight:600;">{t['nome']}</div>
+                <div style="font-size:12px; color:var(--text-muted);">Aplicação ainda não criada</div>
+            </div>"""
+
+    if not turmas:
+        turmas_html = '<div class="empty">Nenhuma turma encontrada para o ' + ano_label + '.</div>'
+
+    content = f"""
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h1>📋 Aplicações — {sim['nome']}</h1>
+                <p class="subtitle">{ano_label} · {sim['trimestre']}º Trimestre · {sim['ano']}</p>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <a href="/simulados/{sim_id}/diagnostico" class="btn" style="border-color:var(--orange); color:var(--orange);">🔍 Diagnóstico de respostas</a>
+                {btn_criar}
+            </div>
+        </div>
+        {turmas_html}
+        <div style="margin-top:16px;"><a href="/simulados/{sim_id}" class="btn">← Voltar ao simulado</a></div>
+    """
+    return render_page("Aplicações do simulado", content, active="simulados")
+
+
+@app.get("/simulados/{sim_id}/diagnostico", response_class=HTMLResponse)
+def diagnostico_respostas_simulado(sim_id: int):
+    """Relatório para achar rapidamente cartões com muitas questões não respondidas —
+    útil pra identificar cartões que podem ter tido problema na leitura OMR, sem precisar
+    abrir aluno por aluno."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    prova_vinculada = conn.execute(
+        "SELECT id FROM provas WHERE titulo LIKE ? ORDER BY id DESC LIMIT 1",
+        (f"%[SIM-{sim_id}]%",)
+    ).fetchone()
+    if not prova_vinculada:
+        conn.close()
+        content = '<div class="empty">Nenhuma prova/aplicação criada ainda para este simulado.</div>'
+        return render_page("Diagnóstico", content, active="simulados")
+    prova_id = prova_vinculada["id"]
+
+    total_questoes = conn.execute("SELECT COUNT(*) c FROM prova_questoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
+
+    # Mapear questao_id -> (numero_ordem, disciplina_nome) pra poder indicar em qual bloco estão os brancos
+    questoes_ordem = conn.execute("""
+        SELECT pq.questao_id, pq.ordem, d.nome AS disciplina_nome
+        FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE pq.prova_id = ? ORDER BY pq.ordem
+    """, (prova_id,)).fetchall()
+    disciplina_por_questao = {q["questao_id"]: q["disciplina_nome"] for q in questoes_ordem}
+
+    aplicacoes = conn.execute("""
+        SELECT a.id AS aplicacao_id, t.nome AS turma_nome
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+        WHERE a.prova_id = ? AND a.titulo LIKE ?
+        ORDER BY t.nome
+    """, (prova_id, f"%[SIM-{sim_id}]%")).fetchall()
+
+    linhas_dados = []
+    for apl in aplicacoes:
+        entregas = conn.execute("""
+            SELECT e.aluno_id, al.nome AS aluno_nome, al.numero
+            FROM entregas e JOIN alunos al ON al.id = e.aluno_id
+            WHERE e.aplicacao_id = ?
+        """, (apl["aplicacao_id"],)).fetchall()
+
+        for e in entregas:
+            respostas = conn.execute(
+                "SELECT questao_id FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?",
+                (apl["aplicacao_id"], e["aluno_id"])
+            ).fetchall()
+            respondidas_ids = {r["questao_id"] for r in respostas}
+            n_respondidas = len(respondidas_ids)
+            n_brancos = total_questoes - n_respondidas
+
+            # Contar brancos por disciplina/bloco
+            brancos_por_disc = {}
+            for q_id, disc in disciplina_por_questao.items():
+                if q_id not in respondidas_ids:
+                    brancos_por_disc[disc] = brancos_por_disc.get(disc, 0) + 1
+
+            linhas_dados.append({
+                "turma": apl["turma_nome"], "aluno": e["aluno_nome"], "numero": e["numero"],
+                "aluno_id": e["aluno_id"], "aplicacao_id": apl["aplicacao_id"],
+                "n_respondidas": n_respondidas, "n_brancos": n_brancos,
+                "pct": round(n_respondidas / total_questoes * 100) if total_questoes else 0,
+                "brancos_por_disc": brancos_por_disc,
+            })
+    conn.close()
+
+    if not linhas_dados:
+        content = '<div class="empty">Nenhuma entrega registrada ainda para este simulado.</div>'
+        return render_page("Diagnóstico", content, active="simulados")
+
+    linhas_dados.sort(key=lambda x: x["pct"])
+
+    n_criticos = sum(1 for l in linhas_dados if l["pct"] < 70)
+    n_atencao = sum(1 for l in linhas_dados if 70 <= l["pct"] < 90)
+    n_ok = sum(1 for l in linhas_dados if l["pct"] >= 90)
+
+    linhas_html = ""
+    for l in linhas_dados:
+        if l["pct"] < 70:
+            cor, bg = "var(--red)", "var(--red-bg)"
+        elif l["pct"] < 90:
+            cor, bg = "var(--orange)", "var(--orange-bg)"
+        else:
+            cor, bg = "var(--green)", "transparent"
+
+        detalhe_brancos = ""
+        if l["brancos_por_disc"]:
+            partes = [f"{disc}: {n} em branco" for disc, n in sorted(l["brancos_por_disc"].items(), key=lambda x: -x[1])]
+            detalhe_brancos = " · ".join(partes)
+
+        linhas_html += f"""<tr style="background:{bg};">
+            <td style="padding:6px 10px;">{l['turma']}</td>
+            <td style="padding:6px 10px;">{l['numero'] or '—'}</td>
+            <td style="padding:6px 10px;"><a href="/aplicacoes/{l['aplicacao_id']}/aluno/{l['aluno_id']}">{l['aluno']}</a></td>
+            <td style="padding:6px 10px; text-align:center; font-weight:700; color:{cor};">{l['n_respondidas']}/{total_questoes}</td>
+            <td style="padding:6px 10px; text-align:center; color:{cor};">{l['pct']}%</td>
+            <td style="padding:6px 10px; font-size:12px; color:var(--text-muted);">{detalhe_brancos}</td>
+        </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🔍 Diagnóstico de respostas — {sim['nome']}</h1>
+            <p class="subtitle">Cartões com mais questões em branco aparecem primeiro — use isso pra achar leituras suspeitas de OMR.</p>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin-bottom:18px;">
+            <div class="metric" style="border-color:var(--red);"><div class="metric-label">Crítico (&lt;70% respondido)</div><div class="metric-value" style="color:var(--red);">{n_criticos}</div></div>
+            <div class="metric" style="border-color:var(--orange);"><div class="metric-label">Atenção (70–89%)</div><div class="metric-value" style="color:var(--orange);">{n_atencao}</div></div>
+            <div class="metric" style="border-color:var(--green);"><div class="metric-label">OK (≥90%)</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle); text-align:left;">
+                <th style="padding:6px 10px;">Turma</th>
+                <th style="padding:6px 10px;">Nº</th>
+                <th style="padding:6px 10px;">Aluno</th>
+                <th style="padding:6px 10px;">Respondidas</th>
+                <th style="padding:6px 10px;">%</th>
+                <th style="padding:6px 10px;">Onde estão os brancos</th>
+            </tr></thead>
+            <tbody>{linhas_html}</tbody>
+        </table>
+        <p class="muted-line" style="font-size:12px; margin-top:14px;">
+            Clique no nome do aluno pra ver as respostas em detalhe. Se "onde estão os brancos" concentrar tudo num bloco só, é sinal forte de problema de leitura (não de aluno que deixou em branco de propósito) — vale reescanear esse cartão específico.
+        </p>
+        <div style="margin-top:16px;"><a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a></div>
+    """
+    return render_page("Diagnóstico de respostas", content, active="simulados")
+
+
+@app.get("/analises-pedagogicas", response_class=HTMLResponse)
+def analises_pedagogicas_hub():
+    """Página central que reúne links pra todos os relatórios/análises do sistema,
+    num só lugar. Não substitui os links que já existem dentro de Simulados e de
+    cada aplicação de prova — é só um atalho central a mais (ver conversa sobre
+    Opção 1 de organização, 28/07/2026)."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    def card(icone, titulo, desc, href, texto_btn="Abrir"):
+        return f"""
+            <div style="background:var(--bg-subtle); border-radius:8px; padding:18px; display:flex; flex-direction:column; gap:8px;">
+                <div style="font-size:28px;">{icone}</div>
+                <h3 style="margin:0;">{titulo}</h3>
+                <p style="font-size:13px; color:var(--text-muted); flex-grow:1; margin:0;">{desc}</p>
+                <a href="{href}" class="btn btn-primary" style="text-align:center; margin-top:6px;">{texto_btn}</a>
+            </div>
+        """
+
+    cards_html = "".join([
+        card("🌐", "Painel Global da Escola",
+             "Visão consolidada por rodada de simulado — quebra por ano de escolaridade, raça, distorção idade-série, turma/disciplina e habilidades BNCC de maior/menor dificuldade.",
+             "/simulados/painel-global"),
+        card("📄", "Relatório de Notas do Simulado",
+             "Notas combinadas de Dia 01 + Dia 02 por turma e por aluno, com composição da nota por disciplina.",
+             "/simulados/relatorio-notas"),
+        card("🔍", "Diagnóstico de Respostas (por simulado)",
+             "Acha rapidamente cartões com muitas questões em branco dentro de um simulado específico — útil pra achar leituras suspeitas de OMR. Escolha o simulado na lista pra acessar.",
+             "/simulados", "Escolher simulado"),
+        card("⚠️", "Auditoria de Calibração (todos os simulados)",
+             "Varredura em TODOS os simulados do banco atrás do padrão do bug de deslocamento de calibração (última questão do bloco em branco com o resto quase todo respondido). Rode antes de liberar qualquer resultado final.",
+             "/auditoria-calibracao"),
+        card("📊", "Análise Pedagógica de Provas",
+             "Faixas SAEB, ranking e estatística por questão/habilidade para provas normais (não-simulado). Escolha a aplicação na lista pra acessar.",
+             "/aplicacoes", "Escolher aplicação"),
+    ])
+
+    content = f"""
+        <div class="page-header">
+            <h1>📈 Análises pedagógicas</h1>
+            <p class="subtitle">Todos os relatórios e ferramentas de análise do sistema, num só lugar.</p>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:16px;">
+            {cards_html}
+        </div>
+    """
+    return render_page("Análises pedagógicas", content, active="analises-pedagogicas")
+
+
+@app.get("/auditoria-calibracao", response_class=HTMLResponse)
+def auditoria_calibracao_global():
+    """Varre TODOS os simulados com aplicações/entregas no banco (não só um) e sinaliza
+    cartões com um padrão específico: a ÚLTIMA questão de um bloco em branco, enquanto o
+    resto do bloco foi quase todo respondido. Esse é a "assinatura" do bug de deslocamento
+    de calibração de bolhas (a grade inteira desliza 1 linha, e a última questão "sobra"
+    como branco) — é diferente de um aluno que realmente deixou em branco por não saber a
+    resposta (nesse caso os brancos tendem a se espalhar pelo bloco, não a se concentrar só
+    na última questão com o resto quase tudo respondido).
+    Use esta tela ANTES de liberar qualquer resultado final."""
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/simulados", status_code=303)
+
+    conn = get_db()
+    simulados = conn.execute("SELECT id, nome FROM simulados ORDER BY ano DESC, trimestre DESC, dia").fetchall()
+
+    LIMIAR_RESTO_RESPONDIDO = 0.7  # pelo menos 70% do resto do bloco respondido
+
+    suspeitos = []
+    for sim in simulados:
+        sim_id = sim["id"]
+        prova_vinculada = conn.execute(
+            "SELECT id FROM provas WHERE titulo LIKE ? ORDER BY id DESC LIMIT 1",
+            (f"%[SIM-{sim_id}]%",)
+        ).fetchone()
+        if not prova_vinculada:
+            continue
+        prova_id = prova_vinculada["id"]
+
+        # Monta a ordem de questões por bloco usando simulado_blocos + simulado_questoes
+        # (a fonte da verdade de como o simulado foi montado) — não assume 10 questões
+        # fixas por bloco, respeita o que estiver de fato no schema.
+        blocos = conn.execute("""
+            SELECT b.id AS bloco_id, b.numero, d.nome AS disciplina_nome
+            FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+            WHERE b.simulado_id = ? ORDER BY b.numero
+        """, (sim_id,)).fetchall()
+        if not blocos:
+            continue
+
+        blocos_questoes = {}  # bloco_numero -> {"disciplina": ..., "ids": [questao_id em ordem]}
+        for b in blocos:
+            qs = conn.execute("""
+                SELECT sq.questao_id FROM simulado_questoes sq
+                WHERE sq.bloco_id = ? ORDER BY sq.ordem
+            """, (b["bloco_id"],)).fetchall()
+            blocos_questoes[b["numero"]] = {
+                "disciplina": b["disciplina_nome"],
+                "ids": [q["questao_id"] for q in qs],
+            }
+
+        aplicacoes = conn.execute("""
+            SELECT a.id AS aplicacao_id, t.nome AS turma_nome
+            FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.prova_id = ? AND a.titulo LIKE ?
+            ORDER BY t.nome
+        """, (prova_id, f"%[SIM-{sim_id}]%")).fetchall()
+
+        for apl in aplicacoes:
+            entregas = conn.execute("""
+                SELECT e.aluno_id, al.nome AS aluno_nome, al.numero
+                FROM entregas e JOIN alunos al ON al.id = e.aluno_id
+                WHERE e.aplicacao_id = ?
+            """, (apl["aplicacao_id"],)).fetchall()
+
+            for e in entregas:
+                respostas = conn.execute(
+                    "SELECT questao_id FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?",
+                    (apl["aplicacao_id"], e["aluno_id"])
+                ).fetchall()
+                respondidas_ids = {r["questao_id"] for r in respostas}
+
+                motivos = []
+                for bloco_num, info in blocos_questoes.items():
+                    ids_bloco = info["ids"]
+                    if len(ids_bloco) < 3:
+                        continue  # bloco pequeno demais pra esse teste fazer sentido
+                    ultima_qid = ids_bloco[-1]
+                    resto_ids = ids_bloco[:-1]
+                    ultima_em_branco = ultima_qid not in respondidas_ids
+                    n_resto_respondido = sum(1 for qid in resto_ids if qid in respondidas_ids)
+                    pct_resto = (n_resto_respondido / len(resto_ids)) if resto_ids else 0
+                    if ultima_em_branco and pct_resto >= LIMIAR_RESTO_RESPONDIDO:
+                        motivos.append(
+                            f"Bloco {bloco_num} ({info['disciplina']}): última questão em branco, "
+                            f"mas {n_resto_respondido}/{len(resto_ids)} das outras foram respondidas"
+                        )
+
+                if motivos:
+                    suspeitos.append({
+                        "sim_id": sim_id, "sim_nome": sim["nome"],
+                        "turma": apl["turma_nome"], "aluno": e["aluno_nome"], "numero": e["numero"],
+                        "aluno_id": e["aluno_id"], "aplicacao_id": apl["aplicacao_id"],
+                        "motivos": motivos,
+                    })
+    conn.close()
+
+    if not suspeitos:
+        content = """
+            <div class="page-header">
+                <h1>✅ Auditoria de calibração</h1>
+                <p class="subtitle">Varredura em todos os simulados do banco.</p>
+            </div>
+            <div class="empty">Nenhum cartão com o padrão suspeito encontrado. Tudo certo pra liberar os resultados.</div>
+        """
+        return render_page("Auditoria de calibração", content, active="analises-pedagogicas")
+
+    linhas_html = ""
+    for s in suspeitos:
+        motivos_html = "<br>".join(s["motivos"])
+        linhas_html += f"""<tr style="background:var(--orange-bg);">
+            <td style="padding:6px 10px;">{s['sim_nome']}</td>
+            <td style="padding:6px 10px;">{s['turma']}</td>
+            <td style="padding:6px 10px;">{s['numero'] or '—'}</td>
+            <td style="padding:6px 10px;"><a href="/aplicacoes/{s['aplicacao_id']}/aluno/{s['aluno_id']}">{s['aluno']}</a></td>
+            <td style="padding:6px 10px; font-size:12px; color:var(--orange);">{motivos_html}</td>
+        </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>⚠️ Auditoria de calibração — {len(suspeitos)} cartão(ões) suspeito(s)</h1>
+            <p class="subtitle">Varredura em TODOS os simulados do banco. Rode isso antes de liberar qualquer resultado final.</p>
+        </div>
+        <div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-bottom:16px;">
+            <strong>O que é sinalizado aqui:</strong> cartões onde a última questão de um bloco está em branco,
+            mas o resto do bloco foi quase todo respondido (≥70%). Esse é o padrão típico do bug de deslocamento
+            de calibração de bolhas — não é o mesmo que um aluno que realmente deixou em branco por não saber.
+            <br><small>Reescaneie esses cartões específicos antes de liberar os resultados. Depois de reescanear e confirmar de novo, o cartão sai desta lista.</small>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle); text-align:left;">
+                <th style="padding:6px 10px;">Simulado</th>
+                <th style="padding:6px 10px;">Turma</th>
+                <th style="padding:6px 10px;">Nº</th>
+                <th style="padding:6px 10px;">Aluno</th>
+                <th style="padding:6px 10px;">Motivo</th>
+            </tr></thead>
+            <tbody>{linhas_html}</tbody>
+        </table>
+    """
+    return render_page("Auditoria de calibração", content, active="analises-pedagogicas")
+
+
+def criar_aplicacoes_lote(sim_id: int):
+
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    # Verificar/criar prova vinculada
+    titulo_prova = f"{sim['nome']} [SIM-{sim_id}]"
+    prova = conn.execute("SELECT id FROM provas WHERE titulo = ?", (titulo_prova,)).fetchone()
+    if not prova:
+        # Criar prova agregando todas as questões dos blocos em ordem
+        cur = conn.execute(
+            "INSERT INTO provas (titulo, descricao, criada_por_professor_id) VALUES (?,?,?)",
+            (titulo_prova, f"Simulado gerado automaticamente — {sim['nome']}", prof["id"])
+        )
+        prova_id = cur.lastrowid
+        # Adicionar questões de todos os blocos em ordem corrida
+        ordem_global = 0
+        blocos = conn.execute(
+            "SELECT id FROM simulado_blocos WHERE simulado_id = ? ORDER BY numero",
+            (sim_id,)
+        ).fetchall()
+        for bloco in blocos:
+            questoes = conn.execute(
+                "SELECT questao_id FROM simulado_questoes WHERE bloco_id = ? ORDER BY ordem",
+                (bloco["id"],)
+            ).fetchall()
+            for q in questoes:
+                conn.execute(
+                    "INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?,?,?)",
+                    (prova_id, q["questao_id"], ordem_global)
+                )
+                ordem_global += 1
+        conn.execute("UPDATE provas SET status_revisao = 'aprovada' WHERE id = ?", (prova_id,))
+    else:
+        prova_id = prova["id"]
+
+    # Criar aplicação para cada turma do ano
+    turmas = _turmas_do_ano(conn, sim["ano_escolaridade"] or 0)
+    titulo_app = f"{sim['nome']} [SIM-{sim_id}]"
+    for t in turmas:
+        ja_existe = conn.execute(
+            "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ? AND titulo LIKE ?",
+            (prova_id, t["id"], f"%[SIM-{sim_id}]%")
+        ).fetchone()
+        if not ja_existe:
+            conn.execute(
+                "INSERT INTO aplicacoes (prova_id, turma_id, modo, titulo, aberta, criada_por_professor_id) VALUES (?,?,?,?,?,?)",
+                (prova_id, t["id"], "impressa", titulo_app, 1, prof["id"])
+            )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/abrir")
+def abrir_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulados SET status = 'aberto' WHERE id = ?", (sim_id,))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/fechar")
+def fechar_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulados SET status = 'publicado' WHERE id = ?", (sim_id,))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/aprovar")
+def aprovar_bloco(sim_id: int, bloco_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulado_blocos SET status = 'aprovado' WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+
+def _enunciado_expand(enunciado: str, max_chars: int = 400) -> str:
+    """Sanitiza enunciado para exibição no expand do bloco do simulado.
+    Mantém formatação básica (b, i, u, br) mas remove tags que quebram layout
+    (table, div, style, script, img). Substitui tabelas por [tabela]."""
+    import re as _re, html as _html
+    # Remover tabelas completamente
+    texto = _re.sub(r'<table[^>]*>.*?</table>', '<em>[tabela]</em>', enunciado, flags=_re.DOTALL | _re.IGNORECASE)
+    # Remover tags perigosas mas manter b, i, u, strong, em, br, p, span
+    safe_tags = {'b', 'i', 'u', 'strong', 'em', 'br', 'p', 'span', 'li', 'ul', 'ol'}
+    def _filtrar(m):
+        tag = m.group(0)
+        nome = _re.match(r'</?([a-zA-Z]+)', tag)
+        if nome and nome.group(1).lower() in safe_tags:
+            return tag
+        return ''
+    texto = _re.sub(r'<[^>]+>', _filtrar, texto)
+    # Limitar tamanho
+    if len(texto) > max_chars:
+        texto = texto[:max_chars] + '...'
+    return texto
+
+
+@app.get("/simulados/{sim_id}/blocos/{bloco_id}/contribuir", response_class=HTMLResponse)
+def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = None, q: Optional[str] = None):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    is_admin = prof.get("is_admin") or prof.get("is_gestor")
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    bloco = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.id = ? AND b.simulado_id = ?
+    """, (bloco_id, sim_id)).fetchone()
+    if not sim or not bloco:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+    # Questões já no bloco
+    questoes_bloco = conn.execute("""
+        SELECT sq.id AS sq_id, sq.ordem, q.id, q.enunciado, q.tipo, d.nome AS disc_nome
+        FROM simulado_questoes sq
+        JOIN questoes q ON q.id = sq.questao_id
+        JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE sq.bloco_id = ?
+        ORDER BY sq.ordem
+    """, (bloco_id,)).fetchall()
+    ids_no_bloco = {q["id"] for q in questoes_bloco}
+
+    # Banco de questões disponíveis (filtrado por disciplina + subdisciplinas + ano de escolaridade)
+    ano_esc = sim["ano_escolaridade"] or 0
+    ano_esc_labels = {6: "6º ano", 7: "7º ano", 8: "8º ano", 9: "9º ano"}
+    ano_label_q = ano_esc_labels.get(ano_esc, "")
+
+    # Mapear disciplina-pai para incluir subdisciplinas automaticamente
+    # Buscar todas as disciplinas que começam com o nome da disciplina do bloco
+    disc_pai = conn.execute("SELECT nome FROM disciplinas WHERE id = ?", (bloco["disciplina_id"],)).fetchone()
+    disc_pai_nome = disc_pai["nome"] if disc_pai else ""
+    # Buscar subdisciplinas (ex: "Matemática" inclui "Matemática | Álgebra" e "Matemática | Geometria")
+    subdisciplinas = conn.execute(
+        "SELECT id FROM disciplinas WHERE id = ? OR nome LIKE ?",
+        (bloco["disciplina_id"], f"{disc_pai_nome} |%")
+    ).fetchall()
+    disc_ids = [d["id"] for d in subdisciplinas]
+    placeholders = ",".join("?" * len(disc_ids))
+
+    where_q = [f"q.disciplina_id IN ({placeholders})", "q.tipo = 'multipla_escolha'"]
+    params_q = disc_ids[:]
+    if ano_label_q:
+        where_q.append("q.ano = ?")
+        params_q.append(ano_label_q)
+    if q:
+        where_q.append("q.enunciado LIKE ?")
+        params_q.append(f"%{q}%")
+    wc = " AND ".join(where_q)
+    questoes_banco = conn.execute(f"""
+        SELECT q.id, q.enunciado, q.ano, d.nome AS disc_nome
+        FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE {wc}
+        ORDER BY d.nome, q.id DESC LIMIT 100
+    """, params_q).fetchall()
+
+
+    n_add = len(questoes_bloco)
+    n_tot = bloco["n_questoes"]
+    completo = n_add >= n_tot
+
+    # Lista das questões já no bloco
+    import html as _html
+
+    bloco_items = ""
+    for idx, bq in enumerate(questoes_bloco):
+        preview = _preview_enunciado(bq["enunciado"], max_chars=90)
+        eh_primeira = idx == 0
+        eh_ultima = idx == len(questoes_bloco) - 1
+
+        btn_cima = ("" if eh_primeira else
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
+            f'<input type="hidden" name="direcao" value="cima">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Subir">▲</button></form>')
+        btn_baixo = ("" if eh_ultima else
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/mover/{bq["sq_id"]}" style="margin:0;">'
+            f'<input type="hidden" name="direcao" value="baixo">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;" title="Descer">▼</button></form>')
+
+        # Conteúdo expandido: texto puro sanitizado para evitar quebra de HTML
+        alts_q = conn.execute(
+            "SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra",
+            (bq["id"],)
+        ).fetchall()
+
+        # Usar template tag para armazenar HTML sem renderizar
+        expand_content = f'<div style="line-height:1.6;margin-bottom:8px;">{_preview_enunciado(bq["enunciado"], max_chars=500)}</div>'
+        for a in alts_q:
+            cor = "color:#16a34a;font-weight:600;" if a["correta"] else "color:#6b7280;"
+            expand_content += f'<div style="font-size:11px;padding:1px 0;{cor}">{_html.escape(str(a["letra"]))}) {_html.escape(str(a["texto"])[:80])}</div>'
+
+        bloco_items += (
+            f'<div class="qbi" style="border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--card);overflow:hidden;">'
+            f'<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;">'
+            f'<span style="font-weight:700;color:var(--accent);min-width:22px;">{idx+1}.</span>'
+            f'<span style="flex:1;font-size:13px;">{preview}</span>'
+            f'<div style="display:flex;gap:3px;align-items:center;">'
+            f'{btn_cima}{btn_baixo}'
+            f'<button type="button" class="btn qbi-toggle" data-id="{bq["sq_id"]}" style="padding:2px 6px;font-size:11px;" title="Expandir">👁</button>'
+            f'{f'<a href="/questoes/{bq["id"]}/editar" class="btn" style="padding:2px 6px;font-size:11px;" title="Editar questão" target="_blank">✏️</a>' if is_admin else ""}'
+            f'<form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/remover/{bq["sq_id"]}" style="margin:0;">'
+            f'<button type="submit" class="btn" style="padding:2px 6px;font-size:11px;color:var(--red);border-color:var(--red);">✕</button></form>'
+            f'</div></div>'
+            f'<template id="tmpl-{bq["sq_id"]}">{expand_content}</template>'
+            f'<div class="qbi-expand" id="exp-{bq["sq_id"]}" style="display:none;padding:8px 12px 10px 32px;border-top:1px solid var(--border);background:var(--bg-subtle);font-size:12px;"></div>'
+            f'</div>'
+        )
+    if not bloco_items:
+        bloco_items = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">Nenhuma questão adicionada ainda.</div>'
+    conn.close()
+    conn.close()
+    # Lista do banco
+    banco_items = ""
+    for bq in questoes_banco:
+        if bq["id"] in ids_no_bloco:
+            continue
+        preview = _preview_enunciado(bq["enunciado"], max_chars=100)
+        banco_items += f"""
+        <form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/adicionar" style="margin:0 0 6px;">
+            <input type="hidden" name="questao_id" value="{bq['id']}">
+            <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card);">
+                <span style="flex:1; font-size:13px;">{preview}</span>
+                <span style="font-size:11px; color:var(--text-muted);">{bq['disc_nome'].replace(disc_pai_nome, '').strip(' |') or bq['disc_nome']} · {bq['ano'] or '—'}</span>
+                {'<button type="submit" class="btn btn-primary" style="padding:3px 10px; font-size:11px;">+ Add</button>' if not completo else '<span style="font-size:11px; color:var(--text-muted);">Bloco cheio</span>'}
+            </div>
+        </form>"""
+    if not banco_items:
+        banco_items = '<div class="empty">Nenhuma questão disponível.</div>'
+
+    # Botão finalizar
+    btn_finalizar = ""
+    if completo and bloco["status"] in ("em_contribuicao", "completo"):
+        btn_finalizar = f'''
+        <div style="margin-top:14px; background:var(--green-bg); border:1px solid var(--green); border-radius:8px; padding:14px;">
+            <div style="font-weight:600; margin-bottom:6px; color:var(--green);">✅ Bloco completo — {n_add} questões adicionadas</div>
+            <p style="font-size:13px; color:var(--text-muted); margin-bottom:10px;">
+                Ao confirmar, as questões serão entregues para revisão da gestão. Você ainda poderá alterar a ordem antes de confirmar.
+            </p>
+            <form method="post" action="/simulados/{sim_id}/blocos/{bloco_id}/finalizar"
+                  onsubmit="return confirm('Confirmar entrega do bloco? A gestão receberá as questões para revisão.')">
+                <button type="submit" class="btn btn-primary" style="background:var(--green);border-color:var(--green);">
+                    ✅ Confirmar entrega do bloco
+                </button>
+            </form>
+        </div>'''
+
+    content = f"""
+        <div class="page-header">
+            <h1>✏️ Bloco {bloco['numero']} — {bloco['disciplina_nome']}</h1>
+            <p class="subtitle">{sim['nome']} · {n_add}/{n_tot} questões adicionadas</p>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:20px;">
+            <div>
+                <h3 style="margin-bottom:10px;">Questões do bloco <span style="font-size:13px; font-weight:400; color:var(--text-muted);">({n_add}/{n_tot})</span></h3>
+                {bloco_items}
+                {btn_finalizar}
+            </div>
+            <div>
+                <h3 style="margin-bottom:10px;">Banco de questões</h3>
+                <form method="get" style="margin-bottom:10px;">
+                    <input type="hidden" name="disciplina" value="{bloco['disciplina_id']}">
+                    <div style="display:flex; gap:6px;">
+                        <input type="search" name="q" value="{q or ''}" placeholder="Buscar no banco..." style="margin:0; flex:1;">
+                        <button type="submit" class="btn btn-primary" style="margin:0;">🔍</button>
+                    </div>
+                </form>
+                {banco_items}
+            </div>
+        </div>
+        <div style="margin-top:20px;"><a href="/simulados/{sim_id}" class="btn">← Voltar ao simulado</a></div>
+        <script>
+        document.querySelectorAll('.qbi-toggle').forEach(function(btn) {{
+            btn.addEventListener('click', function() {{
+                var id = btn.getAttribute('data-id');
+                var exp = document.getElementById('exp-' + id);
+                var tmpl = document.getElementById('tmpl-' + id);
+                if (!exp) return;
+                var isOpen = exp.style.display !== 'none';
+                if (!isOpen && tmpl && !exp.dataset.loaded) {{
+                    exp.innerHTML = tmpl.innerHTML;
+                    exp.dataset.loaded = '1';
+                }}
+                exp.style.display = isOpen ? 'none' : 'block';
+                btn.textContent = isOpen ? '👁' : '🔼';
+            }});
+        }});
+        </script>
+    """
+    return render_page(f"Bloco {bloco['numero']} — {bloco['disciplina_nome']}", content, active="simulados")
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/adicionar")
+def adicionar_questao_bloco(sim_id: int, bloco_id: int, questao_id: int = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id)).fetchone()
+    if bloco:
+        n_atual = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
+        if n_atual < bloco["n_questoes"]:
+            ja = conn.execute("SELECT id FROM simulado_questoes WHERE bloco_id = ? AND questao_id = ?", (bloco_id, questao_id)).fetchone()
+            if not ja:
+                conn.execute("INSERT INTO simulado_questoes (bloco_id, questao_id, ordem) VALUES (?,?,?)", (bloco_id, questao_id, n_atual))
+                n_novo = n_atual + 1
+                if n_novo >= bloco["n_questoes"] and bloco["status"] == "em_contribuicao":
+                    conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
+                conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/remover/{sq_id}")
+def remover_questao_bloco(sim_id: int, bloco_id: int, sq_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    conn.execute("DELETE FROM simulado_questoes WHERE id = ? AND bloco_id = ?", (sq_id, bloco_id))
+    n_atual = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
+    bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ?", (bloco_id,)).fetchone()
+    if bloco and n_atual < bloco["n_questoes"] and bloco["status"] == "completo":
+        conn.execute("UPDATE simulado_blocos SET status = 'em_contribuicao' WHERE id = ?", (bloco_id,))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/finalizar")
+def finalizar_bloco(sim_id: int, bloco_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    bloco = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.id = ? AND b.simulado_id = ?
+    """, (bloco_id, sim_id)).fetchone()
+    entregue = False
+    if bloco:
+        n = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
+        if n >= bloco["n_questoes"]:
+            conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
+            conn.commit()
+            entregue = True
+    conn.close()
+    if entregue:
+        disc_nome = bloco["disciplina_nome"] if bloco else "bloco"
+        content = f"""
+            <div style="max-width:500px; margin:80px auto; text-align:center; padding:0 20px;">
+                <div style="font-size:60px; margin-bottom:16px;">✅</div>
+                <h1 style="font-size:22px; margin-bottom:8px;">Questões entregues com sucesso!</h1>
+                <p style="color:var(--text-muted); margin-bottom:24px;">
+                    O Bloco {bloco['numero']} — <strong>{disc_nome}</strong> foi marcado como completo
+                    e está aguardando revisão da gestão.
+                </p>
+                <div style="display:flex; gap:10px; justify-content:center;">
+                    <a href="/simulados/{sim_id}" class="btn btn-primary">← Voltar ao simulado</a>
+                    <a href="/simulados/{sim_id}/blocos/{bloco_id}/contribuir" class="btn">Ver minhas questões</a>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Entrega confirmada", content, active="simulados"))
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.get("/simulados/{sim_id}/imprimir", response_class=HTMLResponse)
+def imprimir_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ?
+        ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    vpq = _valor_por_questao(sim["pontuacao_total"])
+    num_global = 0  # numeração corrida
+    blocos_html = ""
+    gabarito_data = []  # lista de (num, letra_correta, bloco_num)
+
+    for bloco in blocos:
+        questoes_bloco = conn.execute("""
+            SELECT q.id, q.enunciado, q.tipo
+            FROM simulado_questoes sq
+            JOIN questoes q ON q.id = sq.questao_id
+            WHERE sq.bloco_id = ?
+            ORDER BY sq.ordem
+        """, (bloco["id"],)).fetchall()
+
+        # PÁGINA DE PAUSA (antes de cada bloco)
+        blocos_html += f"""
+        <div class="pagina-pausa page-break">
+            <div class="pausa-bloco">BLOCO {bloco['numero']:02d}</div>
+            <div class="pausa-disciplina">{bloco['disciplina_nome'].upper()}</div>
+            <div class="pausa-octogono">
+                <div class="oct-inner">
+                    <div>Aguarde</div>
+                    <div>instruções</div>
+                    <div>para virar</div>
+                    <div>a página.</div>
+                </div>
+            </div>
+            <div class="pausa-tempo">Você terá {bloco['tempo_minutos']} minutos para responder a este bloco.</div>
+        </div>"""
+
+        # QUESTÕES DO BLOCO
+        questoes_html = ""
+        for q in questoes_bloco:
+            num_global += 1
+            alts = conn.execute(
+                "SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra",
+                (q["id"],)
+            ).fetchall()
+            correta = next((a["letra"] for a in alts if a["correta"]), "?")
+            gabarito_data.append((num_global, correta, bloco["numero"]))
+
+            alts_html = "".join(
+                f'<div class="q-alt"><strong>{a["letra"]})</strong> {a["texto"]}</div>'
+                for a in alts
+            )
+            # Textos de apoio
+            textos = conn.execute(
+                "SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            textos_html = ""
+            for t in textos:
+                textos_html += f'<blockquote>{t["conteudo"]}'
+                if t["fonte"]:
+                    textos_html += f'<footer>{t["fonte"]}</footer>'
+                textos_html += '</blockquote>'
+            # Imagens
+            imgs = conn.execute(
+                "SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            imgs_html = "".join(
+                f'<figure><img src="/{img["caminho"]}" alt=""><figcaption>{img["legenda"] or ""}</figcaption></figure>'
+                for img in imgs
+            )
+            # Habilidades BNCC
+            habs_print = conn.execute("""
+                SELECT h.codigo FROM questao_habilidades qh
+                JOIN habilidades_bncc h ON h.id = qh.habilidade_id
+                WHERE qh.questao_id = ? ORDER BY h.codigo
+            """, (q["id"],)).fetchall()
+            habs_html_print = ""
+            if habs_print:
+                badges = "".join(
+                    f'<span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:9px;font-weight:600;padding:1px 6px;border-radius:3px;margin:1px 2px 1px 0;">{h["codigo"]}</span>'
+                    for h in habs_print
+                )
+                habs_html_print = f'<div style="margin-top:4px;">{badges}</div>'
+            questoes_html += f"""
+            <div class="q-sim">
+                <div class="q-num">{num_global}.</div>
+                <div class="q-body">
+                    {textos_html}{imgs_html}
+                    <div class="q-enunciado">{q['enunciado']}</div>
+                    <div class="q-alts">{alts_html}</div>
+                    {habs_html_print}
+                </div>
+            </div>"""
+
+        blocos_html += f"""
+        <div class="bloco-questoes page-break">
+            <div class="bloco-header">Bloco {bloco['numero']} — {bloco['disciplina_nome']}</div>
+            {questoes_html}
+        </div>"""
+
+    conn.close()
+
+    # GABARITO
+    gab_cols = [gabarito_data[i:i+10] for i in range(0, len(gabarito_data), 10)]
+    gab_html = '<div class="gabarito-grid">'
+    for col in gab_cols:
+        gab_html += '<div class="gab-col">'
+        for num, letra, bloco_num in col:
+            gab_html += f'<div class="gab-item"><span class="gab-num">{num}.</span><span class="gab-letra">{letra}</span></div>'
+        gab_html += '</div>'
+    gab_html += '</div>'
+
+    logo_html = '<img src="/static/imagens/logo_walmir.png" style="max-height:80px; max-width:200px; display:block; margin:0 auto;" alt="E.M. Walmir de Freitas Monteiro">'
+
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>{sim['nome']}</title>
+<script>
+window.MathJax = {{
+  tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true }},
+  svg: {{ fontCache: 'global' }},
+  options: {{ skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }}
+}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&display=swap');
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: 'Sora', sans-serif; font-size: 12px; color: #000; background: white; }}
+  .no-print {{ padding: 16px 24px; background: #f0f4f8; border-bottom: 2px solid #ddd; display: flex; gap: 10px; }}
+  .btn-print {{ padding: 8px 18px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: inherit; }}
+  @media print {{
+    .no-print {{ display: none !important; }}
+    .page-break {{ page-break-before: always; }}
+    body {{ font-size: 11px; }}
+  }}
+
+  /* CAPA */
+  .capa {{ min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 60px 40px; border-bottom: 2px solid #000; }}
+  .capa-logo {{ margin-bottom: 30px; }}
+  .capa-titulo {{ font-size: 28px; font-weight: 800; margin-bottom: 10px; }}
+  .capa-sub {{ font-size: 16px; margin-bottom: 6px; color: #333; }}
+  .capa-info {{ font-size: 13px; color: #555; margin-top: 20px; }}
+  .capa-valor {{ margin-top: 30px; font-size: 15px; font-weight: 600; border: 2px solid #000; padding: 12px 24px; border-radius: 8px; }}
+
+  /* PÁGINA DE PAUSA */
+  .pagina-pausa {{ min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px; }}
+  .pausa-bloco {{ font-size: 36px; font-weight: 800; margin-bottom: 20px; letter-spacing: 4px; }}
+  .pausa-disciplina {{ font-size: 28px; font-weight: 700; margin-bottom: 50px; }}
+  .pausa-octogono {{ width: 220px; height: 220px; background: #555; clip-path: polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%); display: flex; align-items: center; justify-content: center; margin: 0 auto 50px; }}
+  .oct-inner {{ color: white; font-size: 18px; font-weight: 700; line-height: 1.6; }}
+  .pausa-tempo {{ font-size: 16px; font-weight: 700; }}
+
+  /* QUESTÕES */
+  .bloco-header {{ font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 16px; color: #333; }}
+  .q-sim {{ display: flex; gap: 10px; margin-bottom: 18px; page-break-inside: avoid; }}
+  .q-num {{ font-weight: 800; font-size: 13px; min-width: 22px; padding-top: 1px; }}
+  .q-body {{ flex: 1; }}
+  .q-enunciado {{ margin-bottom: 8px; line-height: 1.5; }}
+  .q-alts {{ padding-left: 4px; }}
+  .q-alt {{ padding: 2px 0; line-height: 1.4; }}
+  blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 0 0 8px; color: #333; font-style: italic; font-size: 11px; background: #fafafa; }}
+  blockquote footer {{ font-size: 9px; font-style: normal; margin-top: 3px; }}
+  figure {{ margin: 8px 0; }}
+  figure img {{ max-width: 100%; max-height: 180px; }}
+  figcaption {{ font-size: 9px; color: #666; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 11px; }}
+  th, td {{ border: 1px solid #999; padding: 4px 8px; }}
+  th {{ background: #f0f0f0; font-weight: 600; }}
+
+  /* GABARITO */
+  .gabarito-page {{ padding: 40px; }}
+  .gabarito-titulo {{ font-size: 18px; font-weight: 800; text-align: center; margin-bottom: 24px; border-bottom: 2px solid #000; padding-bottom: 10px; }}
+  .gabarito-grid {{ display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }}
+  .gab-col {{ display: flex; flex-direction: column; gap: 4px; }}
+  .gab-item {{ display: flex; align-items: center; gap: 10px; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; min-width: 80px; }}
+  .gab-num {{ font-weight: 600; color: #555; min-width: 24px; }}
+  .gab-letra {{ font-weight: 800; font-size: 15px; color: #000; background: #f0f0f0; padding: 1px 8px; border-radius: 3px; }}
+</style>
+</head>
+<body>
+
+<div class="no-print">
+  <button class="btn-print" id="btn-imprimir" onclick="imprimirAposMathJax()">🖨️ Imprimir simulado</button>
+  <a href="/simulados/{sim_id}" style="padding:8px 16px; border:1px solid #ccc; border-radius:6px; text-decoration:none; color:#333;">← Voltar</a>
+</div>
+
+<!-- CAPA -->
+<div class="capa">
+  <div class="capa-logo">{logo_html}</div>
+  <div class="capa-titulo">{sim['nome']}</div>
+  <div class="capa-sub">{_ano_esc_label(sim['ano_escolaridade'] or 0)}</div>
+  <div class="capa-sub">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {sim['trimestre']}º Trimestre · {sim['ano']}</div>
+  <div class="capa-valor">Valor por questão: {vpq} {'ponto' if vpq == 1 else 'pontos'} · Total: {sim['pontuacao_total']} {'ponto' if sim['pontuacao_total'] == 1 else 'pontos'}</div>
+  <div class="capa-info">Este caderno contém 4 blocos com 10 questões cada · Total: 40 questões</div>
+  <div style="margin-top:40px; width:100%; max-width:480px; text-align:left;">
+    <div style="display:flex; flex-direction:column; gap:18px;">
+      <div style="border-bottom:2px solid #000; padding-bottom:4px;">
+        <span style="font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Nome:</span>
+        <span style="display:block; height:24px;"></span>
+      </div>
+      <div style="border-bottom:2px solid #000; padding-bottom:4px;">
+        <span style="font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Turma:</span>
+        <span style="display:block; height:24px;"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- BLOCOS -->
+{blocos_html}
+
+<!-- GABARITO -->
+<div class="gabarito-page page-break">
+  <div class="gabarito-titulo">GABARITO — {sim['nome']} · {_ano_esc_label(sim['ano_escolaridade'] or 0)}</div>
+  {gab_html}
+</div>
+
+<script>
+function imprimirAposMathJax() {{
+    var btn = document.getElementById('btn-imprimir');
+    btn.textContent = '⏳ Aguardando renderização...';
+    btn.disabled = true;
+    if (window.MathJax && MathJax.startup && MathJax.startup.promise) {{
+        MathJax.startup.promise.then(function() {{
+            // Aguarda mais 500ms para garantir que tudo renderizou
+            setTimeout(function() {{
+                btn.textContent = '🖨️ Imprimir simulado';
+                btn.disabled = false;
+                window.print();
+            }}, 500);
+        }});
+    }} else {{
+        setTimeout(function() {{
+            window.print();
+        }}, 2000);
+    }}
+}}
+// Aguardar MathJax antes de liberar o botão na carga inicial
+document.addEventListener('DOMContentLoaded', function() {{
+    if (window.MathJax) {{
+        var btn = document.getElementById('btn-imprimir');
+        if (btn) {{
+            btn.textContent = '⏳ Carregando fórmulas...';
+            btn.disabled = true;
+            MathJax.startup.promise.then(function() {{
+                setTimeout(function() {{
+                    btn.textContent = '🖨️ Imprimir simulado';
+                    btn.disabled = false;
+                }}, 500);
+            }});
+        }}
+    }}
+}});
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+@app.get("/simulados/{sim_id}/editar", response_class=HTMLResponse)
+def form_editar_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    professores = conn.execute("SELECT id, nome FROM professores WHERE status = 'ativo' ORDER BY nome").fetchall()
+    conn.close()
+
+    def disc_opts(sel_id):
+        return "".join(
+            f'<option value="{d["id"]}"{" selected" if sel_id == d["id"] else ""}>{d["nome"]}</option>'
+            for d in disciplinas
+        )
+
+    blocos_html = ""
+    for b in blocos:
+        blocos_html += f"""
+        <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:10px; background:var(--bg-subtle);">
+            <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">Bloco {b['numero']}</div>
+            <div style="color:var(--text-muted); font-size:12px; margin-bottom:8px;">Aberto para todos os professores desta disciplina</div>
+            <label style="margin:0;">Disciplina
+                <select name="bloco_{b['numero']}_disciplina_id" required>
+                    {disc_opts(b['disciplina_id'])}
+                </select>
+            </label>
+        </div>"""
+
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar simulado</h1></div>
+        <form method="post" action="/simulados/{sim_id}/editar">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; margin-bottom:16px;">
+                <label>Trimestre
+                    <select name="trimestre" required>
+                        <option value="1"{' selected' if sim['trimestre']==1 else ''}>1º Trimestre</option>
+                        <option value="2"{' selected' if sim['trimestre']==2 else ''}>2º Trimestre</option>
+                        <option value="3"{' selected' if sim['trimestre']==3 else ''}>3º Trimestre</option>
+                    </select>
+                </label>
+                <label>Dia do simulado
+                    <select name="dia" required>
+                        <option value="1"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==1 else ''}>Dia 01</option>
+                        <option value="2"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==2 else ''}>Dia 02</option>
+                        <option value="3"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==3 else ''}>Dia 03</option>
+                        <option value="4"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==4 else ''}>Dia 04</option>
+                        <option value="5"{' selected' if (sim['dia'] if 'dia' in sim.keys() else 1)==5 else ''}>Dia 05</option>
+                    </select>
+                </label>
+                <label>Ano
+                    <input type="number" name="ano" value="{sim['ano']}" min="2024" max="2030" required>
+                </label>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
+                <label>Ano de escolaridade
+                    <select name="ano_escolaridade" required>
+                        <option value="">— selecione —</option>
+                        <option value="6"{' selected' if sim['ano_escolaridade']==6 else ''}>6º ano (601 a 605)</option>
+                        <option value="7"{' selected' if sim['ano_escolaridade']==7 else ''}>7º ano (701 a 706)</option>
+                        <option value="8"{' selected' if sim['ano_escolaridade']==8 else ''}>8º ano (801 a 806)</option>
+                        <option value="9"{' selected' if sim['ano_escolaridade']==9 else ''}>9º ano (901 a 906)</option>
+                    </select>
+                </label>
+                <label>Pontuação total
+                    <input type="number" name="pontuacao_total" value="{sim['pontuacao_total']}" step="0.5" min="1" max="100" required>
+                    <small style="color:var(--text-muted);">Dividida pelas 40 questões</small>
+                </label>
+            </div>
+            <h3 style="margin:20px 0 12px;">Blocos</h3>
+            {blocos_html}
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button type="submit" class="btn btn-primary">💾 Salvar alterações</button>
+                <a href="/simulados/{sim_id}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Editar simulado", content, active="simulados")
+
+
+@app.post("/simulados/{sim_id}/editar")
+def salvar_edicao_simulado(
+    sim_id: int,
+    dia: int = Form(1), trimestre: int = Form(...), ano: int = Form(...),
+    ano_escolaridade: str = Form(""), pontuacao_total: float = Form(10.0),
+    bloco_1_disciplina_id: int = Form(...),
+    bloco_2_disciplina_id: int = Form(...),
+    bloco_3_disciplina_id: int = Form(...),
+    bloco_4_disciplina_id: int = Form(...),
+):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    aesc = int(ano_escolaridade) if ano_escolaridade else None
+    ano_label = _ano_esc_label(aesc) if aesc else "—"
+    nome_auto = f"Simulado — Dia {dia:02d} · {ano_label} · {trimestre}º Trimestre"
+    ordem_auto = dia * 10 + (aesc or 0)
+    conn.execute(
+        "UPDATE simulados SET nome=?, trimestre=?, ano=?, dia=?, ano_escolaridade=?, pontuacao_total=?, ordem=? WHERE id=?",
+        (nome_auto, trimestre, ano, dia, aesc, pontuacao_total, ordem_auto, sim_id)
+    )
+    blocos_cfg = [
+        (1, bloco_1_disciplina_id),
+        (2, bloco_2_disciplina_id),
+        (3, bloco_3_disciplina_id),
+        (4, bloco_4_disciplina_id),
+    ]
+    for numero, disc_id in blocos_cfg:
+        bloco = conn.execute(
+            "SELECT id FROM simulado_blocos WHERE simulado_id=? AND numero=?",
+            (sim_id, numero)
+        ).fetchone()
+        if bloco:
+            conn.execute(
+                "UPDATE simulado_blocos SET disciplina_id=? WHERE id=?",
+                (disc_id, bloco["id"])
+            )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/excluir")
+def excluir_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT status FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if sim:
+        conn.execute("DELETE FROM simulados WHERE id = ?", (sim_id,))
+        conn.commit()
+    conn.close()
+    return RedirectResponse("/simulados", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/encerrar")
+def encerrar_simulado(sim_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE simulados SET status = 'fechado' WHERE id = ?", (sim_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/blocos/{bloco_id}/mover/{sq_id}")
+def mover_questao_bloco(sim_id: int, bloco_id: int, sq_id: int, direcao: str = Form(...)):
+    """Move uma questão para cima ou para baixo dentro do bloco."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    questoes = conn.execute(
+        "SELECT id, ordem FROM simulado_questoes WHERE bloco_id = ? ORDER BY ordem",
+        (bloco_id,)
+    ).fetchall()
+    ids = [q["id"] for q in questoes]
+    if sq_id not in ids:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+    idx = ids.index(sq_id)
+    if direcao == "cima" and idx > 0:
+        outro_id = ids[idx - 1]
+    elif direcao == "baixo" and idx < len(ids) - 1:
+        outro_id = ids[idx + 1]
+    else:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+    # Trocar ordens
+    ord_atual = questoes[idx]["ordem"]
+    outro_idx = idx - 1 if direcao == "cima" else idx + 1
+    ord_outro = questoes[outro_idx]["ordem"]
+    conn.execute("UPDATE simulado_questoes SET ordem = ? WHERE id = ?", (ord_outro, sq_id))
+    conn.execute("UPDATE simulado_questoes SET ordem = ? WHERE id = ?", (ord_atual, outro_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+
+
+@app.get("/simulados/{sim_id}/preview", response_class=HTMLResponse)
+def preview_simulado(sim_id: int):
+    """Preview de todas as questões em sequência para revisão antes de imprimir."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    blocos = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    num_global = 0
+    blocos_html = ""
+    for bloco in blocos:
+        questoes = conn.execute("""
+            SELECT q.id, q.enunciado, q.tipo
+            FROM simulado_questoes sq
+            JOIN questoes q ON q.id = sq.questao_id
+            WHERE sq.bloco_id = ? ORDER BY sq.ordem
+        """, (bloco["id"],)).fetchall()
+
+        questoes_html = ""
+        for q in questoes:
+            num_global += 1
+            alts = conn.execute(
+                "SELECT letra, texto, correta FROM alternativas WHERE questao_id = ? ORDER BY letra",
+                (q["id"],)
+            ).fetchall()
+            alts_html = "".join(
+                f'<div style="padding:2px 0;{"font-weight:700;color:green;" if a["correta"] else ""}"><strong>{a["letra"]})</strong> {a["texto"]}</div>'
+                for a in alts
+            )
+            # Textos de apoio
+            textos = conn.execute(
+                "SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            textos_html = ""
+            for t in textos:
+                textos_html += f'<blockquote style="border-left:3px solid #aaa;padding:6px 12px;margin:0 0 8px;color:#333;font-style:italic;font-size:12px;background:#fafafa;">{t["conteudo"]}'
+                if t["fonte"]:
+                    textos_html += f'<footer style="font-size:10px;font-style:normal;margin-top:3px;">{t["fonte"]}</footer>'
+                textos_html += "</blockquote>"
+            # Imagens
+            imgs = conn.execute(
+                "SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem",
+                (q["id"],)
+            ).fetchall()
+            imgs_html = "".join(
+                f'<figure style="margin:8px 0;"><img src="/{img["caminho"]}" style="max-width:100%;max-height:180px;" alt=""><figcaption style="font-size:10px;color:#666;">{img["legenda"] or ""}</figcaption></figure>'
+                for img in imgs
+            )
+            # Habilidades BNCC
+            habs = conn.execute("""
+                SELECT h.codigo FROM questao_habilidades qh
+                JOIN habilidades_bncc h ON h.id = qh.habilidade_id
+                WHERE qh.questao_id = ? ORDER BY h.codigo
+            """, (q["id"],)).fetchall()
+            habs_html = ""
+            if habs:
+                badges = "".join(
+                    f'<span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;margin:1px 2px 1px 0;">{h["codigo"]}</span>'
+                    for h in habs
+                )
+                habs_html = f'<div style="margin-top:6px;">{badges}</div>'
+            questoes_html += f"""
+            <div style="margin-bottom:16px; padding:12px; border:1px solid #eee; border-radius:6px; page-break-inside:avoid;">
+                <div style="font-weight:700; color:#2563eb; margin-bottom:6px;">Q{num_global}.</div>
+                {textos_html}{imgs_html}
+                <div style="margin-bottom:8px; line-height:1.5;">{q['enunciado']}</div>
+                <div style="padding-left:12px;">{alts_html}</div>
+                {habs_html}
+            </div>"""
+
+        n_q = len(questoes)
+        blocos_html += f"""
+        <div style="margin-bottom:24px;">
+            <div style="background:#f0f4f8; border-left:4px solid #2563eb; padding:10px 14px; font-weight:700; font-size:14px; margin-bottom:12px;">
+                Bloco {bloco['numero']} — {bloco['disciplina_nome']}
+                <span style="font-weight:400; font-size:12px; color:#666; margin-left:8px;">{n_q} questão(ões)</span>
+            </div>
+            {questoes_html if questoes_html else '<div style="color:#999; padding:8px;">Nenhuma questão adicionada ainda.</div>'}
+        </div>"""
+
+    conn.close()
+
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Preview — {sim['nome']}</title>
+<script>
+window.MathJax = {{
+  tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true }},
+  svg: {{ fontCache: 'global' }},
+  options: {{ skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }}
+}};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<style>
+  body {{ font-family: 'Segoe UI', sans-serif; font-size: 13px; color: #111; max-width: 860px; margin: 0 auto; padding: 24px; }}
+  .no-print {{ background: #f0f4f8; padding: 12px 20px; border-radius: 8px; margin-bottom: 24px; display: flex; gap: 10px; align-items: center; }}
+  .btn {{ padding: 7px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; cursor: pointer; font-family: inherit; border: 1px solid #ccc; background: white; }}
+  .btn-primary {{ background: #2563eb; color: white; border-color: #2563eb; }}
+  @media print {{ .no-print {{ display: none; }} }}
+</style>
+</head>
+<body>
+<div style="text-align:center; margin-bottom:20px; padding-bottom:16px; border-bottom:2px solid #000;">
+  <img src="/static/imagens/logo_walmir.png" style="max-height:70px; max-width:180px;" alt="Walmir">
+  <div style="font-size:11px; color:#555; margin-top:6px;">E.M. Walmir de Freitas Monteiro</div>
+</div>
+<div class="no-print">
+  <strong>👁️ Preview — {sim['nome']}</strong>
+  <span style="color:#666; font-size:12px;">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']} · {num_global} questões</span>
+  <button class="btn btn-primary" onclick="window.print()">🖨️ Imprimir</button>
+  <a href="/simulados/{sim_id}" class="btn">← Voltar</a>
+</div>
+{blocos_html}
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+# ==========================================
+#  CARTÃO RESPOSTA ESPECIAL DO SIMULADO
+# ==========================================
+
+def _gerar_cartao_simulado_pdf(sim, blocos_info, alunos):
+    """Gera PDF com cartão OMR do simulado — 1 cartão por aluno com 4 seções (uma por bloco).
+    blocos_info: lista de dicts {numero, disciplina_nome, questoes: [{num_global, questao_id}]}
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    marker_size = 8 * mm
+    margin = 10 * mm
+    bubble_radius = 3.0 * mm
+    ROW_H = 9 * mm
+    BUBBLE_SPACING = 10 * mm
+
+    for aluno in alunos:
+        # Marcadores de canto para OMR
+        c.setFillColorRGB(0, 0, 0)
+        for rx, ry in [
+            (margin, height - margin - marker_size),
+            (width - margin - marker_size, height - margin - marker_size),
+            (margin, margin),
+            (width - margin - marker_size, margin),
+        ]:
+            c.rect(rx, ry, marker_size, marker_size, fill=1, stroke=0)
+
+        # Cabeçalho
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(30*mm, height - 22*mm, sim["nome"][:55])
+        c.setFont("Helvetica", 9)
+        c.drawString(30*mm, height - 29*mm, f"Turma: {aluno.get('turma_nome', '')}  |  Ano: {sim.get('ano', '')}")
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(30*mm, height - 37*mm, f"Aluno: {aluno['nome']}")
+        c.setFont("Helvetica", 9)
+        num_str = f"Nº {aluno['numero']} · " if aluno.get("numero") else ""
+        c.drawString(30*mm, height - 44*mm, f"{num_str}Código: {aluno.get('codigo_unico', aluno['id'])}")
+
+        # QR Code
+        qr_data = f"SIM:{aluno['id']}:{sim['id']}"
+        qr_obj = qrcode.QRCode(box_size=10, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        qr_obj.add_data(qr_data)
+        qr_obj.make(fit=True)
+        qr_img = qr_obj.make_image(fill_color="black", back_color="white")
+        qr_buf = BytesIO()
+        qr_img.save(qr_buf, format="PNG")
+        qr_buf.seek(0)
+        c.drawImage(ImageReader(qr_buf), width - 48*mm, height - 50*mm, width=28*mm, height=28*mm)
+
+        # Instruções
+        c.setFont("Helvetica", 7.5)
+        c.drawString(30*mm, height - 51*mm, "Preencha com caneta preta. Pinte toda a bolha. Não rasure.")
+
+        # Linha divisória
+        c.setStrokeColorRGB(0, 0, 0)
+        c.setLineWidth(0.8)
+        c.line(margin, height - 55*mm, width - margin, height - 55*mm)
+
+        # Layout: 2 colunas, 2 blocos por coluna
+        # Bloco 1 e 2 na coluna esquerda; Bloco 3 e 4 na coluna direita
+        COL_X = [25*mm, 115*mm]
+        COL_W = 80*mm
+        SECTION_START_Y = height - 60*mm
+        LETRAS = ["A", "B", "C", "D"]
+        N_QUESTOES = 10
+
+        for idx, bloco in enumerate(blocos_info):
+            col = idx % 2          # 0=esquerda, 1=direita
+            row = idx // 2         # 0=topo, 1=baixo
+            x_base = COL_X[col]
+
+            # Calcular Y de início da seção
+            # Cada seção tem: título (8mm) + 10 linhas de bolhas (9mm cada) + margem (5mm) = ~103mm
+            section_h = 8*mm + N_QUESTOES * ROW_H + 5*mm
+            y_section = SECTION_START_Y - row * (section_h + 4*mm)
+
+            # Título da seção
+            c.setFillColorRGB(0.1, 0.1, 0.1)
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(x_base, y_section,
+                         f"BLOCO {bloco['numero']:02d} — {bloco['disciplina_nome'].upper()[:28]}")
+
+            # Linha abaixo do título
+            c.setLineWidth(0.5)
+            c.line(x_base, y_section - 2*mm, x_base + COL_W - 5*mm, y_section - 2*mm)
+
+            # Cabeçalho das letras
+            label_y = y_section - 7*mm
+            c.setFont("Helvetica-Bold", 8)
+            c.setFillColorRGB(0.3, 0.3, 0.3)
+            num_offset = 14*mm
+            bubble_start_x = x_base + num_offset + 4*mm
+            for li, letra in enumerate(LETRAS):
+                bx = bubble_start_x + li * BUBBLE_SPACING
+                c.drawCentredString(bx, label_y, letra)
+
+            # Questões
+            c.setFillColorRGB(0, 0, 0)
+            for qi in range(N_QUESTOES):
+                q_num = bloco["q_inicio"] + qi   # número global da questão
+                q_y = y_section - 10*mm - qi * ROW_H
+
+                # Número da questão
+                c.setFont("Helvetica", 8.5)
+                c.drawRightString(x_base + num_offset, q_y + 1*mm, f"{q_num}.")
+
+                # Bolhas A B C D
+                for li, _ in enumerate(LETRAS):
+                    bx = bubble_start_x + li * BUBBLE_SPACING
+                    c.circle(bx, q_y, bubble_radius, stroke=1, fill=0)
+
+            # Linha divisória entre colunas (apenas para col 0)
+            if col == 0:
+                c.setStrokeColorRGB(0.7, 0.7, 0.7)
+                c.setLineWidth(0.3)
+                c.line(COL_X[0] + COL_W, SECTION_START_Y + 2*mm,
+                       COL_X[0] + COL_W, SECTION_START_Y - 2 * (section_h + 4*mm))
+
+        # Linha horizontal entre blocos superiores e inferiores
+        c.setStrokeColorRGB(0.6, 0.6, 0.6)
+        c.setLineWidth(0.4)
+        section_h = 8*mm + N_QUESTOES * ROW_H + 5*mm
+        meio_y = SECTION_START_Y - section_h - 2*mm
+        c.line(margin + marker_size + 2*mm, meio_y,
+               width - margin - marker_size - 2*mm, meio_y)
+
+        # Rodapé
+        c.setFont("Helvetica", 7)
+        c.setFillColorRGB(0.5, 0.5, 0.5)
+        c.drawString(margin + marker_size + 4*mm, margin + 2*mm,
+                     f"Cartão Simulado · Aluno {aluno['id']} · Simulado {sim['id']} · 40 questões")
+        c.setFillColorRGB(0, 0, 0)
+
+        c.showPage()
+
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+
+@app.get("/simulados/{sim_id}/cartao-resposta")
+def cartao_resposta_simulado(sim_id: int, turma_id: int = None):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    if not sim:
+        conn.close()
+        return RedirectResponse("/simulados", status_code=303)
+
+    # Blocos com disciplina e questões
+    blocos = conn.execute("""
+        SELECT b.numero, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.simulado_id = ? ORDER BY b.numero
+    """, (sim_id,)).fetchall()
+
+    blocos_info = []
+    num_global = 0
+    for bloco in blocos:
+        # Simulado sempre tem 10 questões por bloco (fixo)
+        N_Q_BLOCO = 10
+        blocos_info.append({
+            "numero": bloco["numero"],
+            "disciplina_nome": bloco["disciplina_nome"],
+            "q_inicio": num_global + 1,
+            "n_questoes": N_Q_BLOCO,
+        })
+        num_global += N_Q_BLOCO
+
+    # Turmas do ano de escolaridade
+    turmas = _turmas_do_ano(conn, sim["ano_escolaridade"] or 0)
+
+    # Filtrar por turma se especificado
+    if turma_id:
+        turmas = [t for t in turmas if t["id"] == turma_id]
+
+    # Alunos de todas as turmas
+    alunos = []
+    for t in turmas:
+        als = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome
+            FROM alunos a JOIN turmas t ON t.id = a.turma_id
+            WHERE a.turma_id = ? ORDER BY a.nome
+        """, (t["id"],)).fetchall()
+        alunos.extend([dict(a) for a in als])
+
+    conn.close()
+
+    if not alunos:
+        return HTMLResponse("<p>Nenhum aluno encontrado para este simulado.</p>")
+
+    sim_dict = dict(sim)
+    buffer = _gerar_cartao_simulado_pdf(sim_dict, blocos_info, alunos)
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=cartao_simulado_{sim_id}.pdf"}
+    )
+
+
+# ==========================================
+#  OMR ESPECIAL DO SIMULADO
+# ==========================================
+
+def _calcular_layout_cartao_simulado(blocos_info):
+    """Calcula coordenadas das bolhas para o cartão especial do simulado.
+    Sincronizado com _gerar_cartao_simulado_pdf — mesmas constantes.
+    Retorna lista de {q_num, bloco_num, x_mm, y_mm, label} para cada bolha.
+    """
+    # Constantes idênticas ao gerador
+    PAGE_H_MM = 297
+    COL_X_MM = [25, 115]          # x base de cada coluna
+    NUM_OFFSET_MM = 14             # offset do número à esquerda
+    BUBBLE_START_X_OFFSET = 18    # x_base + 18mm = início das bolhas
+    BUBBLE_SPACING_MM = 10        # espaço entre A/B/C/D
+    SECTION_START_Y_MM = 60       # mm do topo da página
+    ROW_H_MM = 9                   # altura de cada linha de questão
+    SECTION_H_MM = 8 + 10 * 9 + 5 # título(8) + 10 linhas(90) + margem(5) = 103mm
+    SECTION_GAP_MM = 4
+    TITULO_H_MM = 8               # altura do título da seção
+    LABEL_OFFSET_MM = 7           # y do cabeçalho A/B/C/D abaixo do título
+    FIRST_Q_OFFSET_MM = 10        # y da primeira questão abaixo do título
+    LETRAS = ["A", "B", "C", "D"]
+
+    bolhas = []
+    for idx, bloco in enumerate(blocos_info):
+        col = idx % 2
+        row = idx // 2
+        x_base_mm = COL_X_MM[col]
+        y_section_top = SECTION_START_Y_MM + row * (SECTION_H_MM + SECTION_GAP_MM)
+        bubble_start_x = x_base_mm + BUBBLE_START_X_OFFSET
+
+        n_q = bloco.get("n_questoes", 10)
+        for qi in range(n_q):
+            q_num = bloco["q_inicio"] + qi
+            # y do centro das bolhas desta questão (do topo da página)
+            q_y_mm = y_section_top + FIRST_Q_OFFSET_MM + qi * ROW_H_MM
+
+            for li, letra in enumerate(LETRAS):
+                bx_mm = bubble_start_x + li * BUBBLE_SPACING_MM
+                bolhas.append({
+                    "q_num": q_num,
+                    "bloco_num": bloco["numero"],
+                    "label": letra,
+                    "x_mm": bx_mm,
+                    "y_mm": q_y_mm,
+                })
+    return bolhas
+
+
+def _processar_cartao_simulado(image_bytes, blocos_info, filename=""):
+    """Processa imagem de cartão resposta do simulado.
+    Detecta marcadores, corrige perspectiva, lê QR SIM:aluno_id:sim_id,
+    lê as 40 bolhas nas 4 seções.
+    Retorna dict com success, aluno_id, sim_id, answers ({q_num: letra}).
+    """
+    import cv2
+    import numpy as np
+    import base64
+
+    img, erro = _decode_image_universal(image_bytes, filename)
+    if img is None:
+        return {"success": False, "error": erro or "Erro ao abrir imagem."}
+
+    h, w = img.shape[:2]
+    if h < 400 or w < 300:
+        return {"success": False, "error": f"Imagem muito pequena ({w}×{h}px)."}
+
+    # === Detectar marcadores de canto — VERSÃO ROBUSTA A DISTÂNCIA (28/07/2026) ===
+    # Antes usava um único limiar (Otsu) pra foto INTEIRA. Isso quebra assim que
+    # aparece bastante fundo (mesa, mão, chão) ao redor do cartão — comportamento
+    # normal de quem fotografa com margem de segurança — porque o Otsu passa a
+    # confundir "fundo" com "marcador escuro" e tudo vira um borrão só (contorno
+    # único). Trocado por threshold ADAPTATIVO (compara cada pixel só com sua
+    # vizinhança local, não a foto toda) — funciona igual não importa quanto fundo
+    # apareça na foto. Bug real relatado por Felipe: "só funciona se eu faço a foto
+    # bem de perto" — reproduzido e confirmado com foto sintética antes desse fix.
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    block_size = int(w * 0.025)
+    if block_size % 2 == 0:
+        block_size += 1
+    block_size = max(11, block_size)
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        block_size, 12
+    )
+    # RETR_LIST em vez de RETR_EXTERNAL: a moldura decorativa do cartão forma um
+    # contorno fechado que, com RETR_EXTERNAL, "esconde" tudo que está dentro dela
+    # (os marcadores, bolhas, texto) — RETR_LIST pega todos os contornos, não só o
+    # mais externo.
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 100: continue
+        x, y, ww, hh = cv2.boundingRect(cnt)
+        if ww == 0 or hh == 0: continue
+        if not (0.7 < ww/hh < 1.3): continue
+        if (ww * hh) == 0 or area / (ww * hh) < 0.7: continue
+        if ww < 8 or ww > w * 0.15: continue
+        candidates.append((x + ww/2, y + hh/2, area))
+
+    if len(candidates) < 4:
+        return {"success": False, "error": f"Apenas {len(candidates)} marcadores detectados (esperados 4 ou mais). Verifique se a foto mostra a folha inteira, está bem iluminada e nítida."}
+
+    # Acha os 4 EXTREMOS do grupo de candidatos (não mais "o mais perto de cada
+    # canto DA FOTO" — isso falhava quando havia muito fundo, porque a distância até
+    # o canto real da folha cresce e passa do limite de busca). Robusto a qualquer
+    # zoom/distância, desde que os 4 marcadores tenham sido detectados.
+    tl_c = min(candidates, key=lambda c: c[0] + c[1])
+    br_c = max(candidates, key=lambda c: c[0] + c[1])
+    tr_c = max(candidates, key=lambda c: c[0] - c[1])
+    bl_c = min(candidates, key=lambda c: c[0] - c[1])
+    tl, tr, bl, br = (tl_c[0], tl_c[1]), (tr_c[0], tr_c[1]), (bl_c[0], bl_c[1]), (br_c[0], br_c[1])
+
+    if len({tl, tr, bl, br}) < 4:
+        return {"success": False, "error": "Não foi possível identificar os 4 marcadores de canto."}
+
+    # Validação de FORMA (substitui a antiga exigência de "ocupar 60% da FOTO", que
+    # obrigava fotografar bem de perto): lados opostos com comprimento parecido +
+    # proporção compatível com folha A4. Funciona em qualquer distância/zoom, e
+    # ainda pega o caso original que a checagem antiga tentava evitar (marcador
+    # ausente "casando" com um blob errado, gerando um retângulo torto).
+    largura_topo = tr[0] - tl[0]
+    largura_base = br[0] - bl[0]
+    altura_esq = bl[1] - tl[1]
+    altura_dir = br[1] - tr[1]
+
+    def _lado_valido(a, b, tolerancia=0.20):
+        if a <= 0 or b <= 0:
+            return False
+        menor, maior = min(a, b), max(a, b)
+        return (menor / maior) >= (1 - tolerancia)
+
+    if not _lado_valido(largura_topo, largura_base) or not _lado_valido(altura_esq, altura_dir):
+        return {"success": False, "error": "Os marcadores de canto encontrados não formam um retângulo consistente — pode ser que algum marcador tenha sido confundido com outra coisa na foto. Tente novamente com boa iluminação e o cartão sem dobras."}
+
+    ASPECT_A4 = 210 / 297
+    largura_media = (largura_topo + largura_base) / 2
+    altura_media = (altura_esq + altura_dir) / 2
+    proporcao = (largura_media / altura_media) if altura_media else 0
+    if not (ASPECT_A4 * 0.75 < proporcao < ASPECT_A4 * 1.25):
+        return {"success": False, "error": f"A proporção entre os marcadores não bate com uma folha A4 — pode ser que algum marcador tenha sido confundido com outra coisa na foto (proporção detectada: {proporcao:.2f}, esperado perto de {ASPECT_A4:.2f})."}
+
+    if largura_media < w * 0.10 or altura_media < h * 0.10:
+        return {"success": False, "error": "O cartão está pequeno demais na foto — aproxime um pouco mais e tente novamente."}
+
+    # Perspective transform → A4 canônico 1191×1684px
+    canon_w, canon_h = 1191, 1684
+    margin_c = int(14/210*canon_w)
+    M = cv2.getPerspectiveTransform(
+        np.float32([tl, tr, bl, br]),
+        np.float32([[margin_c,margin_c],[canon_w-margin_c,margin_c],
+                    [margin_c,canon_h-margin_c],[canon_w-margin_c,canon_h-margin_c]])
+    )
+    warped = cv2.warpPerspective(img, M, (canon_w, canon_h))
+    warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+    # Ler QR Code — detecção robusta (12/08/2026)
+    qr_data, qr_center = _detectar_qr_robusto(warped)
+
+    if not qr_data:
+        # Fallback: tentar na imagem original (antes da correção de perspectiva)
+        qr_data, _ = _detectar_qr_robusto(img)
+
+    if not qr_data or not qr_data.startswith("SIM:"):
+        return {"success": False, "error": f"QR Code inválido ou não encontrado. (lido: '{qr_data[:30]}')"}
+
+    # Cartão de cabeça pra baixo (180°)? O QR é impresso no canto superior-direito;
+    # se aparecer no inferior-esquerdo, a folha foi escaneada/fotografada invertida.
+    if qr_center is not None:
+        cx, cy = qr_center
+        if cx < canon_w * 0.5 and cy > canon_h * 0.5:
+            warped = cv2.rotate(warped, cv2.ROTATE_180)
+            warped_gray = cv2.rotate(warped_gray, cv2.ROTATE_180)
+
+    try:
+        parts = qr_data.split(":")
+        aluno_id = int(parts[1])
+        sim_id_qr = int(parts[2])
+    except Exception as e:
+        return {"success": False, "error": f"QR Code com formato inválido: {e}"}
+
+    # Conversão mm → pixels
+    def mm_x(mm): return int(mm / 210 * canon_w)
+    def mm_y(mm): return int(mm / 297 * canon_h)
+
+    # Ler bolhas
+    bolhas = _calcular_layout_cartao_simulado(blocos_info)
+    bubble_r_px = int(3.0 / 210 * canon_w)
+
+    # === CALIBRAÇÃO AUTOMÁTICA DA POSIÇÃO REAL DAS LINHAS ===
+    # A posição das bolhas calculada por fórmula (mm) pode não bater exatamente com o
+    # cartão impresso de verdade (variações de impressão/digitalização). Por isso, em vez
+    # de confiar cegamente na fórmula, detectamos a posição REAL das linhas de cada bloco
+    # via visão computacional (círculos impressos, coluna A), e corrigimos a leitura pra
+    # usar essa posição real. Se a detecção falhar, cai no cálculo por fórmula (mm) normal.
+    def _calibrar_linhas_bloco(x_col_a_px, y_min_esperado, y_max_esperado, n_questoes):
+        pad = 45
+        y0 = max(0, y_min_esperado - pad)
+        y1 = min(canon_h, y_max_esperado + pad)
+        x0 = max(0, x_col_a_px - 22)
+        x1 = min(canon_w, x_col_a_px + 22)
+        region = warped_gray[y0:y1, x0:x1]
+        if region.size == 0 or n_questoes < 2:
+            return None
+        region_blur = cv2.medianBlur(region, 5)
+        espac_formula = (y_max_esperado - y_min_esperado) / (n_questoes - 1)
+        try:
+            circles = cv2.HoughCircles(
+                region_blur, cv2.HOUGH_GRADIENT, dp=1,
+                minDist=max(15, int(espac_formula * 0.6)),
+                param1=50, param2=15, minRadius=8, maxRadius=22
+            )
+        except Exception:
+            return None
+        if circles is None:
+            return None
+        ys = sorted(float(c[1] + y0) for c in circles[0])
+        agrupadas = []
+        for y in ys:
+            if not agrupadas or y - agrupadas[-1] > 15:
+                agrupadas.append(y)
+
+        if len(agrupadas) < max(3, n_questoes // 2):
+            return None
+
+        # O espaçamento TEÓRICO (fórmula) e o espaçamento REAL das bolhas impressas
+        # quase sempre divergem por menos de 1px — mas esse desvio se acumula linha a
+        # linha, e lá pela questão 3-4 já é grande o bastante pra fazer o sistema achar
+        # que uma bolha pertence à linha errada. Por isso usamos o espaçamento REAL
+        # medido (mediana das distâncias entre bolhas detectadas consecutivas) como
+        # base, em vez do espaçamento calculado pela fórmula.
+        diffs = sorted(agrupadas[i + 1] - agrupadas[i] for i in range(len(agrupadas) - 1))
+        espac_real = diffs[len(diffs) // 2] if diffs else espac_formula
+        if espac_real <= 0:
+            espac_real = espac_formula
+
+        # Encontra o melhor "ponto de partida" da grade: testa cada bolha detectada como
+        # candidata a cada linha possível (0..n_questoes-1) e escolhe a combinação que
+        # mais outras bolhas detectadas confirmam (tipo um RANSAC simples em 1D). Isso
+        # evita ter que assumir "a primeira bolha encontrada é a linha 1".
+        tolerancia_fina = espac_real * 0.35
+        melhor_inicio, melhor_votos = None, -1
+        for y_c in agrupadas:
+            for k in range(n_questoes):
+                inicio_candidato = y_c - k * espac_real
+                votos = 0
+                for y_outro in agrupadas:
+                    idx_estimado = round((y_outro - inicio_candidato) / espac_real)
+                    if 0 <= idx_estimado < n_questoes:
+                        esperado = inicio_candidato + idx_estimado * espac_real
+                        if abs(y_outro - esperado) < tolerancia_fina:
+                            votos += 1
+                if votos > melhor_votos:
+                    melhor_votos, melhor_inicio = votos, inicio_candidato
+
+        if melhor_inicio is None or melhor_votos < max(3, n_questoes // 2):
+            return None
+
+        grade = [melhor_inicio + i * espac_real for i in range(n_questoes)]
+        # Confere se a grade encontrada é plausível (perto da faixa que a fórmula esperava;
+        # senão, algo deu muito errado na detecção e é mais seguro não calibrar).
+        # CORRIGIDO (bug Turma 706 / Bloco de Ciencias, 20/07/2026): a tolerancia era
+        # 1.5x o espacamento entre linhas -- maior que 1 linha inteira (1.0x). Isso deixava
+        # passar sem rejeitar uma calibracao deslocada em exatamente 1 linha inteira, que
+        # acontece quando 1 bolha da coluna A (geralmente a da primeira questao do bloco)
+        # nao e detectada pelo Hough Circles (comum quando essa marcacao esta mais fraca
+        # ou o contorno da bolha vazia tem pouco contraste no scan). Apertado para 0.6x:
+        # folgado o bastante pra aceitar calibracoes legitimas (desvios reais observados
+        # ficam em torno de 11-12px, bem abaixo do novo limite), mas apertado o bastante
+        # pra rejeitar um desvio de 1 linha inteira (que fica bem acima do novo limite) e
+        # cair no fallback seguro por formula nesse caso.
+        if abs(grade[0] - y_min_esperado) > espac_formula * 0.6:
+            return None
+
+        # Pra cada linha, usa a posição da bolha REALMENTE detectada quando houver uma
+        # correspondência próxima da grade (mais preciso); senão, usa a posição da grade.
+        resultado = [int(round(v)) for v in grade]
+        usados = set()
+        for y_det in agrupadas:
+            melhor_i, melhor_d = None, tolerancia_fina
+            for i, y_g in enumerate(grade):
+                if i in usados:
+                    continue
+                d = abs(y_det - y_g)
+                if d < melhor_d:
+                    melhor_i, melhor_d = i, d
+            if melhor_i is not None:
+                resultado[melhor_i] = int(round(y_det))
+                usados.add(melhor_i)
+
+        # Só confia na calibração se casou pelo menos metade das linhas — senão, os
+        # círculos detectados provavelmente não são confiáveis (ruído/página torta) e
+        # é mais seguro cair pro cálculo 100% por fórmula (comportamento anterior a
+        # essa calibração, já validado).
+        if len(usados) < max(3, n_questoes // 2):
+            return None
+        return resultado
+
+    bolhas_por_bloco = {}
+    for b in bolhas:
+        bolhas_por_bloco.setdefault(b["bloco_num"], []).append(b)
+
+    calibracao_y_por_q = {}  # q_num -> y_px calibrado
+    for bloco_num, itens in bolhas_por_bloco.items():
+        q_nums_bloco = sorted(set(it["q_num"] for it in itens))
+        col_a = [it for it in itens if it["label"] == "A"]
+        if not col_a or not q_nums_bloco:
+            continue
+        x_col_a_px = mm_x(col_a[0]["x_mm"])
+        y_vals = [mm_y(it["y_mm"]) for it in col_a]
+        y_calibrado = _calibrar_linhas_bloco(x_col_a_px, min(y_vals), max(y_vals), len(q_nums_bloco))
+        if y_calibrado:
+            for q_num, y_cal in zip(q_nums_bloco, y_calibrado):
+                calibracao_y_por_q[q_num] = y_cal
+
+    # Thresholds alinhados com os já usados (e validados) no OMR de prova normal
+    # (ver _processar_cartao_resposta, modo "normal"): mean<110 escuro confiante,
+    # mean<140 ainda conta (com aviso), mean>180 considerado em branco.
+    LIGHT_THRESHOLD_ESC = 1.0 - 180 / 255       # ~0.294 — abaixo disso, provável em branco
+    DARK_THRESHOLD_ESC = 1.0 - 110 / 255        # ~0.569 — acima disso, marca confiante
+    AMBIGUOUS_THRESHOLD_ESC = 1.0 - 140 / 255   # ~0.451
+    FRACA_MIN_ESC = 0.15  # piso absoluto abaixo do qual é provavelmente ruído do papel, não caneta
+
+    respostas = {}  # {q_num: letra_marcada}
+    votos = {}      # {q_num: {letra: escuridao}}
+    warnings_sim = []  # avisos de dupla/fraca marcação
+
+    for b in bolhas:
+        bx = mm_x(b["x_mm"])
+        by = calibracao_y_por_q.get(b["q_num"], mm_y(b["y_mm"]))
+        q = b["q_num"]
+        x1 = max(0, bx - bubble_r_px)
+        x2 = min(canon_w, bx + bubble_r_px)
+        y1 = max(0, by - bubble_r_px)
+        y2 = min(canon_h, by + bubble_r_px)
+        roi = warped_gray[y1:y2, x1:x2]
+        if roi.size == 0:
+            continue
+        escuridao = 1.0 - float(roi.mean()) / 255.0
+        if q not in votos:
+            votos[q] = {}
+        votos[q][b["label"]] = escuridao
+
+    for q_num, letras_esc in votos.items():
+        ordenadas = sorted(letras_esc.items(), key=lambda x: x[1], reverse=True)
+        melhor_letra, melhor_esc = ordenadas[0]
+        segunda_letra, segunda_esc = ordenadas[1] if len(ordenadas) > 1 else (None, 0.0)
+
+        if melhor_esc >= LIGHT_THRESHOLD_ESC:
+            respostas[q_num] = melhor_letra
+            if melhor_esc < DARK_THRESHOLD_ESC:
+                warnings_sim.append(f"Q{q_num}: marca fraca em {melhor_letra} (confira)")
+            if segunda_letra and segunda_letra != melhor_letra and segunda_esc >= AMBIGUOUS_THRESHOLD_ESC:
+                warnings_sim.append(f"Q{q_num}: dupla marcação detectada — {melhor_letra} e {segunda_letra} (confira)")
+        elif melhor_esc >= FRACA_MIN_ESC and (segunda_esc == 0 or melhor_esc >= segunda_esc * 2.0):
+            # Não chegou no piso padrão, mas é claramente mais escura que as outras 3 —
+            # marca de caneta fraca/desbotada, não ruído do papel.
+            respostas[q_num] = melhor_letra
+            warnings_sim.append(f"Q{q_num}: marca muito fraca em {melhor_letra} — confira com atenção")
+        else:
+            respostas[q_num] = None  # não marcado
+
+    # Preview da imagem corrigida
+    _, enc = cv2.imencode(".jpg", warped, [cv2.IMWRITE_JPEG_QUALITY, 60])
+    preview_b64 = base64.b64encode(enc.tobytes()).decode()
+
+    return {
+        "success": True,
+        "aluno_id": aluno_id,
+        "sim_id": sim_id_qr,
+        "answers": respostas,
+        "warnings": warnings_sim,
+        "preview_base64": preview_b64,
+        "n_respondidas": sum(1 for v in respostas.values() if v),
+    }
+
+
+@app.get("/simulados/{sim_id}/aplicacoes/{app_id}/escanear", response_class=HTMLResponse)
+def escanear_simulado_tela(sim_id: int, app_id: int):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    apl = conn.execute("""
+        SELECT a.*, t.nome AS turma_nome, p.titulo AS prova_titulo
+        FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
+        LEFT JOIN provas p ON p.id = a.prova_id
+        WHERE a.id = ?
+    """, (app_id,)).fetchone()
+    n_cartoes = conn.execute(
+        "SELECT COUNT(DISTINCT aluno_id) FROM entregas WHERE aplicacao_id = ?", (app_id,)
+    ).fetchone()[0]
+    n_alunos = conn.execute(
+        "SELECT COUNT(*) FROM alunos WHERE turma_id = ?", (apl["turma_id"],)
+    ).fetchone()[0] if apl else 0
+    conn.close()
+    if not sim or not apl:
+        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+    content = f"""
+        <div class="page-header">
+            <h1>📷 Escanear cartões — {apl['turma_nome']}</h1>
+            <p class="subtitle">{sim['nome']} · {n_cartoes}/{n_alunos} cartões processados</p>
+        </div>
+
+        <div class="tip" style="margin-bottom:16px;">
+            <strong>Dicas para boa leitura:</strong>
+            <ul style="margin:8px 0 0 18px;">
+                <li>Tire a foto com boa luz, sem sombras sobre a folha</li>
+                <li>Mantenha o celular paralelo à folha (sem inclinar)</li>
+                <li>Inclua os 4 marcadores pretos dos cantos no enquadramento</li>
+                <li>O QR Code precisa estar legível (sem reflexo nem desfoque)</li>
+            </ul>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:18px; margin-bottom:24px;">
+
+            <!-- Individual -->
+            <form id="form-single" action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-individual"
+                  method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+                <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
+                <p style="font-size:13px; color:var(--text-muted);">Recomendado para correção ao vivo, durante a aplicação.</p>
+                <label>Foto<input type="file" name="foto" accept="image/*" capture="environment" required></label>
+                <div id="pre-check-status" style="font-size:12px; margin:6px 0 10px; min-height:16px; line-height:1.5;"></div>
+                <p style="font-size:11px; color:var(--text-muted);">No celular abre a câmera direto.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Processar 1 foto</button>
+            </form>
+
+            <!-- Lote -->
+            <form id="form-lote" action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote"
+                  method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
+                <h3 style="margin-top:0;">📁 Lote (várias de uma vez)</h3>
+                <p style="font-size:13px; color:var(--text-muted);">Recomendado quando você já tem todas as fotos prontas.</p>
+                <label>Fotos ou PDF<input type="file" name="fotos" accept="image/*,.pdf" multiple required></label>
+                <p style="font-size:11px; color:var(--text-muted);">Selecione múltiplas imagens ou um PDF.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Processar lote</button>
+            </form>
+
+        </div>
+
+        <!-- Overlay de loading -->
+        <div id="loading-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65);
+             z-index:9999; flex-direction:column; align-items:center; justify-content:center; gap:20px;">
+            <div style="width:64px; height:64px; border:6px solid rgba(255,255,255,0.2);
+                 border-top-color:#fff; border-radius:50%; animation:spin 0.9s linear infinite;"></div>
+            <div id="loading-msg" style="color:#fff; font-size:18px; font-weight:600; text-align:center;">
+                ⏳ Processando cartão…
+            </div>
+            <div style="color:rgba(255,255,255,0.7); font-size:13px;">Aguarde, não feche esta página.</div>
+        </div>
+
+        <style>
+        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+        </style>
+
+        <script>
+        (function() {{
+            var overlay = document.getElementById('loading-overlay');
+            var msg = document.getElementById('loading-msg');
+
+            function mostrarLoading(texto) {{
+                msg.textContent = texto;
+                overlay.style.display = 'flex';
+            }}
+
+            // Individual
+            var fs = document.getElementById('form-single');
+
+        function analisarFoto(file, statusEl) {{
+            statusEl.innerHTML = '🔄 Verificando foto...';
+            statusEl.style.color = 'var(--text-muted)';
+            var img = new Image();
+            var url = URL.createObjectURL(file);
+            img.onload = function() {{
+                try {{
+                    var maxDim = 900;
+                    var scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+                    var w = Math.round(img.width * scale);
+                    var h = Math.round(img.height * scale);
+                    var canvas = document.createElement('canvas');
+                    canvas.width = w; canvas.height = h;
+                    var ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, w, h);
+                    var data = ctx.getImageData(0, 0, w, h).data;
+
+                    var gray = new Uint8ClampedArray(w * h);
+                    for (var i = 0; i < w * h; i++) {{
+                        var r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+                        gray[i] = (0.299 * r + 0.587 * g + 0.114 * b);
+                    }}
+
+                    // 1) Brilho medio da foto inteira
+                    var soma = 0;
+                    for (var i2 = 0; i2 < gray.length; i2++) soma += gray[i2];
+                    var brilhoMedio = soma / gray.length;
+
+                    // 2) Nitidez aproximada (variancia de gradiente simples horizontal/vertical)
+                    var somaGrad = 0, nGrad = 0;
+                    for (var y = 1; y < h - 1; y += 2) {{
+                        for (var x = 1; x < w - 1; x += 2) {{
+                            var idx = y * w + x;
+                            var gx = gray[idx + 1] - gray[idx - 1];
+                            var gy = gray[idx + w] - gray[idx - w];
+                            somaGrad += gx * gx + gy * gy;
+                            nGrad++;
+                        }}
+                    }}
+                    var nitidez = nGrad > 0 ? (somaGrad / nGrad) : 0;
+
+                    // 3) Procura os 4 marcadores pretos dos cantos: pega o bloco mais escuro
+                    // dentro de uma faixa de 22% da largura/altura em cada canto da FOTO
+                    // (nao do cartao -- por isso e so uma checagem aproximada, o backend
+                    // continua sendo quem valida de verdade).
+                    function blocoMaisEscuro(x0, x1, y0, y1) {{
+                        var passo = 6;
+                        var melhor = 255;
+                        for (var by = y0; by < y1; by += passo) {{
+                            for (var bx = x0; bx < x1; bx += passo) {{
+                                var somaB = 0, nB = 0;
+                                var yMax = Math.min(by + 12, h);
+                                var xMax = Math.min(bx + 12, w);
+                                for (var yy = by; yy < yMax; yy++) {{
+                                    for (var xx = bx; xx < xMax; xx++) {{
+                                        somaB += gray[yy * w + xx];
+                                        nB++;
+                                    }}
+                                }}
+                                if (nB > 0) {{
+                                    var media = somaB / nB;
+                                    if (media < melhor) melhor = media;
+                                }}
+                            }}
+                        }}
+                        return melhor;
+                    }}
+
+                    var margX = Math.round(w * 0.22);
+                    var margY = Math.round(h * 0.22);
+                    var cantoTL = blocoMaisEscuro(0, margX, 0, margY);
+                    var cantoTR = blocoMaisEscuro(w - margX, w, 0, margY);
+                    var cantoBL = blocoMaisEscuro(0, margX, h - margY, h);
+                    var cantoBR = blocoMaisEscuro(w - margX, w, h - margY, h);
+
+                    var LIMIAR_MARCADOR = 90;
+                    var cantosFaltando = [];
+                    if (cantoTL > LIMIAR_MARCADOR) cantosFaltando.push('superior-esquerdo');
+                    if (cantoTR > LIMIAR_MARCADOR) cantosFaltando.push('superior-direito');
+                    if (cantoBL > LIMIAR_MARCADOR) cantosFaltando.push('inferior-esquerdo');
+                    if (cantoBR > LIMIAR_MARCADOR) cantosFaltando.push('inferior-direito');
+
+                    var problemas = [];
+                    if (brilhoMedio < 60) problemas.push('💡 Foto muito escura — tire com mais luz');
+                    if (brilhoMedio > 235) problemas.push('☀️ Foto muito clara/estourada — evite luz direta forte ou flash');
+                    if (nitidez < 25) problemas.push('🔍 Foto pode estar desfocada — segure firme e tire de novo');
+                    if (cantosFaltando.length > 0) {{
+                        problemas.push('📐 Não encontrei o marcador preto no canto ' + cantosFaltando.join(', ') + ' — inclua toda a folha no enquadramento');
+                    }}
+
+                    URL.revokeObjectURL(url);
+
+                    if (problemas.length === 0) {{
+                        statusEl.innerHTML = '✅ Cartão parece bem enquadrado e nítido — pode enviar.';
+                        statusEl.style.color = 'var(--green)';
+                    }} else {{
+                        statusEl.innerHTML = problemas.map(function(p) {{ return '⚠️ ' + p; }}).join('<br>') +
+                            '<br><small style="color:var(--text-muted);">Checagem rápida feita no celular — se achar que está tudo certo, pode enviar mesmo assim.</small>';
+                        statusEl.style.color = 'var(--orange)';
+                    }}
+                }} catch (err) {{
+                    statusEl.innerHTML = '';
+                }}
+            }};
+            img.onerror = function() {{
+                statusEl.innerHTML = '';
+                URL.revokeObjectURL(url);
+            }};
+            img.src = url;
+        }}
+
+        var inputFoto = fs ? fs.querySelector('input[name="foto"]') : null;
+        var statusFoto = document.getElementById('pre-check-status');
+        if (inputFoto && statusFoto) {{
+            inputFoto.addEventListener('change', function() {{
+                if (inputFoto.files && inputFoto.files[0]) {{
+                    analisarFoto(inputFoto.files[0], statusFoto);
+                }}
+            }});
+        }}
+
+
+            if (fs) {{
+                fs.addEventListener('submit', function(e) {{
+                    var btn = fs.querySelector('button[type="submit"]');
+                    if (btn) {{ btn.disabled = true; }}
+                    mostrarLoading('⏳ Processando cartão…');
+                }});
+            }}
+
+            // Lote
+            var fl = document.getElementById('form-lote');
+            if (fl) {{
+                fl.addEventListener('submit', function(e) {{
+                    var inp = fl.querySelector('input[type="file"]');
+                    var n = inp && inp.files ? inp.files.length : '?';
+                    var btn = fl.querySelector('button[type="submit"]');
+                    if (btn) {{ btn.disabled = true; }}
+                    mostrarLoading('⏳ Processando ' + n + ' cartão(ões)… Isso pode levar alguns segundos.');
+                }});
+            }}
+        }})();
+        </script>
+
+        <div style="margin-top:16px;">
+            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
+        </div>
+    """
+    return render_page(f"Escanear — {apl['turma_nome']}", content, active="simulados")
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-individual", response_class=HTMLResponse)
+async def escanear_simulado_individual(sim_id: int, app_id: int, foto: UploadFile = File(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    try:
+        sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+        apl = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome FROM aplicacoes a
+            JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+        """, (app_id,)).fetchone()
+        if not sim or not apl:
+            return HTMLResponse(render_page("Erro", "<p>Simulado ou aplicação não encontrados.</p>", active="simulados"))
+
+        blocos = conn.execute("""
+            SELECT b.numero, d.nome AS disciplina_nome
+            FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+            WHERE b.simulado_id = ? ORDER BY b.numero
+        """, (sim_id,)).fetchall()
+        blocos_info = []
+        num_global = 0
+        for bloco in blocos:
+            blocos_info.append({"numero": bloco["numero"], "disciplina_nome": bloco["disciplina_nome"],
+                                 "q_inicio": num_global + 1, "n_questoes": 10})
+            num_global += 10
+
+        # Questões em ordem corrida
+        questoes_ordem = conn.execute("""
+            SELECT sq.questao_id FROM simulado_questoes sq
+            JOIN simulado_blocos b ON b.id = sq.bloco_id
+            WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+        """, (sim_id,)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes_ordem]
+        n_questoes = len(questao_ids)
+
+        image_bytes = await foto.read()
+        if not image_bytes:
+            return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p>', active="simulados"))
+
+        result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, foto.filename or "")
+
+        if not result["success"]:
+            content_err = f"""
+                <div class="page-header"><h1>❌ Erro na leitura</h1></div>
+                <div style="border:1px solid var(--red);background:var(--red-bg);padding:16px;border-radius:6px;color:var(--red);">
+                    <strong>Problema:</strong> {result.get('error','Erro desconhecido')}
+                </div>
+                <p>Tente com foto mais nítida, boa iluminação e todos os 4 cantos visíveis.</p>
+                <div style="display:flex;gap:10px;margin-top:16px;">
+                    <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Tentar outra foto</a>
+                    <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
+                </div>
+            """
+            return HTMLResponse(render_page("Erro no escaneamento", content_err, active="simulados"))
+
+        aluno_id = result["aluno_id"]
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not aluno:
+            return HTMLResponse(render_page("Erro", f"<p>Aluno {aluno_id} não encontrado no banco.</p>", active="simulados"))
+
+        # Verificar entrega anterior
+        ja_entregue = conn.execute(
+            "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+            (app_id, aluno_id)
+        ).fetchone()
+
+        answers = result["answers"]
+
+        # Tabela editável de respostas (igual ao OMR normal)
+        # Agrupar por bloco para melhor visualização
+        blocos_rows = {}
+        for bloco in blocos:
+            blocos_rows[bloco["numero"]] = {"nome": bloco["disciplina_nome"], "rows": ""}
+
+        rows_por_bloco = {b["numero"]: [] for b in blocos}
+        for q_num in range(1, n_questoes + 1):
+            bloco_num = ((q_num - 1) // 10) + 1
+            rows_por_bloco[bloco_num].append(q_num)
+
+        # Mapear questões com aviso
+        qs_aviso = {}
+        for w in result.get("warnings", []):
+            import re as _re2
+            m = _re2.match(r"Q(\d+)", w)
+            if m:
+                qs_aviso[int(m.group(1))] = w
+
+        tabela_html = ""
+        for bloco in blocos:
+            tabela_html += f"""
+            <tr style="background:var(--accent-bg);">
+                <td colspan="7" style="padding:6px 8px;font-weight:700;color:var(--accent);">
+                    Bloco {bloco['numero']} — {bloco['disciplina_nome']}
+                </td>
+            </tr>"""
+            for q_num in rows_por_bloco.get(bloco["numero"], []):
+                detected = answers.get(q_num)
+                tem_aviso = q_num in qs_aviso
+                row_bg = ' style="background:var(--orange-bg);"' if tem_aviso else ""
+                cells = ""
+                for letra in ["A", "B", "C", "D"]:
+                    checked = " checked" if detected == letra else ""
+                    cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
+                em_branco = " checked" if detected is None else ""
+                cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco}></td>'
+                if tem_aviso:
+                    marca = f'<span style="color:var(--orange);font-weight:600;">⚠️ {qs_aviso[q_num]}</span>'
+                else:
+                    marca = f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
+                tabela_html += f'<tr{row_bg}><td style="padding:5px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 8px;">{marca}</td></tr>'
+
+        avisos_html = ""
+        if result.get("warnings"):
+            items_w = "".join(f"<li>{w}</li>" for w in result["warnings"])
+            avisos_html = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin:0 0 16px;color:var(--orange);"><strong>⚠️ {len(result["warnings"])} questão(ões) com marcação dupla ou ambígua — verifique as linhas destacadas:</strong><ul style="margin:6px 0 0 18px;">{items_w}</ul></div>'
+
+        override_aviso = ""
+        if ja_entregue:
+            override_aviso = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin:16px 0;color:var(--orange);"><strong>⚠️ Atenção:</strong> este aluno já tem entrega registrada ({ja_entregue["finalizada_em"]}). Confirmar irá <strong>sobrescrever</strong> as respostas anteriores.</div>'
+
+        preview_img = f'<img src="data:image/jpeg;base64,{result["preview_base64"]}" style="max-width:100%;border:1px solid var(--border);border-radius:6px;">' if result.get("preview_base64") else ""
+
+        content = f"""
+            <div class="page-header">
+                <h1>Revisão da leitura</h1>
+                <p class="subtitle">{sim['nome']} · Aluno: <strong>{aluno['nome']}</strong></p>
+            </div>
+            {avisos_html}
+            {override_aviso}
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:24px;align-items:flex-start;">
+                <div>
+                    <h2 style="margin-top:0;">Imagem processada</h2>
+                    <p style="font-size:13px;color:var(--text-muted);">Confira se as marcações estão corretas antes de confirmar.</p>
+                    {preview_img}
+                </div>
+                <div>
+                    <h2 style="margin-top:0;">Respostas detectadas</h2>
+                    <p style="font-size:13px;color:var(--text-muted);">Corrija qualquer marcação antes de salvar.</p>
+                    <form action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-confirmar" method="post">
+                        <input type="hidden" name="aluno_id" value="{aluno_id}">
+                        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                            <thead>
+                                <tr style="background:var(--bg-subtle);">
+                                    <th style="padding:5px;">Q</th>
+                                    <th style="padding:5px;">A</th>
+                                    <th style="padding:5px;">B</th>
+                                    <th style="padding:5px;">C</th>
+                                    <th style="padding:5px;">D</th>
+                                    <th style="padding:5px;">∅</th>
+                                    <th style="padding:5px;">Detectado</th>
+                                </tr>
+                            </thead>
+                            <tbody>{tabela_html}</tbody>
+                        </table>
+                        <div style="display:flex;gap:10px;margin-top:16px;">
+                            <button type="submit" class="btn btn-primary">✓ Confirmar e salvar</button>
+                            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn">📷 Tentar outra foto</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Revisão da leitura", content, active="simulados"))
+
+    finally:
+        conn.close()
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-confirmar", response_class=HTMLResponse)
+async def confirmar_escaneamento_simulado(sim_id: int, app_id: int, request: Request, aluno_id: int = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    form = await request.form()
+    conn = get_db()
+    try:
+        sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not sim or not aluno:
+            return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+        # Questões em ordem corrida
+        questoes_ordem = conn.execute("""
+            SELECT sq.questao_id FROM simulado_questoes sq
+            JOIN simulado_blocos b ON b.id = sq.bloco_id
+            WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+        """, (sim_id,)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes_ordem]
+
+        # Salvar respostas confirmadas
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+        for q_num, q_id in enumerate(questao_ids, start=1):
+            letra = form.get(f"q_{q_num}", "").strip()
+            if letra in ("A", "B", "C", "D"):
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                    (app_id, aluno_id, q_id, letra)
+                )
+
+        # Registrar entrega
+        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone()
+        if not existente:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (app_id, aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+        conn.commit()
+
+        content_ok = f"""
+            <div class="page-header"><h1>✅ Respostas salvas</h1></div>
+            <div class="tip" style="background:var(--green-bg);border-color:var(--green);margin-bottom:16px;">
+                Respostas de <strong>{aluno['nome']}</strong> confirmadas e salvas com sucesso.
+            </div>
+            <div style="display:flex;gap:10px;margin-top:20px;">
+                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Próximo cartão</a>
+                <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
+            </div>
+        """
+        return HTMLResponse(render_page("Respostas salvas", content_ok, active="simulados"))
+
+    finally:
+        conn.close()
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote", response_class=HTMLResponse)
+async def escanear_simulado_lote(sim_id: int, app_id: int, fotos: List[UploadFile] = File(...)):
+    """Enfileira as fotos do simulado pra processamento em segundo plano (não trava
+    o servidor pros outros professores) e redireciona pra tela de progresso."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    try:
+        sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+        apl = conn.execute("""
+            SELECT a.*, t.nome AS turma_nome FROM aplicacoes a
+            JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+        """, (app_id,)).fetchone()
+        if not sim or not apl:
+            return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+        blocos = conn.execute("""
+            SELECT b.numero, d.nome AS disciplina_nome
+            FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+            WHERE b.simulado_id = ? ORDER BY b.numero
+        """, (sim_id,)).fetchall()
+
+        blocos_info = []
+        num_global = 0
+        for bloco in blocos:
+            blocos_info.append({"numero": bloco["numero"], "disciplina_nome": bloco["disciplina_nome"],
+                                 "q_inicio": num_global + 1, "n_questoes": 10})
+            num_global += 10
+
+        # Questões do simulado em ordem corrida (fixo para todos)
+        questoes_ordem = conn.execute("""
+            SELECT sq.questao_id FROM simulado_questoes sq
+            JOIN simulado_blocos b ON b.id = sq.bloco_id
+            WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+        """, (sim_id,)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes_ordem]
+
+        # Expandir PDFs — página por página, sem carregar o PDF inteiro na memória de
+        # uma vez (ver nota detalhada em _extrair_imagens_de_arquivo sobre o motivo).
+        all_files = []
+        for f in fotos:
+            data = await f.read()
+            if f.filename and f.filename.lower().endswith(".pdf"):
+                try:
+                    from pdf2image import convert_from_bytes, pdfinfo_from_bytes
+                    info = pdfinfo_from_bytes(data)
+                    n_paginas = info.get("Pages", 1)
+                    for i in range(1, n_paginas + 1):
+                        page = convert_from_bytes(data, dpi=300, first_page=i, last_page=i)[0]
+                        buf = BytesIO()
+                        page.save(buf, format="JPEG", quality=95)
+                        all_files.append((f"{f.filename}_p{i}.jpg", buf.getvalue()))
+                        del page
+                except Exception:
+                    all_files.append((f.filename or "arquivo", data))
+            else:
+                all_files.append((f.filename or "foto.jpg", data))
+    finally:
+        conn.close()
+
+    if not all_files:
+        return HTMLResponse(render_page("Lote vazio",
+            '<div class="empty">Nenhuma foto foi processada.</div>', active="simulados"))
+
+    lote_id = _novo_lote_escaneamento("simulado", {
+        "sim_id": sim_id, "app_id": app_id,
+        "blocos_info": blocos_info, "questao_ids": questao_ids,
+        "titulo_exibicao": f"{sim['nome']} · {apl['turma_nome']}",
+        "revisar_url": "",
+    }, all_files)
+    FILAS_ESCANEAMENTO[lote_id]["contexto"]["revisar_url"] = f"/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/{lote_id}/revisar"
+
+    return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+
+def _render_card_revisao_simulado(idx, filename, result, blocos_info, ja_entregue=None, duplicata_lote=False):
+    """Card visual de um cartão de simulado lido com sucesso, com campos editáveis
+    agrupados por bloco/disciplina, no mesmo padrão do lote de prova normal."""
+    nome_seguro = (filename or f"foto_{idx+1}").replace("<", "&lt;")
+    aluno_id = result["aluno_id"]
+    answers = result.get("answers", {})
+    warnings_lista = result.get("warnings", []) or []
+
+    total_questoes_bloco = sum(b["n_questoes"] for b in blocos_info)
+    tem_branco = any(answers.get(bloco["q_inicio"] + qi) is None for bloco in blocos_info for qi in range(bloco["n_questoes"]))
+    tem_dupla = any("dupla marcação" in w for w in warnings_lista)
+    tem_avisos = bool(warnings_lista) or duplicata_lote or ja_entregue
+
+    if tem_branco or tem_dupla:
+        border_color, bg, status_icon, status_color = "var(--red)", "var(--red-bg)", "✗", "var(--red)"
+    elif tem_avisos:
+        border_color, bg, status_icon, status_color = "var(--orange)", "var(--orange-bg)", "⚠", "var(--orange)"
+    else:
+        border_color, bg, status_icon, status_color = "var(--green)", "var(--green-bg)", "✓", "var(--green)"
+    body_default_display, toggle_label = "none", "▼ Expandir"
+
+    avisos = []
+    if duplicata_lote:
+        avisos.append("⚠ Foto repetida no lote: já apareceu um cartão deste aluno antes (a última marcação prevalece).")
+    if ja_entregue:
+        avisos.append("⚠ Aluno já tem entrega registrada. Confirmar irá sobrescrever as respostas anteriores.")
+    avisos.extend(warnings_lista)
+    avisos_html = ""
+    if avisos:
+        items = "".join(f"<li>{w}</li>" for w in avisos)
+        avisos_html = f'<ul style="margin:8px 0 0 18px; font-size:12px; color:var(--orange);">{items}</ul>'
+
+    tabela_html = ""
+    import re as _re_warn
+    questoes_com_aviso = set()
+    for w in warnings_lista:
+        m = _re_warn.match(r"Q(\d+)", w)
+        if m:
+            questoes_com_aviso.add(int(m.group(1)))
+
+    for bloco in blocos_info:
+        tabela_html += f"""<tr style="background:var(--accent-bg);">
+            <td colspan="6" style="padding:5px 8px;font-weight:700;color:var(--accent);">Bloco {bloco['numero']} — {bloco['disciplina_nome']}</td>
+        </tr>"""
+        for qi in range(bloco["n_questoes"]):
+            q_num = bloco["q_inicio"] + qi
+            detected = answers.get(q_num)
+            if detected is None:
+                row_bg = ' style="background:var(--red-bg);"'
+            elif q_num in questoes_com_aviso:
+                row_bg = ' style="background:var(--orange-bg);"'
+            else:
+                row_bg = ""
+            cells = ""
+            for letra in ["A", "B", "C", "D"]:
+                checked = " checked" if detected == letra else ""
+                cells += f'<td style="text-align:center; padding:2px;"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value="{letra}"{checked} style="width:auto; margin:0;"> {letra}</label></td>'
+            em_branco = " checked" if detected is None else ""
+            cells += f'<td style="text-align:center; padding:2px; background:var(--bg-subtle);"><label style="cursor:pointer;"><input type="radio" name="card_{idx}_q_{q_num}" value=""{em_branco} style="width:auto; margin:0;"> ∅</label></td>'
+            tabela_html += f'<tr{row_bg}><td style="padding:3px 6px; font-weight:600;">Q{q_num}</td>{cells}</tr>'
+
+    preview_b64 = result.get("preview_base64", "")
+    preview_img = f'<img src="data:image/jpeg;base64,{preview_b64}" style="width:100%; border:1px solid var(--border); border-radius:4px;">' if preview_b64 else ""
+
+    return f"""
+    <div class="lote-card" style="border:2px solid {border_color}; border-radius:8px; padding:14px; margin-bottom:10px; background:{bg};">
+        <input type="hidden" name="card_{idx}_aluno_id" value="{aluno_id}">
+
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+            <div style="flex:1; min-width:0;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin:0; font-size:15px;">
+                    <input type="checkbox" name="card_{idx}_confirmar" value="1" checked class="card-confirmar-checkbox" style="width:auto; margin:0;">
+                    <span style="color:{status_color}; font-size:18px;">{status_icon}</span>
+                    <strong>{result.get('aluno_nome', '?')}</strong>
+                </label>
+            </div>
+            <button type="button" data-toggle-card class="btn" style="padding:4px 10px; font-size:12px; flex-shrink:0;">{toggle_label}</button>
+        </div>
+
+        <div class="lote-card-body" style="display:{body_default_display}; margin-top:12px;">
+            <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px 0;">Nº {result.get('aluno_numero') or '—'} · {result.get('aluno_codigo', '')} · foto: {nome_seguro}</p>
+            {avisos_html}
+            <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:14px; margin-top:10px;">
+                <div>
+                    <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Imagem processada</p>
+                    {preview_img}
+                </div>
+                <div>
+                    <p class="muted-line" style="font-size:11px; margin:0 0 4px 0;">Respostas (corrija se necessário)</p>
+                    <table style="width:100%; border-collapse:collapse; font-size:12px; background:var(--bg);">
+                        <thead><tr style="background:var(--bg-subtle);"><th style="padding:3px;">Q</th><th style="padding:3px;">A</th><th style="padding:3px;">B</th><th style="padding:3px;">C</th><th style="padding:3px;">D</th><th style="padding:3px;">∅</th></tr></thead>
+                        <tbody>{tabela_html}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+
+
+@app.get("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/{lote_id}/revisar", response_class=HTMLResponse)
+def revisar_lote_simulado(sim_id: int, app_id: int, lote_id: str):
+    """Depois que o lote termina de processar em segundo plano, mostra a tela de revisão
+    editável (igual à prova normal) — nada é salvo até o professor clicar em confirmar."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    job = FILAS_ESCANEAMENTO.get(lote_id)
+    if not job or not job["concluido"]:
+        return RedirectResponse(f"/escanear/status/{lote_id}", status_code=303)
+
+    conn = get_db()
+    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+    apl = conn.execute("SELECT a.*, t.nome AS turma_nome FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?", (app_id,)).fetchone()
+    conn.close()
+    if not sim or not apl:
+        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+    blocos_info = job["contexto"]["blocos_info"]
+    n_total_questoes = sum(b["n_questoes"] for b in blocos_info)
+
+    cards_html_parts = []
+    n_ok = n_warn = n_erro = 0
+    for idx, item in enumerate(job["itens"]):
+        r = item["resultado"] or {"success": False, "error": "Sem resultado.", "filename": item["filename"]}
+        r.setdefault("filename", item["filename"])
+        if not r.get("success"):
+            n_erro += 1
+            cards_html_parts.append(_render_card_erro(idx, r["filename"], r.get("error", "Erro desconhecido"), r.get("preview_base64")))
+        else:
+            if r.get("warnings") or r.get("duplicado") or r.get("ja_entregue"):
+                n_warn += 1
+            else:
+                n_ok += 1
+            cards_html_parts.append(_render_card_revisao_simulado(
+                idx, r["filename"], r, blocos_info,
+                ja_entregue=r.get("ja_entregue"), duplicata_lote=r.get("duplicado")
+            ))
+
+    del FILAS_ESCANEAMENTO[lote_id]  # já consumido, libera memória
+
+    if not cards_html_parts:
+        return HTMLResponse(render_page("Lote vazio", '<div class="empty">Nenhuma foto foi processada.</div>', active="simulados"))
+
+    resumo = f"""
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{len(job["itens"])}</div></div>
+            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
+            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
+        </div>
+    """
+    legenda = """
+        <div class="tip" style="font-size:12px;">
+            <strong>Como usar:</strong>
+            Cartões em <strong style="color:var(--red);">vermelho</strong> têm questão em branco ou marcação dupla — confira com atenção. Cartões em <strong style="color:var(--orange);">laranja</strong> têm avisos mais leves (marca fraca, entrega repetida). Cartões cinza não serão salvos (erro de leitura). Clique no nome pra expandir e ver a foto + corrigir. Ao final, clique em <strong>"Salvar todos confirmados"</strong>.
+        </div>
+    """
+    cards_html = "".join(cards_html_parts)
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Revisão do lote — {apl['turma_nome']}</h1>
+            <p class="subtitle">{sim['nome']}</p>
+        </div>
+        {resumo}
+        {legenda}
+        <form action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/confirmar" method="post">
+            <input type="hidden" name="n_questoes" value="{n_total_questoes}">
+            <div style="margin-bottom:10px; display:flex; gap:8px;">
+                <button type="button" id="btn-marcar-todos" class="btn" style="font-size:12px;">☑ Marcar todos</button>
+                <button type="button" id="btn-desmarcar-todos" class="btn" style="font-size:12px;">☐ Desmarcar todos</button>
+            </div>
+            {cards_html}
+            <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
+                <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
+                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn">📷 Escanear mais</a>
+                <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
+                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">Cards desmarcados NÃO serão salvos.</span>
+            </div>
+        </form>
+        <script>
+        document.getElementById('btn-marcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = true);
+        }});
+        document.getElementById('btn-desmarcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = false);
+        }});
+        document.addEventListener('click', e => {{
+            const btn = e.target.closest('[data-toggle-card]');
+            if (!btn) return;
+            const card = btn.closest('.lote-card');
+            const body = card.querySelector('.lote-card-body');
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'block';
+            btn.textContent = open ? '▼ Expandir' : '▲ Recolher';
+        }});
+        </script>
+    """
+    return HTMLResponse(render_page("Revisão do lote", content, active="simulados"))
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/{app_id}/escanear-lote/confirmar", response_class=HTMLResponse)
+async def confirmar_lote_simulado(sim_id: int, app_id: int, request: Request):
+    """Salva no banco todos os cards confirmados (checkbox marcado) do lote de simulado."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    form = await request.form()
+
+    conn = get_db()
+    apl = conn.execute("SELECT * FROM aplicacoes WHERE id = ?", (app_id,)).fetchone()
+    if not apl:
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+    questoes_ordem = conn.execute("""
+        SELECT sq.questao_id FROM simulado_questoes sq
+        JOIN simulado_blocos b ON b.id = sq.bloco_id
+        WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+    """, (sim_id,)).fetchall()
+    questao_ids = [q["questao_id"] for q in questoes_ordem]
+
+    confirmados_idx = set()
+    for key in form.keys():
+        if key.startswith("card_") and key.endswith("_confirmar"):
+            try:
+                confirmados_idx.add(int(key.split("_")[1]))
+            except (ValueError, IndexError):
+                continue
+
+    salvos = []
+    for idx in sorted(confirmados_idx):
+        aluno_id_str = form.get(f"card_{idx}_aluno_id")
+        if not aluno_id_str:
+            continue
+        try:
+            aluno_id = int(aluno_id_str)
+        except ValueError:
+            continue
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ? AND turma_id = ?", (aluno_id, apl["turma_id"])).fetchone()
+        if not aluno:
+            continue
+
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+        n_ok = 0
+        for q_num, q_id in enumerate(questao_ids, start=1):
+            letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
+            if letra in ("A", "B", "C", "D"):
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                    (app_id, aluno_id, q_id, letra)
+                )
+                n_ok += 1
+
+        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id)).fetchone()
+        if not existente:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (app_id, aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (app_id, aluno_id))
+        salvos.append({"nome": aluno["nome"], "n_respondidas": n_ok})
+
+    conn.commit()
+    conn.close()
+
+    linhas = "".join(f"<tr><td style='padding:5px 8px;'>{s['nome']}</td><td style='padding:5px 8px;text-align:center;'>{s['n_respondidas']}/{len(questao_ids)}</td></tr>" for s in salvos)
+    content = f"""
+        <div class="page-header"><h1>✅ Lote salvo</h1><p class="subtitle">{len(salvos)} cartão(ões) confirmado(s) e salvo(s)</p></div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:5px 8px;text-align:left;">Aluno</th><th style="padding:5px 8px;">Respondidas</th></tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+        <div style="display:flex;gap:10px;margin-top:20px;">
+            <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Escanear mais</a>
+            <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Lote salvo", content, active="simulados"))
+
+
+
+
+
+# ==========================================
+#  ESCANEAMENTO UNIVERSAL — SEM PRÉ-SELEÇÃO
+# ==========================================
+
+@app.get("/escanear", response_class=HTMLResponse)
+def escanear_universal_tela(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    content = """
+        <div class="page-header">
+            <h1>📷 Digitalizar cartão</h1>
+            <p class="subtitle">O sistema identifica automaticamente de qual atividade é o cartão.</p>
+        </div>
+
+        <div class="tip" style="margin-bottom:20px;">
+            <strong>Como usar:</strong>
+            <ul style="margin:8px 0 0 18px;">
+                <li>Tire a foto com boa iluminação, sem sombras</li>
+                <li>Inclua os 4 marcadores pretos dos cantos</li>
+                <li>O QR Code precisa estar legível</li>
+                <li>Funciona com cartões de <strong>provas normais</strong> e <strong>simulados</strong></li>
+            </ul>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:18px;margin-bottom:8px;">
+
+            <!-- Individual -->
+            <form id="form-single" action="/escanear" method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle);padding:18px;border-radius:8px;">
+                <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
+                <p style="font-size:13px;color:var(--text-muted);">Recomendado para correção ao vivo. Exibe tela de revisão antes de salvar.</p>
+                <label>Foto
+                    <input type="file" name="foto" accept="image/*" capture="environment" required>
+                </label>
+                <p style="font-size:11px;color:var(--text-muted);">No celular abre a câmera direto.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px;">Processar 1 foto</button>
+            </form>
+
+            <!-- Lote -->
+            <form id="form-lote" action="/escanear/lote" method="post" enctype="multipart/form-data"
+                  style="background:var(--bg-subtle);padding:18px;border-radius:8px;">
+                <h3 style="margin-top:0;">📁 Lote (várias de uma vez)</h3>
+                <p style="font-size:13px;color:var(--text-muted);">Processa múltiplos cartões automaticamente. Ideal quando já tem todas as fotos.</p>
+                <label>Fotos ou PDF
+                    <input type="file" name="fotos" accept="image/*,.pdf" multiple required>
+                </label>
+                <p style="font-size:11px;color:var(--text-muted);">Selecione múltiplas imagens ou um PDF.</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px;">Processar lote</button>
+            </form>
+
+        </div>
+
+        <!-- Overlay de loading -->
+        <div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);
+             z-index:9999;flex-direction:column;align-items:center;justify-content:center;gap:20px;">
+            <div style="width:64px;height:64px;border:6px solid rgba(255,255,255,0.2);
+                 border-top-color:#fff;border-radius:50%;animation:spin 0.9s linear infinite;"></div>
+            <div id="loading-msg" style="color:#fff;font-size:18px;font-weight:600;">⏳ Identificando cartão…</div>
+            <div style="color:rgba(255,255,255,0.7);font-size:13px;">Aguarde, não feche esta página.</div>
+        </div>
+        <style>@keyframes spin{{to{{transform:rotate(360deg);}}}}</style>
+        <script>
+        (function() {{
+            var overlay = document.getElementById('loading-overlay');
+            var msg = document.getElementById('loading-msg');
+            var fs = document.getElementById('form-single');
+            var fl = document.getElementById('form-lote');
+            if (fs) fs.addEventListener('submit', function() {{
+                msg.textContent = '⏳ Identificando cartão…';
+                overlay.style.display = 'flex';
+            }});
+            if (fl) fl.addEventListener('submit', function() {{
+                var n = fl.querySelector('input[type=file]').files.length;
+                msg.textContent = '⏳ Processando ' + n + ' cartão(ões)…';
+                overlay.style.display = 'flex';
+            }});
+        }})();
+        </script>
+    """
+    return render_page("Digitalizar cartão", content, active="aplicacoes")
+
+
+@app.post("/escanear", response_class=HTMLResponse)
+async def escanear_universal_post(foto: UploadFile = File(...)):
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    image_bytes = await foto.read()
+    if not image_bytes:
+        return HTMLResponse(render_page("Erro", '<p>Arquivo vazio.</p><a href="/escanear" class="btn">← Voltar</a>', active="aplicacoes"))
+
+    # Tentar ler o QR Code da imagem para identificar o tipo (12/08/2026: usa
+    # _decode_image_universal pra corrigir EXIF + _detectar_qr_robusto)
+    img, img_erro = _decode_image_universal(image_bytes, filename=foto.filename or "")
+    if img is None:
+        return HTMLResponse(render_page("Erro", f'<p>{img_erro or "Não foi possível abrir a imagem."}</p><a href="/escanear" class="btn">← Voltar</a>', active="aplicacoes"))
+
+    qr_data, _ = _detectar_qr_robusto(img)
+
+    def _render_erro(msg):
+        content = f"""
+            <div class="page-header"><h1>❌ Cartão não identificado</h1></div>
+            <div style="border:1px solid var(--red);background:var(--red-bg);padding:16px;border-radius:6px;color:var(--red);">
+                <strong>Problema:</strong> {msg}
+            </div>
+            <p style="margin-top:12px;">Verifique se o QR Code está visível e nítido na foto.</p>
+            <a href="/escanear" class="btn btn-primary" style="margin-top:12px;">📷 Tentar novamente</a>
+        """
+        return HTMLResponse(render_page("Não identificado", content, active="aplicacoes"))
+
+    if not qr_data:
+        return _render_erro("QR Code não encontrado na imagem.")
+
+    # === PROVA NORMAL: CR:aluno_id:aplicacao_id ===
+    if qr_data.startswith("CR:"):
+        try:
+            parts = qr_data.split(":")
+            aluno_id = int(parts[1])
+            aplicacao_id = int(parts[2])
+        except Exception:
+            return _render_erro(f"QR Code com formato inválido: '{qr_data}'")
+
+        conn = get_db()
+        try:
+            apl = conn.execute("""
+                SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome
+                FROM aplicacoes a JOIN provas p ON p.id = a.prova_id
+                JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+            """, (aplicacao_id,)).fetchone()
+            if not apl:
+                return _render_erro(f"Aplicação {aplicacao_id} não encontrada.")
+
+            questoes = conn.execute(
+                "SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem",
+                (apl["prova_id"],)
+            ).fetchall()
+            n_questoes = len(questoes)
+            questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+            aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+            if not aluno:
+                return _render_erro(f"Aluno {aluno_id} não encontrado.")
+            ja_entregue = conn.execute(
+                "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+                (aplicacao_id, aluno_id)
+            ).fetchone()
+        finally:
+            conn.close()
+
+        # Processar com OMR normal
+        result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_questoes, filename=foto.filename or "", questoes_info=questoes_info)
+        if not result["success"]:
+            return _render_erro(result.get("error", "Erro no processamento."))
+
+        # Montar tela de revisão (reaproveita a mesma lógica do escanear normal)
+        answers = result["answers"]
+        qs_com_aviso = {}
+        import re as _re
+        for w in result.get("warnings", []):
+            m = _re.match(r"Q(\d+)", w)
+            if m:
+                qs_com_aviso[int(m.group(1))] = w
+
+        rows_html = ""
+        for q_num in range(1, n_questoes + 1):
+            detected = answers.get(q_num)
+            tem_aviso = q_num in qs_com_aviso
+            row_bg = ' style="background:var(--orange-bg);"' if tem_aviso else ""
+            cells = ""
+            for letra in ["A", "B", "C", "D"]:
+                checked = " checked" if detected == letra else ""
+                cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
+            em_branco = " checked" if detected is None else ""
+            cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco}></td>'
+            if tem_aviso:
+                marca = f'<span style="color:var(--orange);font-weight:600;">⚠️ {qs_com_aviso[q_num]}</span>'
+            else:
+                marca = f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>'
+            rows_html += f'<tr{row_bg}><td style="padding:5px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 8px;">{marca}</td></tr>'
+
+        avisos_html = ""
+        if result.get("warnings"):
+            items_w = "".join(f"<li>{w}</li>" for w in result["warnings"])
+            avisos_html = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ {len(result["warnings"])} questão(ões) com marcação dupla ou ambígua:</strong><ul style="margin:6px 0 0 18px;">{items_w}</ul></div>'
+
+        override_aviso = ""
+        if ja_entregue:
+            override_aviso = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ Atenção:</strong> entrega anterior registrada em {ja_entregue["finalizada_em"]}. Confirmar irá <strong>sobrescrever</strong>.</div>'
+
+        preview_img = f'<img src="data:image/jpeg;base64,{result["preview_base64"]}" style="max-width:100%;border:1px solid var(--border);border-radius:6px;">' if result.get("preview_base64") else ""
+
+        content = f"""
+            <div class="page-header">
+                <h1>Revisão da leitura</h1>
+                <p class="subtitle">{apl['prova_titulo']} · {apl['turma_nome']} · <strong>{aluno['nome']}</strong></p>
+            </div>
+            {avisos_html}{override_aviso}
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:24px;align-items:flex-start;">
+                <div>
+                    <h2 style="margin-top:0;">Imagem processada</h2>
+                    {preview_img}
+                </div>
+                <div>
+                    <h2 style="margin-top:0;">Respostas detectadas</h2>
+                    <p style="font-size:13px;color:var(--text-muted);">Corrija antes de salvar se necessário.</p>
+                    <form action="/aplicacoes/{aplicacao_id}/escanear/confirmar" method="post">
+                        <input type="hidden" name="aluno_id" value="{aluno_id}">
+                        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                            <thead><tr style="background:var(--bg-subtle);">
+                                <th style="padding:5px;">Q</th>
+                                <th style="padding:5px;">A</th><th style="padding:5px;">B</th>
+                                <th style="padding:5px;">C</th><th style="padding:5px;">D</th>
+                                <th style="padding:5px;">∅</th><th style="padding:5px;">Status</th>
+                            </tr></thead>
+                            <tbody>{rows_html}</tbody>
+                        </table>
+                        <div style="display:flex;gap:10px;margin-top:16px;">
+                            <button type="submit" class="btn btn-primary">✓ Confirmar e salvar</button>
+                            <a href="/escanear" class="btn">📷 Próximo cartão</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Revisão", content, active="aplicacoes"))
+
+    # === SIMULADO: SIM:aluno_id:sim_id ===
+    elif qr_data.startswith("SIM:"):
+        try:
+            parts = qr_data.split(":")
+            aluno_id = int(parts[1])
+            sim_id = int(parts[2])
+        except Exception:
+            return _render_erro(f"QR Code de simulado com formato inválido: '{qr_data}'")
+
+        conn = get_db()
+        try:
+            sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+            if not sim:
+                return _render_erro(f"Simulado {sim_id} não encontrado.")
+
+            aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+            if not aluno:
+                return _render_erro(f"Aluno {aluno_id} não encontrado.")
+
+            # Buscar aplicação do simulado para a turma do aluno
+            apl = conn.execute("""
+                SELECT a.id FROM aplicacoes a
+                WHERE a.turma_id = ? AND a.titulo LIKE ?
+                ORDER BY a.id DESC LIMIT 1
+            """, (aluno["turma_id"], f"%[SIM-{sim_id}]%")).fetchone()
+            if not apl:
+                return _render_erro(f"Nenhuma aplicação do simulado {sim_id} encontrada para a turma do aluno.")
+            app_id = apl["id"]
+
+            blocos = conn.execute("""
+                SELECT b.numero, d.nome AS disciplina_nome
+                FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+                WHERE b.simulado_id = ? ORDER BY b.numero
+            """, (sim_id,)).fetchall()
+            blocos_info = []
+            num_global = 0
+            for bloco in blocos:
+                blocos_info.append({"numero": bloco["numero"], "disciplina_nome": bloco["disciplina_nome"],
+                                     "q_inicio": num_global + 1, "n_questoes": 10})
+                num_global += 10
+
+            questoes_ordem = conn.execute("""
+                SELECT sq.questao_id FROM simulado_questoes sq
+                JOIN simulado_blocos b ON b.id = sq.bloco_id
+                WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+            """, (sim_id,)).fetchall()
+            questao_ids = [q["questao_id"] for q in questoes_ordem]
+
+            ja_entregue = conn.execute(
+                "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+                (app_id, aluno_id)
+            ).fetchone()
+        finally:
+            conn.close()
+
+        result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, foto.filename or "")
+        if not result["success"]:
+            return _render_erro(result.get("error", "Erro no processamento."))
+
+        answers = result["answers"]
+        qs_aviso = {}
+        import re as _re2
+        for w in result.get("warnings", []):
+            m = _re2.match(r"Q(\d+)", w)
+            if m:
+                qs_aviso[int(m.group(1))] = w
+
+        rows_por_bloco = {b["numero"]: list(range(b["q_inicio"], b["q_inicio"] + b["n_questoes"])) for b in blocos_info}
+        tabela_html = ""
+        for bloco in blocos_info:
+            tabela_html += f'<tr style="background:var(--accent-bg);"><td colspan="7" style="padding:5px 8px;font-weight:700;color:var(--accent);">Bloco {bloco["numero"]} — {bloco["disciplina_nome"]}</td></tr>'
+            for q_num in rows_por_bloco[bloco["numero"]]:
+                detected = answers.get(q_num)
+                tem_aviso = q_num in qs_aviso
+                row_bg = ' style="background:var(--orange-bg);"' if tem_aviso else ""
+                cells = ""
+                for letra in ["A", "B", "C", "D"]:
+                    checked = " checked" if detected == letra else ""
+                    cells += f'<td style="text-align:center;"><input type="radio" name="q_{q_num}" value="{letra}"{checked}></td>'
+                em_branco = " checked" if detected is None else ""
+                cells += f'<td style="text-align:center;background:var(--bg-subtle);"><input type="radio" name="q_{q_num}" value=""{em_branco}></td>'
+                marca = f'<span style="color:var(--orange);font-weight:600;">⚠️ {qs_aviso[q_num]}</span>' if tem_aviso else (f"<strong>{detected}</strong>" if detected else '<span style="color:var(--text-muted);">Em branco</span>')
+                tabela_html += f'<tr{row_bg}><td style="padding:4px 8px;"><strong>Q{q_num}</strong></td>{cells}<td style="font-size:11px;padding:0 6px;">{marca}</td></tr>'
+
+        avisos_html = ""
+        if result.get("warnings"):
+            items_w = "".join(f"<li>{w}</li>" for w in result["warnings"])
+            avisos_html = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ {len(result["warnings"])} questão(ões) com marcação dupla ou ambígua:</strong><ul style="margin:6px 0 0 18px;">{items_w}</ul></div>'
+
+        override_aviso = ""
+        if ja_entregue:
+            override_aviso = f'<div style="border:1px solid var(--orange);background:var(--orange-bg);padding:12px;border-radius:6px;margin-bottom:16px;color:var(--orange);"><strong>⚠️ Entrega anterior:</strong> {ja_entregue["finalizada_em"]}. Confirmar irá sobrescrever.</div>'
+
+        preview_img = f'<img src="data:image/jpeg;base64,{result["preview_base64"]}" style="max-width:100%;border:1px solid var(--border);border-radius:6px;">' if result.get("preview_base64") else ""
+
+        content = f"""
+            <div class="page-header">
+                <h1>Revisão da leitura</h1>
+                <p class="subtitle">{sim['nome']} · <strong>{aluno['nome']}</strong></p>
+            </div>
+            {avisos_html}{override_aviso}
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:24px;align-items:flex-start;">
+                <div><h2 style="margin-top:0;">Imagem processada</h2>{preview_img}</div>
+                <div>
+                    <h2 style="margin-top:0;">Respostas detectadas</h2>
+                    <form action="/simulados/{sim_id}/aplicacoes/{app_id}/escanear-confirmar" method="post">
+                        <input type="hidden" name="aluno_id" value="{aluno_id}">
+                        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                            <thead><tr style="background:var(--bg-subtle);">
+                                <th style="padding:4px;">Q</th>
+                                <th style="padding:4px;">A</th><th style="padding:4px;">B</th>
+                                <th style="padding:4px;">C</th><th style="padding:4px;">D</th>
+                                <th style="padding:4px;">∅</th><th style="padding:4px;">Status</th>
+                            </tr></thead>
+                            <tbody>{tabela_html}</tbody>
+                        </table>
+                        <div style="display:flex;gap:10px;margin-top:16px;">
+                            <button type="submit" class="btn btn-primary">✓ Confirmar e salvar</button>
+                            <a href="/escanear" class="btn">📷 Próximo cartão</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        """
+        return HTMLResponse(render_page("Revisão", content, active="aplicacoes"))
+
+    else:
+        return _render_erro(f"QR Code não reconhecido: '{qr_data[:40]}'")
+
+
+@app.post("/escanear/lote", response_class=HTMLResponse)
+async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
+    """Detecta automaticamente se cada cartão é de prova normal ou simulado (via QR),
+    processa e monta uma tela de revisão única — igual às outras telas de lote, nada é
+    salvo até o professor clicar em confirmar."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    import cv2, numpy as np
+
+    all_files = []
+    for f in fotos:
+        data = await f.read()
+        if f.filename and f.filename.lower().endswith(".pdf"):
+            try:
+                from pdf2image import convert_from_bytes, pdfinfo_from_bytes
+                info = pdfinfo_from_bytes(data)
+                n_paginas = info.get("Pages", 1)
+                for i in range(1, n_paginas + 1):
+                    page = convert_from_bytes(data, dpi=300, first_page=i, last_page=i)[0]
+                    buf = BytesIO()
+                    page.save(buf, format="JPEG", quality=95)
+                    all_files.append((f"{f.filename}_p{i}.jpg", buf.getvalue()))
+                    del page
+            except Exception:
+                all_files.append((f.filename or "arquivo", data))
+        else:
+            all_files.append((f.filename or "foto.jpg", data))
+
+    if not all_files:
+        return HTMLResponse(render_page("Lote vazio", '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
+
+    cards_html_parts = []
+    n_ok = n_warn = n_erro = 0
+    alunos_no_lote = set()
+    idx = 0
+
+    conn = get_db()
+    try:
+        for filename, image_bytes in all_files:
+            # 12/08/2026: usa _decode_image_universal (EXIF) + _detectar_qr_robusto
+            img, img_erro = _decode_image_universal(image_bytes, filename=filename)
+            if img is None:
+                cards_html_parts.append(_render_card_erro(idx, filename, img_erro or "Imagem inválida."))
+                n_erro += 1; idx += 1
+                continue
+
+            qr_data, _ = _detectar_qr_robusto(img)
+
+            if not qr_data:
+                cards_html_parts.append(_render_card_erro(idx, filename, "QR Code não encontrado."))
+                n_erro += 1; idx += 1
+                continue
+
+            # === PROVA NORMAL: CR:aluno_id:aplicacao_id ===
+            if qr_data.startswith("CR:"):
+                try:
+                    parts = qr_data.split(":")
+                    aluno_id = int(parts[1])
+                    aplicacao_id = int(parts[2])
+                except Exception as e:
+                    cards_html_parts.append(_render_card_erro(idx, filename, f"QR inválido: {e}"))
+                    n_erro += 1; idx += 1
+                    continue
+
+                apl = conn.execute("""
+                    SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome
+                    FROM aplicacoes a JOIN provas p ON p.id = a.prova_id
+                    JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?
+                """, (aplicacao_id,)).fetchone()
+                aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+                if not apl or not aluno:
+                    cards_html_parts.append(_render_card_erro(idx, filename, "Aplicação ou aluno não encontrado."))
+                    n_erro += 1; idx += 1
+                    continue
+
+                questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
+                n_q = conn.execute("SELECT COUNT(*) FROM prova_questoes WHERE prova_id = ?", (apl["prova_id"],)).fetchone()[0]
+                result = await asyncio.to_thread(_processar_cartao_resposta, image_bytes, n_q, filename=filename, questoes_info=questoes_info)
+
+                if not result["success"]:
+                    cards_html_parts.append(_render_card_erro(idx, filename, result.get("error", "Erro"), result.get("preview_base64")))
+                    n_erro += 1; idx += 1
+                    continue
+
+                ja_entregue_row = conn.execute("SELECT finalizada_em FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (aplicacao_id, aluno_id)).fetchone()
+                duplicata = aluno_id in alunos_no_lote
+                alunos_no_lote.add(aluno_id)
+
+                if result.get("warnings") or duplicata or ja_entregue_row:
+                    n_warn += 1
+                else:
+                    n_ok += 1
+
+                cards_html_parts.append(
+                    f'<input type="hidden" name="card_{idx}_tipo" value="prova">'
+                    f'<input type="hidden" name="card_{idx}_ctx_aplicacao_id" value="{aplicacao_id}">'
+                    + _render_card_revisao_lote(idx, filename, aluno, result, n_q,
+                                                 ja_entregue=ja_entregue_row, duplicata_lote=duplicata,
+                                                 questoes_info=questoes_info)
+                )
+                idx += 1
+
+            # === SIMULADO: SIM:aluno_id:sim_id ===
+            elif qr_data.startswith("SIM:"):
+                try:
+                    parts = qr_data.split(":")
+                    aluno_id = int(parts[1])
+                    sim_id = int(parts[2])
+                except Exception as e:
+                    cards_html_parts.append(_render_card_erro(idx, filename, f"QR simulado inválido: {e}"))
+                    n_erro += 1; idx += 1
+                    continue
+
+                sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
+                aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+                if not sim or not aluno:
+                    cards_html_parts.append(_render_card_erro(idx, filename, "Simulado ou aluno não encontrado."))
+                    n_erro += 1; idx += 1
+                    continue
+
+                apl_sim = conn.execute("SELECT id FROM aplicacoes WHERE turma_id=? AND titulo LIKE ? ORDER BY id DESC LIMIT 1",
+                                       (aluno["turma_id"], f"%[SIM-{sim_id}]%")).fetchone()
+                if not apl_sim:
+                    cards_html_parts.append(_render_card_erro(idx, filename, "Aplicação do simulado não encontrada para a turma do aluno."))
+                    n_erro += 1; idx += 1
+                    continue
+                app_id = apl_sim["id"]
+
+                blocos = conn.execute(
+                    "SELECT b.numero, d.nome AS disciplina_nome FROM simulado_blocos b JOIN disciplinas d ON d.id=b.disciplina_id WHERE b.simulado_id=? ORDER BY b.numero",
+                    (sim_id,)
+                ).fetchall()
+                blocos_info = []
+                ng = 0
+                for b in blocos:
+                    blocos_info.append({"numero": b["numero"], "disciplina_nome": b["disciplina_nome"], "q_inicio": ng + 1, "n_questoes": 10})
+                    ng += 10
+
+                result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, filename)
+                if not result["success"]:
+                    cards_html_parts.append(_render_card_erro(idx, filename, result.get("error", "Erro"), result.get("preview_base64")))
+                    n_erro += 1; idx += 1
+                    continue
+
+                ja_entregue_row = conn.execute("SELECT id FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id)).fetchone()
+                duplicata = aluno_id in alunos_no_lote
+                alunos_no_lote.add(aluno_id)
+
+                result["aluno_nome"] = aluno["nome"]
+                result["aluno_numero"] = aluno["numero"]
+                result["aluno_codigo"] = aluno["codigo_unico"]
+
+                if result.get("warnings") or duplicata or ja_entregue_row:
+                    n_warn += 1
+                else:
+                    n_ok += 1
+
+                cards_html_parts.append(
+                    f'<input type="hidden" name="card_{idx}_tipo" value="simulado">'
+                    f'<input type="hidden" name="card_{idx}_ctx_aplicacao_id" value="{app_id}">'
+                    f'<input type="hidden" name="card_{idx}_ctx_sim_id" value="{sim_id}">'
+                    + _render_card_revisao_simulado(idx, filename, result, blocos_info,
+                                                     ja_entregue=ja_entregue_row, duplicata_lote=duplicata)
+                )
+                idx += 1
+            else:
+                cards_html_parts.append(_render_card_erro(idx, filename, f"QR não reconhecido: '{qr_data[:30]}'"))
+                n_erro += 1; idx += 1
+    finally:
+        conn.close()
+
+    if not cards_html_parts:
+        return HTMLResponse(render_page("Lote vazio", '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
+
+    resumo = f"""
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
+            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{idx}</div></div>
+            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
+            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
+            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
+        </div>
+    """
+    legenda = """
+        <div class="tip" style="font-size:12px;">
+            <strong>Como usar:</strong>
+            Essa tela detecta sozinha se cada cartão é de prova normal ou simulado. Cartões em <strong style="color:var(--red);">vermelho</strong> têm questão em branco ou marcação ambígua/dupla. Cartões em <strong style="color:var(--orange);">laranja</strong> têm avisos mais leves. Cartões cinza (erro) NÃO serão salvos. Clique no nome pra expandir e ver a foto + corrigir. Ao final, clique em <strong>"Salvar todos confirmados"</strong> — nada é gravado antes disso.
+        </div>
+    """
+    cards_html = "".join(cards_html_parts)
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Revisão do lote (universal)</h1>
+            <p class="subtitle">Provas normais e simulados detectados automaticamente pelo QR Code</p>
+        </div>
+        {resumo}
+        {legenda}
+        <form action="/escanear/lote/confirmar" method="post">
+            <div style="margin-bottom:10px; display:flex; gap:8px;">
+                <button type="button" id="btn-marcar-todos" class="btn" style="font-size:12px;">☑ Marcar todos</button>
+                <button type="button" id="btn-desmarcar-todos" class="btn" style="font-size:12px;">☐ Desmarcar todos</button>
+            </div>
+            {cards_html}
+            <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
+                <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
+                <a href="/escanear" class="btn">📷 Escanear mais</a>
+                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">Cards desmarcados NÃO serão salvos.</span>
+            </div>
+        </form>
+        <script>
+        document.getElementById('btn-marcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = true);
+        }});
+        document.getElementById('btn-desmarcar-todos').addEventListener('click', () => {{
+            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = false);
+        }});
+        document.addEventListener('click', e => {{
+            const btn = e.target.closest('[data-toggle-card]');
+            if (!btn) return;
+            const card = btn.closest('.lote-card');
+            const body = card.querySelector('.lote-card-body');
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'block';
+            btn.textContent = open ? '▼ Expandir' : '▲ Recolher';
+        }});
+        </script>
+    """
+    return HTMLResponse(render_page("Revisão do lote", content, active="aplicacoes"))
+
+
+@app.post("/escanear/lote/confirmar", response_class=HTMLResponse)
+async def confirmar_lote_universal(request: Request):
+    """Salva no banco os cards confirmados do lote universal (mistura de provas e simulados)."""
+    prof = _current_prof_ctx.get()
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    form = await request.form()
+    confirmados_idx = set()
+    for key in form.keys():
+        if key.startswith("card_") and key.endswith("_confirmar"):
+            try:
+                confirmados_idx.add(int(key.split("_")[1]))
+            except (ValueError, IndexError):
+                continue
+
+    conn = get_db()
+    salvos = []
+    for idx in sorted(confirmados_idx):
+        tipo = form.get(f"card_{idx}_tipo")
+        aluno_id_str = form.get(f"card_{idx}_aluno_id")
+        aplicacao_id_str = form.get(f"card_{idx}_ctx_aplicacao_id")
+        if not tipo or not aluno_id_str or not aplicacao_id_str:
+            continue
+        try:
+            aluno_id = int(aluno_id_str)
+            aplicacao_id = int(aplicacao_id_str)
+        except ValueError:
+            continue
+        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+        if not aluno:
+            continue
+
+        if tipo == "prova":
+            apl = conn.execute("SELECT prova_id FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
+            if not apl:
+                continue
+            questoes = conn.execute(
+                "SELECT questao_id FROM prova_questoes WHERE prova_id = ? ORDER BY ordem", (apl["prova_id"],)
+            ).fetchall()
+        else:
+            sim_id_str = form.get(f"card_{idx}_ctx_sim_id")
+            if not sim_id_str:
+                continue
+            questoes = conn.execute("""
+                SELECT sq.questao_id FROM simulado_questoes sq
+                JOIN simulado_blocos b ON b.id = sq.bloco_id
+                WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
+            """, (int(sim_id_str),)).fetchall()
+        questao_ids = [q["questao_id"] for q in questoes]
+
+        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
+        n_ok = 0
+        for q_num, q_id in enumerate(questao_ids, start=1):
+            letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
+            if letra in ("A", "B", "C", "D"):
+                conn.execute(
+                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
+                    (aplicacao_id, aluno_id, q_id, letra)
+                )
+                n_ok += 1
+
+        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id)).fetchone()
+        if not existente:
+            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (aplicacao_id, aluno_id))
+        else:
+            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
+        salvos.append({"nome": aluno["nome"], "n_respondidas": n_ok, "total": len(questao_ids)})
+
+    conn.commit()
+    conn.close()
+
+    linhas = "".join(
+        f"<tr><td style='padding:5px 8px;'>{s['nome']}</td><td style='padding:5px 8px;text-align:center;'>{s['n_respondidas']}/{s['total']}</td></tr>"
+        for s in salvos
+    )
+    content = f"""
+        <div class="page-header"><h1>✅ Lote salvo</h1><p class="subtitle">{len(salvos)} cartão(ões) confirmado(s) e salvo(s)</p></div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:5px 8px;text-align:left;">Aluno</th><th style="padding:5px 8px;">Respondidas</th></tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+        <div style="margin-top:20px;"><a href="/escanear" class="btn btn-primary">📷 Escanear mais</a></div>
+    """
+    return HTMLResponse(render_page("Lote salvo", content, active="aplicacoes"))
