@@ -1635,40 +1635,62 @@ def home(request: Request):
     conn.close()
 
     # ----- HTML -----
-    # Grid de atalhos tipo "badge" pra tela inicial (24/08/2026: agora é a tela inicial
-    # sempre — antes só aparecia no celular; a home foi simplificada pra saudação + grid +
-    # aplicações abertas, tirando os blocos de Acervo/Painel/estatísticas). Mesmos destinos e
-    # ícones do menu lateral, respeitando
+    # Grid de atalhos tipo "badge" pra tela inicial, agrupado em seções nomeadas (com uma
+    # cor de destaque por grupo) em vez de um grid único e monótono — 24/08/2026, revisão
+    # depois de feedback de que a versão anterior ficou genérica/sem hierarquia.
     is_gestor = bool(prof and prof.get("is_gestor"))
-    badges_config = [
-        ("✏️", "Nova questão", "/questoes/nova", True),
-        ("📝", "Atividades", "/provas", True),
-        ("📤", "Aplicar", "/aplicacoes/nova", True),
-        ("📋", "Minhas aplic.", "/minhas-aplicacoes", True),
-        ("📷", "Digitalizar", "/escanear", True),
-        ("📊", "Simulados", "/simulados", True),
-        ("📚", "Disciplinas", "/disciplinas", is_admin),
-        ("🎯", "Habilidades", "/habilidades", is_admin),
-        ("👥", "Turmas", "/turmas", is_admin),
-        ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
-        ("📈", "Análises", "/analises-pedagogicas", is_admin or is_gestor),
-        ("👤", "Usuários", "/admin/usuarios", is_admin),
+    grupos_config = [
+        ("Ação rápida", "#2563eb", [
+            ("✏️", "Nova questão", "/questoes/nova", True),
+            ("📝", "Atividades", "/provas", True),
+            ("📤", "Aplicar", "/aplicacoes/nova", True),
+            ("📋", "Minhas aplic.", "/minhas-aplicacoes", True),
+            ("📷", "Digitalizar", "/escanear", True),
+            ("📊", "Simulados", "/simulados", True),
+        ]),
+        ("Banco", "#16a34a", [
+            ("📚", "Disciplinas", "/disciplinas", is_admin),
+            ("🎯", "Habilidades", "/habilidades", is_admin),
+            ("👥", "Turmas", "/turmas", is_admin),
+        ]),
+        ("Gestão", "#7c3aed", [
+            ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
+            ("📈", "Análises", "/analises-pedagogicas", is_admin or is_gestor),
+            ("👤", "Usuários", "/admin/usuarios", is_admin),
+        ]),
     ]
-    badges_html = "".join(
-        f'<a href="{href}" class="mobile-badge"><span class="mobile-badge-icon">{icone}</span><span class="mobile-badge-label">{label}</span></a>'
-        for icone, label, href, visivel in badges_config if visivel
-    )
+    grupos_html = ""
+    for titulo_grupo, cor_grupo, itens in grupos_config:
+        itens_visiveis = [it for it in itens if it[3]]
+        if not itens_visiveis:
+            continue
+        badges_grupo = "".join(
+            f'<a href="{href}" class="mobile-badge" style="--badge-accent:{cor_grupo};"><span class="mobile-badge-icon">{icone}</span><span class="mobile-badge-label">{label}</span></a>'
+            for icone, label, href, _ in itens_visiveis
+        )
+        grupos_html += f"""
+        <div class="mobile-launcher-group">
+            <div class="mobile-launcher-group-title" style="color:{cor_grupo};">{titulo_grupo}</div>
+            <div class="mobile-launcher-grid">{badges_grupo}</div>
+        </div>"""
+
     mobile_launcher_html = f"""
         <div class="mobile-launcher">
-            <div class="mobile-launcher-grid">
-                {badges_html}
-            </div>
+            {grupos_html}
         </div>
         <style>
         .mobile-launcher {{
             display: block;
             margin: 4px 0 28px 0;
             max-width: 900px;
+        }}
+        .mobile-launcher-group {{ margin-bottom: 18px; }}
+        .mobile-launcher-group-title {{
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin-bottom: 8px;
         }}
         .mobile-launcher-grid {{
             display: grid;
@@ -1681,25 +1703,25 @@ def home(request: Request):
             align-items: center;
             justify-content: center;
             gap: 8px;
-            padding: 20px 10px;
+            padding: 18px 10px;
             background: var(--bg-subtle);
             border: 1px solid var(--border);
-            border-radius: 14px;
+            border-top: 3px solid var(--badge-accent, var(--border));
+            border-radius: 12px;
             text-decoration: none;
             color: inherit;
             text-align: center;
-            transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+            transition: transform 0.12s ease, box-shadow 0.12s ease;
         }}
         .mobile-badge:hover {{
             transform: translateY(-2px);
-            border-color: var(--accent);
             box-shadow: 0 4px 12px rgba(0,0,0,0.08);
         }}
-        .mobile-badge-icon {{ font-size: 28px; line-height: 1; }}
+        .mobile-badge-icon {{ font-size: 26px; line-height: 1; }}
         .mobile-badge-label {{ font-size: 12px; font-weight: 600; line-height: 1.25; }}
         @media (min-width: 640px) {{
-            .mobile-badge {{ padding: 22px 10px; }}
-            .mobile-badge-icon {{ font-size: 32px; }}
+            .mobile-badge {{ padding: 20px 10px; }}
+            .mobile-badge-icon {{ font-size: 30px; }}
             .mobile-badge-label {{ font-size: 13px; }}
         }}
         </style>
@@ -4518,7 +4540,7 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             medias_g = [e["media"] for e in grupo if e["media"] is not None]
             media_g = sum(medias_g) / len(medias_g) if medias_g else None
             saeb_g = _boletim_saeb_nivel(media_g)
-            n_adeq_avanc = sum(1 for e in grupo if e["saeb"] and e["saeb"]["key"] in ("adequado", "avancado"))
+            n_adeq_avanc = sum(1 for e in grupo if e["saeb"] and e["saeb"]["key"] in ("n3", "n4"))
             pct = round(n_adeq_avanc / len(grupo) * 100) if grupo else 0
             n_ret_g = sum(1 for e in grupo if e["risco_retencao"])
             n_apoio_g = sum(1 for e in grupo if e["apoio"])
@@ -4595,14 +4617,14 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
 
     # --- distribuição SAEB por disciplina (Português e Matemática) ---
     def dist_saeb_disciplina(disc):
-        dist = {"abaixo": 0, "basico": 0, "adequado": 0, "avancado": 0}
+        dist = {"n1": 0, "n2": 0, "n3": 0, "n4": 0}
         abaixo_lista = []
         for e in enriquecidos:
             v = e["notas"].get(disc)
             lvl = _boletim_saeb_nivel(v)
             if lvl:
                 dist[lvl["key"]] += 1
-                if lvl["key"] == "abaixo":
+                if lvl["key"] == "n1":
                     abaixo_lista.append((e["nome"], e["turma"], v))
         abaixo_lista.sort(key=lambda x: x[2])
         return dist, abaixo_lista
@@ -4938,11 +4960,11 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             {"boletimChart('ch-gap-genero','bar'," + gap_genero_labels_js + ",[{label:'Meninos',data:" + gap_genero_m_js + ",backgroundColor:'#38bdf8'},{label:'Meninas',data:" + gap_genero_f_js + ",backgroundColor:'#f472b6'}],{scales:{y:{max:10}}});" if tem_gap_genero else ""}
             {gap_anos_charts_js}
             boletimChart('ch-disc', 'bar', {disc_labels_js}, [{{ data: {disc_valores_js}, backgroundColor: {disc_cores_js} }}], {{scales:{{y:{{max:10}}}}}});
-            boletimChart('ch-saeb-pt', 'bar', ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
-                [{{ data: [{dist_pt["abaixo"]}, {dist_pt["basico"]}, {dist_pt["adequado"]}, {dist_pt["avancado"]}],
+            boletimChart('ch-saeb-pt', 'bar', ['N1 Insuf.', 'N2 Básico', 'N3 Adequado', 'N4 Avançado'],
+                [{{ data: [{dist_pt["n1"]}, {dist_pt["n2"]}, {dist_pt["n3"]}, {dist_pt["n4"]}],
                    backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}]);
-            boletimChart('ch-saeb-mt', 'bar', ['Abaixo', 'Básico', 'Adequado', 'Avançado'],
-                [{{ data: [{dist_mt["abaixo"]}, {dist_mt["basico"]}, {dist_mt["adequado"]}, {dist_mt["avancado"]}],
+            boletimChart('ch-saeb-mt', 'bar', ['N1 Insuf.', 'N2 Básico', 'N3 Adequado', 'N4 Avançado'],
+                [{{ data: [{dist_mt["n1"]}, {dist_mt["n2"]}, {dist_mt["n3"]}, {dist_mt["n4"]}],
                    backgroundColor: ['#dc2626','#ea580c','#16a34a','#6366f1'] }}]);
             boletimChart('ch-emo', 'doughnut', ['Bem','Oscilando','Fragilizado'],
                 [{{ data: [{emo_count["bem"]}, {emo_count["oscilando"]}, {emo_count["fragilizado"]}],
