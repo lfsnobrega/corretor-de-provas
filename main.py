@@ -1359,8 +1359,10 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
-                {('<div class="sidebar-section">Análises</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análises pedagógicas")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
-                {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/analise", "boletim-analise", "📝", "Análise") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else (nav_item("/boletim/analise", "boletim-analise", "📝", "Análise (Conselho de Classe)") if professor else "")}
+                <div class="sidebar-section">Análise</div>
+                {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
+                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim") + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análises pedagógicas") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas (Simulado)")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
             {user_block}
@@ -1597,32 +1599,10 @@ def home(request: Request):
 
     conn = get_db()
 
-    # === ACERVO DA ESCOLA (global) ===
-    total_questoes = conn.execute("SELECT COUNT(*) AS c FROM questoes").fetchone()["c"]
-    total_disciplinas = conn.execute("SELECT COUNT(*) AS c FROM disciplinas").fetchone()["c"]
-    total_habilidades = conn.execute("SELECT COUNT(*) AS c FROM habilidades_bncc").fetchone()["c"]
-    total_turmas = conn.execute("SELECT COUNT(*) AS c FROM turmas").fetchone()["c"]
-    total_alunos = conn.execute("SELECT COUNT(*) AS c FROM alunos").fetchone()["c"]
-
-    # Questões por ano de escolaridade (6º a 9º)
-    questoes_por_ano = {}
-    for ano in ANOS:
-        n = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE ano = ?", (ano,)).fetchone()["c"]
-        questoes_por_ano[ano] = n
-    n_sem_ano = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE ano IS NULL OR ano = ''").fetchone()["c"]
-
-    # === SEU PAINEL (do prof; pra ADMIN, é o painel DA ESCOLA inteira) ===
+    # === APLICAÇÕES ABERTAS (do prof; pra ADMIN, é DA ESCOLA inteira) ===
     is_admin = bool(prof and prof["is_admin"])
     if is_admin:
-        # Admin: contadores globais (vê tudo)
-        minhas_provas = conn.execute("SELECT COUNT(*) AS c FROM provas").fetchone()["c"]
-        minhas_aplicacoes_abertas = conn.execute(
-            "SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 1"
-        ).fetchone()["c"]
-        minhas_aplicacoes_encerradas = conn.execute(
-            "SELECT COUNT(*) AS c FROM aplicacoes WHERE aberta = 0"
-        ).fetchone()["c"]
-        # Últimas 3 aplicações da ESCOLA (qualquer prof)
+        # Aplicações ABERTAS da ESCOLA (qualquer prof) — tela inicial mostra só essas (24/08/2026)
         minhas_ultimas = conn.execute("""
             SELECT a.id, a.modo, a.aberta,
                    COALESCE(a.titulo, p.titulo) AS titulo,
@@ -1634,21 +1614,11 @@ def home(request: Request):
             JOIN provas p ON p.id = a.prova_id
             JOIN turmas t ON t.id = a.turma_id
             LEFT JOIN professores prof ON prof.id = a.criada_por_professor_id
-            ORDER BY a.id DESC LIMIT 3
+            WHERE a.aberta = 1
+            ORDER BY a.id DESC LIMIT 10
         """).fetchall()
-        # Contagem de professores ativos (com login pelo menos uma vez)
-        total_profs = conn.execute("SELECT COUNT(*) AS c FROM professores").fetchone()["c"]
     else:
-        # Prof comum: só os dele
-        minhas_provas = conn.execute(
-            "SELECT COUNT(*) AS c FROM provas WHERE criada_por_professor_id = ?", (prof_id,)
-        ).fetchone()["c"]
-        minhas_aplicacoes_abertas = conn.execute(
-            "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 1", (prof_id,)
-        ).fetchone()["c"]
-        minhas_aplicacoes_encerradas = conn.execute(
-            "SELECT COUNT(*) AS c FROM aplicacoes WHERE criada_por_professor_id = ? AND aberta = 0", (prof_id,)
-        ).fetchone()["c"]
+        # Só as aplicações ABERTAS criadas por esse professor (24/08/2026)
         minhas_ultimas = conn.execute("""
             SELECT a.id, a.modo, a.aberta,
                    COALESCE(a.titulo, p.titulo) AS titulo,
@@ -1659,108 +1629,16 @@ def home(request: Request):
             FROM aplicacoes a
             JOIN provas p ON p.id = a.prova_id
             JOIN turmas t ON t.id = a.turma_id
-            WHERE a.criada_por_professor_id = ?
-            ORDER BY a.id DESC LIMIT 3
+            WHERE a.criada_por_professor_id = ? AND a.aberta = 1
+            ORDER BY a.id DESC LIMIT 10
         """, (prof_id,)).fetchall()
-        total_profs = 0  # não exibido pra prof comum
     conn.close()
 
     # ----- HTML -----
-    # Bloco "Acervo da Escola"
-    qpa_cards = "".join(
-        f'<div style="text-align:center; padding:10px; background:var(--bg-subtle); border-radius:6px;">'
-        f'<div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">{ano}</div>'
-        f'<div style="font-size:22px; font-weight:600; margin-top:4px;">{questoes_por_ano[ano]}</div>'
-        f'</div>'
-        for ano in ANOS
-    )
-    if n_sem_ano > 0:
-        qpa_cards += (
-            f'<div style="text-align:center; padding:10px; background:var(--bg-subtle); border-radius:6px;">'
-            f'<div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Sem ano</div>'
-            f'<div style="font-size:22px; font-weight:600; margin-top:4px;">{n_sem_ano}</div>'
-            f'</div>'
-        )
-
-    acervo_html = f"""
-        <h2 style="margin-top:24px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">📚 Acervo da Escola</h2>
-        <div style="display:flex; align-items:baseline; gap:12px; margin:8px 0 12px 0;">
-            <span style="font-size:36px; font-weight:700;">{total_questoes}</span>
-            <span style="font-size:14px; color:var(--text-muted);">questões disponíveis no banco coletivo</span>
-        </div>
-        <div style="display:grid; grid-template-columns: repeat({len(ANOS) + (1 if n_sem_ano > 0 else 0)}, 1fr); gap:8px; margin-bottom:14px;">
-            {qpa_cards}
-        </div>
-        <p style="font-size:12px; color:var(--text-muted); margin:0 0 18px 0;">
-            <strong>{total_disciplinas}</strong> disciplinas · <strong>{total_habilidades}</strong> habilidades BNCC · <strong>{total_turmas}</strong> turmas · <strong>{total_alunos}</strong> alunos cadastrados
-        </p>
-    """
-
-    # Bloco "Seu Painel" — labels adaptados pra admin/prof
-    label_provas = "Provas / tarefas (escola)" if is_admin else "Provas / tarefas criadas"
-    label_abertas = "Aplicações abertas (escola)" if is_admin else "Aplicações abertas"
-    label_encerradas = "Aplicações encerradas (escola)" if is_admin else "Aplicações encerradas"
-    painel_metrics = f"""
-        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; margin:8px 0 14px 0;">
-            <div class="status-card">
-                <div class="status-card-label">{label_provas}</div>
-                <div class="status-card-value">{minhas_provas}</div>
-            </div>
-            <div class="status-card status-card-success">
-                <div class="status-card-label">{label_abertas}</div>
-                <div class="status-card-value">{minhas_aplicacoes_abertas}</div>
-            </div>
-            <div class="status-card">
-                <div class="status-card-label">{label_encerradas}</div>
-                <div class="status-card-value">{minhas_aplicacoes_encerradas}</div>
-            </div>
-        </div>
-    """
-
-    # Últimas aplicações
-    if minhas_ultimas:
-        linhas = ""
-        for u in minhas_ultimas:
-            status_dot = '<span style="color:var(--green);">●</span>' if u["aberta"] else '<span style="color:var(--text-muted);">○</span>'
-            modo_label = "online" if u["modo"] == "online" else "impressa"
-            pct = (u["n_entregas"] / u["n_alunos"] * 100) if u["n_alunos"] > 0 else 0
-            autor_inline = f' · <span style="color:var(--purple);">por {u["criador_nome"] or "—"}</span>' if is_admin else ""
-            linhas += (
-                f'<a href="/aplicacoes/{u["id"]}" style="display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; text-decoration:none; color:inherit;">'
-                f'<div style="min-width:0; flex:1;">{status_dot} <strong>{u["titulo"]}</strong> <span style="font-size:12px; color:var(--text-muted);">· {u["turma_nome"]} · {modo_label}{autor_inline}</span></div>'
-                f'<div style="font-size:12px; color:var(--text-muted); flex-shrink:0;">{u["n_entregas"]}/{u["n_alunos"]} entregas ({pct:.0f}%)</div>'
-                f'</a>'
-            )
-        label_ultimas = "Últimas aplicações da escola:" if is_admin else "Últimas aplicações criadas por você:"
-        ultimas_html = f"""
-            <p style="font-size:12px; color:var(--text-muted); margin:14px 0 6px 0;">{label_ultimas}</p>
-            {linhas}
-        """
-    else:
-        ultimas_html = ""
-
-    titulo_painel = "🏫 Painel da Escola" if is_admin else "👤 Seu Painel"
-    painel_html = f"""
-        <h2 style="margin-top:24px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">{titulo_painel}</h2>
-        {painel_metrics}
-        {ultimas_html}
-    """
-
-    # Atalhos de ação rápida
-    acoes_html = f"""
-        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:24px; padding-top:18px; border-top:1px solid var(--border);">
-            <a href="/questoes/nova" class="btn btn-primary">+ Nova questão</a>
-            <a href="/provas/nova" class="btn">+ Nova prova/tarefa</a>
-            <a href="/aplicacoes/nova" class="btn">+ Nova aplicação</a>
-            <a href="/questoes" class="btn">Ver banco de questões</a>
-        </div>
-    """
-
-    # Grid de atalhos tipo "badge" pra tela inicial no celular — só aparece em telas
-    # estreitas (via media query no <style> abaixo, escopado só nessa página, sem
-    # mexer no app.css principal). No desktop o menu lateral já funciona bem, então
-    # esse grid fica escondido lá. Mesmos destinos e ícones do menu lateral, respeitando
-    # as mesmas regras de permissão (admin/gestor).
+    # Grid de atalhos tipo "badge" pra tela inicial (24/08/2026: agora é a tela inicial
+    # sempre — antes só aparecia no celular; a home foi simplificada pra saudação + grid +
+    # aplicações abertas, tirando os blocos de Acervo/Painel/estatísticas). Mesmos destinos e
+    # ícones do menu lateral, respeitando
     is_gestor = bool(prof and prof.get("is_gestor"))
     badges_config = [
         ("✏️", "Nova questão", "/questoes/nova", True),
@@ -1787,35 +1665,59 @@ def home(request: Request):
             </div>
         </div>
         <style>
-        .mobile-launcher {{ display: none; }}
-        @media (max-width: 768px) {{
-            .mobile-launcher {{
-                display: block;
-                margin: 4px 0 24px 0;
-            }}
-            .mobile-launcher-grid {{
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 10px;
-            }}
-            .mobile-badge {{
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                gap: 6px;
-                padding: 16px 6px;
-                background: var(--bg-subtle);
-                border-radius: 14px;
-                text-decoration: none;
-                color: inherit;
-                text-align: center;
-            }}
-            .mobile-badge-icon {{ font-size: 26px; line-height: 1; }}
-            .mobile-badge-label {{ font-size: 11px; font-weight: 600; line-height: 1.2; }}
+        .mobile-launcher {{
+            display: block;
+            margin: 4px 0 24px 0;
+            max-width: 560px;
         }}
+        .mobile-launcher-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }}
+        .mobile-badge {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 16px 6px;
+            background: var(--bg-subtle);
+            border-radius: 14px;
+            text-decoration: none;
+            color: inherit;
+            text-align: center;
+        }}
+        .mobile-badge-icon {{ font-size: 26px; line-height: 1; }}
+        .mobile-badge-label {{ font-size: 11px; font-weight: 600; line-height: 1.2; }}
         </style>
     """
+
+    # Aplicações abertas do professor — única lista mostrada na tela inicial, além do
+    # grid de atalhos (24/08/2026: home simplificada a pedido, tirando Acervo/Painel/stats).
+    if minhas_ultimas:
+        linhas = ""
+        for u in minhas_ultimas:
+            modo_label = "online" if u["modo"] == "online" else "impressa"
+            pct = (u["n_entregas"] / u["n_alunos"] * 100) if u["n_alunos"] > 0 else 0
+            autor_inline = f' · <span style="color:var(--purple);">por {u["criador_nome"] or "—"}</span>' if is_admin else ""
+            linhas += (
+                f'<a href="/aplicacoes/{u["id"]}" style="display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; text-decoration:none; color:inherit;">'
+                f'<div style="min-width:0; flex:1;"><span style="color:var(--green);">●</span> <strong>{u["titulo"]}</strong> <span style="font-size:12px; color:var(--text-muted);">· {u["turma_nome"]} · {modo_label}{autor_inline}</span></div>'
+                f'<div style="font-size:12px; color:var(--text-muted); flex-shrink:0;">{u["n_entregas"]}/{u["n_alunos"]} entregas ({pct:.0f}%)</div>'
+                f'</a>'
+            )
+        label_abertas_titulo = "📤 Aplicações abertas na escola" if is_admin else "📤 Suas aplicações abertas"
+        aplicacoes_abertas_html = f"""
+            <h2 style="margin-top:28px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">{label_abertas_titulo}</h2>
+            {linhas}
+        """
+    else:
+        label_vazio = "Nenhuma aplicação aberta na escola no momento." if is_admin else "Você não tem nenhuma aplicação aberta no momento."
+        aplicacoes_abertas_html = f"""
+            <h2 style="margin-top:28px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">📤 Aplicações abertas</h2>
+            <p style="color:var(--text-muted); font-size:13px;">{label_vazio}</p>
+        """
 
     content = f"""
         <div class="page-header">
@@ -1823,9 +1725,7 @@ def home(request: Request):
             <p class="subtitle" style="margin-top:0;">Veja seu panorama atualizado.</p>
         </div>
         {mobile_launcher_html}
-        {acervo_html}
-        {painel_html}
-        {acoes_html}
+        {aplicacoes_abertas_html}
     """
     return render_page("Início", content, active="home")
 
@@ -4399,16 +4299,20 @@ def _boletim_ano_da_turma(turma_nome):
 
 
 def _boletim_saeb_nivel(media):
-    """Escala SAEB: Abaixo do Básico <5,0 | Básico 5,0-6,4 | Adequado 6,5-7,9 | Avançado ≥8,0."""
+    """Escala SAEB padronizada em todo o sistema (24/08/2026) — mesmos cortes e linguagem
+    do Boletim Individual oficial: N1 Insuficiente 0-4,9 | N2 Básico 5,0-6,9 |
+    N3 Adequado 7,0-8,4 | N4 Avançado 8,5-10. Antes dashboard/comparativo usavam uma escala
+    diferente (5,0/6,5/8,0, sem numeração N1-N4) — unificado a pedido, pra não ter duas
+    linguagens de proficiência diferentes dentro do mesmo sistema."""
     if media is None:
         return None
     if media < 5:
-        return {"key": "abaixo", "label": "Abaixo do Básico", "color": "#dc2626"}
-    if media < 6.5:
-        return {"key": "basico", "label": "Básico", "color": "#ea580c"}
-    if media < 8:
-        return {"key": "adequado", "label": "Adequado", "color": "#16a34a"}
-    return {"key": "avancado", "label": "Avançado", "color": "#6366f1"}
+        return {"key": "n1", "label": "N1 — Insuficiente", "color": "#dc2626"}
+    if media < 7:
+        return {"key": "n2", "label": "N2 — Básico", "color": "#ea580c"}
+    if media < 8.5:
+        return {"key": "n3", "label": "N3 — Adequado", "color": "#16a34a"}
+    return {"key": "n4", "label": "N4 — Avançado", "color": "#6366f1"}
 
 
 def _boletim_possiveis_repetentes(conn, ano, turma_id=None):
@@ -5105,6 +5009,257 @@ def _boletim_dados_turma_multitrimestre(conn, ano, turma_id):
             "observacoes": observacoes,
         })
     return resultado
+
+
+def _boletim_turma_medias_disciplina(dados_turma):
+    """A partir do resultado de _boletim_dados_turma_multitrimestre, calcula a média da
+    TURMA em cada disciplina (média das médias finais dos alunos que têm nota numérica
+    naquela disciplina) — usado no comparativo Aluno × Turma do boletim individual (24/08/2026)."""
+    medias_turma = {}
+    for disc in BOLETIM_DISC_NUMERICAS:
+        vals = [e["medias_finais"].get(disc) for e in dados_turma if e["medias_finais"].get(disc) is not None]
+        medias_turma[disc] = sum(vals) / len(vals) if vals else None
+    return medias_turma
+
+
+def _boletim_ranking_faltas(dados_turma):
+    """Retorna {aluno_id: (posicao, total_turma)} rankeando por total de faltas acumulado
+    (menos faltas = melhor posição/nº menor), só considerando quem tem algum registro de
+    falta. Empates dividem a mesma posição (24/08/2026)."""
+    com_faltas = [(e["id"], sum(v for v in e["faltas_por_trim"].values() if v)) for e in dados_turma]
+    com_faltas.sort(key=lambda x: x[1])
+    ranking = {}
+    total = len(com_faltas)
+    pos_atual = 0
+    valor_anterior = None
+    for i, (aid, total_faltas) in enumerate(com_faltas):
+        if total_faltas != valor_anterior:
+            pos_atual = i + 1
+            valor_anterior = total_faltas
+        ranking[aid] = (pos_atual, total)
+    return ranking
+
+
+@app.get("/boletim/boletim-individual", response_class=HTMLResponse)
+def form_boletim_individual(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/boletim", status_code=303)
+
+    conn = get_db()
+    turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    conn.close()
+    opts_turmas = "".join(f'<option value="{t["id"]}" data-ano="{t["ano_letivo"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+
+    content = f"""
+        <div class="page-header">
+            <h1>🧾 Gerar Boletim Individual</h1>
+            <p class="subtitle">Gera o boletim de cada aluno com as notas acumuladas de todos os trimestres já importados (1º, 2º e/ou 3º), no modelo oficial da escola.</p>
+        </div>
+        <div class="tip">Escolha a turma e o ano. O boletim de <strong>todos os alunos</strong> da turma é gerado, um por página — use "Imprimir" no navegador e escolha "Salvar como PDF" pra baixar. Se quiser só um aluno específico, escolha depois de carregar a turma.</div>
+        <form action="/boletim/boletim-individual/gerar" method="get" target="_blank">
+            <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+                <label style="margin:0; flex:1 1 220px;">Turma
+                    <select name="turma_id" id="sel-turma-boletim" required onchange="document.getElementById('inp-ano-boletim').value = this.selectedOptions[0].dataset.ano;">
+                        <option value="">— selecione —</option>
+                        {opts_turmas}
+                    </select>
+                </label>
+                <label style="margin:0; flex:1 1 120px;">Ano
+                    <input type="number" name="ano" id="inp-ano-boletim" value="2026" required>
+                </label>
+            </div>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Gerar boletins da turma</button>
+            </div>
+        </form>
+    """
+    return render_page("Boletim Individual", content, active="boletim-individual")
+
+
+@app.get("/boletim/boletim-individual/gerar", response_class=HTMLResponse)
+def gerar_boletim_individual(ano: int, turma_id: int, aluno_id: Optional[int] = None):
+    prof = _current_prof_ctx.get()
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/boletim", status_code=303)
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/boletim/boletim-individual", status_code=303)
+
+    dados_turma_completo = _boletim_dados_turma_multitrimestre(conn, ano, turma_id)
+
+    # Faltas ACUMULADAS por disciplina (a função acima só soma por trimestre, perdendo
+    # a quebra por disciplina que o modelo do boletim precisa mostrar) — 24/08/2026.
+    aluno_ids_turma = [e["id"] for e in dados_turma_completo]
+    faltas_disc_por_aluno = {}
+    if aluno_ids_turma:
+        placeholders_f = ",".join("?" * len(aluno_ids_turma))
+        faltas_disc_rows = conn.execute(f"""
+            SELECT bf.aluno_id, d.nome AS disc, SUM(bf.faltas) AS total
+            FROM boletim_faltas bf JOIN disciplinas d ON d.id = bf.disciplina_id
+            WHERE bf.ano = ? AND bf.aluno_id IN ({placeholders_f})
+            GROUP BY bf.aluno_id, d.nome
+        """, [ano] + aluno_ids_turma).fetchall()
+        for r in faltas_disc_rows:
+            faltas_disc_por_aluno.setdefault(r["aluno_id"], {})[r["disc"]] = r["total"]
+    conn.close()
+
+    # Médias da turma e ranking de faltas usam sempre a turma INTEIRA, mesmo que a página
+    # gerada seja de um único aluno (comparativo precisa da turma toda como referência).
+    medias_turma = _boletim_turma_medias_disciplina(dados_turma_completo)
+    ranking_faltas = _boletim_ranking_faltas(dados_turma_completo)
+
+    dados_turma = dados_turma_completo
+    if aluno_id:
+        dados_turma = [e for e in dados_turma_completo if e["id"] == aluno_id]
+        if not dados_turma:
+            return HTMLResponse(_pagina_simples("Erro", "<p>Aluno não encontrado nessa turma.</p>"))
+
+    # Rótulo do período: reflete os trimestres que de fato têm dado importado (acumulado)
+    trimestres_com_dado = sorted({t for e in dados_turma for disc in e["notas"].values() for t in disc.keys()})
+    if not trimestres_com_dado:
+        periodo_label = f"{ano}"
+    elif len(trimestres_com_dado) == 1:
+        periodo_label = f"{trimestres_com_dado[0]}º Trimestre {ano}"
+    else:
+        periodo_label = f"{trimestres_com_dado[0]}º ao {trimestres_com_dado[-1]}º Trimestre {ano} (acumulado)"
+
+    paginas_html = ""
+    for i, e in enumerate(dados_turma):
+        saeb_geral = _boletim_saeb_nivel(e["media_geral"])
+        situacao_html = f'<span style="color:{saeb_geral["color"]}; font-weight:700;">{saeb_geral["label"]}</span>' if saeb_geral else "—"
+
+        linhas_disc = ""
+        for disc in BOLETIM_ORDEM_DISCIPLINAS:
+            trims = e["notas"].get(disc, {})
+            e_numerica = disc in BOLETIM_DISC_NUMERICAS
+            if e_numerica:
+                media_disc = e["medias_finais"].get(disc)
+                nivel = _boletim_saeb_nivel(media_disc)
+                nivel_html = f'<span style="color:{nivel["color"]}; font-weight:600;">{nivel["label"]}</span>' if nivel else "—"
+                nota_str = f"{media_disc:.1f}" if media_disc is not None else "—"
+            else:
+                # Educação Digital: categórica (PS/PA/PI) ou PD — pega o valor mais recente
+                nota_texto_disc = None
+                for t in sorted(trims.keys(), reverse=True):
+                    if trims[t][1]:
+                        nota_texto_disc = trims[t][1]
+                        break
+                nota_str = nota_texto_disc or "—"
+                nivel_html = '<span style="color:#16a34a; font-weight:600;">Proficiência Adequada</span>' if nota_texto_disc == "PS" else (
+                    '<span style="color:#ea580c; font-weight:600;">Proficiência Parcial</span>' if nota_texto_disc == "PA" else "—"
+                )
+            faltas_disc_str = "—" if not e_numerica else str(faltas_disc_por_aluno.get(e["id"], {}).get(disc, 0))
+            linhas_disc += f"""<tr>
+                <td style="padding:6px 8px; border-bottom:1px solid #eee;">{disc}</td>
+                <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center; font-weight:700;">{nota_str}</td>
+                <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;">{nivel_html}</td>
+                <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;">{faltas_disc_str}</td>
+            </tr>"""
+
+        # Comparativo Aluno × Turma (só disciplinas numéricas)
+        comparativo_html = ""
+        for disc in BOLETIM_DISC_NUMERICAS:
+            nota_aluno = e["medias_finais"].get(disc)
+            nota_turma = medias_turma.get(disc)
+            if nota_aluno is None:
+                continue
+            pct_aluno = min(100, (nota_aluno / 10) * 100)
+            pct_turma = min(100, (nota_turma / 10) * 100) if nota_turma is not None else 0
+            turma_str = f"{nota_turma:.1f}" if nota_turma is not None else "—"
+            comparativo_html += f"""
+            <div style="margin-bottom:10px;">
+                <div style="font-size:11px; font-weight:600; margin-bottom:3px;">{disc}</div>
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:2px;">
+                    <span style="font-size:10px; width:38px; color:#555;">Aluno</span>
+                    <div style="flex:1; background:#eee; border-radius:3px; height:10px; position:relative;">
+                        <div style="width:{pct_aluno}%; background:#2563eb; height:100%; border-radius:3px;"></div>
+                    </div>
+                    <span style="font-size:10px; width:26px; text-align:right;">{nota_aluno:.1f}</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <span style="font-size:10px; width:38px; color:#555;">Turma</span>
+                    <div style="flex:1; background:#eee; border-radius:3px; height:10px; position:relative;">
+                        <div style="width:{pct_turma}%; background:#94a3b8; height:100%; border-radius:3px;"></div>
+                    </div>
+                    <span style="font-size:10px; width:26px; text-align:right;">{turma_str}</span>
+                </div>
+            </div>"""
+
+        faltas_total = sum(v for v in e["faltas_por_trim"].values() if v)
+        pos, total_turma = ranking_faltas.get(e["id"], (None, None))
+        ranking_str = f"{pos}º na turma entre {total_turma}" if pos else "—"
+
+        emoji = BOLETIM_EMOJI_EMOCIONAL.get(e["emocional"], "❔")
+        label_emo = BOLETIM_LABEL_EMOCIONAL.get(e["emocional"], "Não informado")
+
+        media_geral_str = f'{e["media_geral"]:.1f}' if e["media_geral"] is not None else "—"
+
+        quebra = "page-break-after: always;" if i < len(dados_turma) - 1 else ""
+        paginas_html += f"""
+        <div style="{quebra} padding:24px; font-family: Helvetica, Arial, sans-serif; max-width:760px; margin:0 auto;">
+            <div style="text-align:center; margin-bottom:6px;">
+                <div style="font-weight:700; font-size:15px;">E.M Walmir de Freitas Monteiro</div>
+                <div style="font-size:12px; color:#555;">Volta Redonda — RJ</div>
+            </div>
+            <h2 style="text-align:center; margin:14px 0 2px 0;">BOLETIM INDIVIDUAL</h2>
+            <div style="text-align:center; font-size:13px; color:#555; margin-bottom:16px;">{periodo_label}</div>
+
+            <table style="width:100%; margin-bottom:10px; font-size:13px;">
+                <tr><td style="width:80px; color:#555;">Nome</td><td style="font-weight:700;">{e["nome"]}</td></tr>
+                <tr><td style="color:#555;">Turma</td><td>{turma["nome"]}</td></tr>
+            </table>
+            <div style="margin-bottom:16px; font-size:13px;"><strong>Situação Geral:</strong> {situacao_html}</div>
+
+            <h3 style="font-size:13px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:4px;">Desempenho por Disciplina — Escala SAEB</h3>
+            <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:18px;">
+                <thead><tr style="background:#f5f5f5;">
+                    <th style="padding:6px 8px; text-align:left;">Disciplina</th>
+                    <th style="padding:6px 8px; text-align:center;">Nota</th>
+                    <th style="padding:6px 8px; text-align:center;">Nível SAEB</th>
+                    <th style="padding:6px 8px; text-align:center;">Faltas</th>
+                </tr></thead>
+                <tbody>{linhas_disc}</tbody>
+            </table>
+
+            <h3 style="font-size:13px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:4px;">📊 Comparativo: Nota do Aluno × Média da Turma</h3>
+            <div style="margin-bottom:18px;">{comparativo_html}</div>
+
+            <div style="display:flex; gap:14px; margin-bottom:18px;">
+                <div style="flex:1; text-align:center; padding:12px; background:#f5f5f5; border-radius:6px;">
+                    <div style="font-size:22px; font-weight:700;">{media_geral_str}</div>
+                    <div style="font-size:11px; color:#555;">Média geral · {saeb_geral["label"] if saeb_geral else "—"}</div>
+                </div>
+                <div style="flex:1; text-align:center; padding:12px; background:#f5f5f5; border-radius:6px;">
+                    <div style="font-size:22px; font-weight:700;">{faltas_total}</div>
+                    <div style="font-size:11px; color:#555;">Total de faltas · {ranking_str}</div>
+                </div>
+                <div style="flex:1; text-align:center; padding:12px; background:#f5f5f5; border-radius:6px;">
+                    <div style="font-size:22px;">{emoji}</div>
+                    <div style="font-size:11px; color:#555;">Estado emocional · {label_emo}</div>
+                </div>
+            </div>
+
+            <div style="font-size:10px; color:#888; border-top:1px solid #ddd; padding-top:8px; margin-top:20px; text-align:center;">
+                Gerado automaticamente — E.M Walmir de Freitas Monteiro · {datetime.now().strftime("%d de %B de %Y")}
+            </div>
+        </div>
+        """
+
+    html_completo = f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Boletim Individual · {turma["nome"]}</title>
+<style>
+    @media print {{ @page {{ margin: 12mm; }} body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
+    body {{ margin:0; background:#fff; }}
+</style>
+</head><body>{paginas_html}
+<script>window.onload = () => window.print();</script>
+</body></html>"""
+    return HTMLResponse(html_completo)
 
 
 @app.get("/boletim/relatorio-turma", response_class=HTMLResponse)
