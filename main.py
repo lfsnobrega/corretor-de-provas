@@ -3593,6 +3593,38 @@ def _ecidade_normalizar(s):
     return _boletim_normalizar(s).replace(".", "").strip()
 
 
+ECIDADE_CONECTIVOS_NOME = {"de", "da", "do", "dos", "das", "e"}
+
+
+def _ecidade_nome_reduzido(nome_completo):
+    """Reduz um nome completo (como cadastrado no sistema) pro MESMO formato que o
+    e-cidade usa na exportação: primeiro e último nome por extenso, conectivos
+    (de/da/do/dos/das/e) por extenso, e qualquer outro nome do meio vira só a inicial.
+    'Alice Bastos de Oliveira' -> 'alice b de oliveira'
+    'Analice de Jesus da Silva Machado' -> 'analice de j da s machado'
+    Descoberto em 24/08/2026 comparando a exportação real com o cadastro real: o
+    casamento por prefixo simples falhava porque o e-cidade abrevia nomes do meio pra
+    uma letra e o sistema guarda o nome completo — sem essa redução, quase nada batia."""
+    tokens = _ecidade_normalizar(nome_completo).split()
+    if len(tokens) <= 2:
+        return " ".join(tokens)
+    meio_reduzido = [t if t in ECIDADE_CONECTIVOS_NOME else t[0] for t in tokens[1:-1]]
+    return " ".join([tokens[0]] + meio_reduzido + [tokens[-1]])
+
+
+def _ecidade_nome_bate(nome_sistema, nome_csv):
+    """True se o nome do sistema (completo) é compatível com o nome truncado/abreviado
+    do e-cidade — comparando a forma REDUZIDA do nome do sistema com o nome do CSV,
+    tolerando o corte de ~20 caracteres do e-cidade (prefixo em qualquer direção como
+    reforço, pro caso de nomes que não seguem exatamente o padrão)."""
+    reduzido = _ecidade_nome_reduzido(nome_sistema)
+    csv_norm = _ecidade_normalizar(nome_csv)
+    if reduzido.startswith(csv_norm) or csv_norm.startswith(reduzido):
+        return True
+    bruto = _ecidade_normalizar(nome_sistema)
+    return bruto.startswith(csv_norm) or csv_norm.startswith(bruto)
+
+
 def _ecidade_parse_csv(content_bytes):
     """Faz o parse do CSV exportado do Conselho de Classe do e-cidade (24/08/2026).
     Retorna dict: {turma_detectada, alunos: [{nº, nome, codigo_rede, notas: {disciplina: valor_ou_None},
@@ -3805,10 +3837,10 @@ async def importar_ecidade(request: Request, trimestre: int = Form(...), ano: in
             cur = conn.execute("INSERT INTO disciplinas (nome) VALUES (?)", (s,))
             disc_ids[s] = cur.lastrowid
 
-    # Alunos já cadastrados NESSA turma — casamento por código da rede primeiro, nome-prefixo depois
+    # Alunos já cadastrados NESSA turma — casamento por código da rede primeiro, nome-reduzido depois
     alunos_turma = conn.execute("SELECT id, nome, codigo_rede FROM alunos WHERE turma_id = ?", (turma_id,)).fetchall()
     por_codigo_rede = {a["codigo_rede"]: a["id"] for a in alunos_turma if a["codigo_rede"]}
-    candidatos_nome = [(a["id"], _ecidade_normalizar(a["nome"])) for a in alunos_turma]
+    candidatos_nome = [(a["id"], a["nome"]) for a in alunos_turma]
 
     n_medias = n_faltas = n_pd = n_codigo_gravado = 0
     nao_casados = []
@@ -3816,9 +3848,9 @@ async def importar_ecidade(request: Request, trimestre: int = Form(...), ano: in
     for aluno_csv in resultado["alunos"]:
         aid = por_codigo_rede.get(aluno_csv["codigo_rede"])
         if not aid:
-            # Casamento por prefixo de nome (e-cidade trunca nomes longos)
-            nome_norm_csv = _ecidade_normalizar(aluno_csv["nome"])
-            matches = [cid for cid, nome_norm in candidatos_nome if nome_norm.startswith(nome_norm_csv) or nome_norm_csv.startswith(nome_norm)]
+            # Casamento por nome reduzido (o e-cidade abrevia nomes do meio pra uma letra
+            # e ainda trunca a string toda em ~20 caracteres — ver _ecidade_nome_bate)
+            matches = [cid for cid, nome_sistema in candidatos_nome if _ecidade_nome_bate(nome_sistema, aluno_csv["nome"])]
             if len(matches) == 1:
                 aid = matches[0]
                 # Grava o código da rede pra próxima importação casar direto
