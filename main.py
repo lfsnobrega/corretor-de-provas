@@ -1361,7 +1361,8 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
                 <div class="sidebar-section">Análise</div>
                 {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
-                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim") + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análises pedagógicas") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas (Simulado)")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
@@ -5171,15 +5172,40 @@ def gerar_boletim_individual(ano: int, turma_id: int, aluno_id: Optional[int] = 
         saeb_geral = _boletim_saeb_nivel(e["media_geral"])
         situacao_html = f'<span style="color:{saeb_geral["color"]}; font-weight:700;">{saeb_geral["label"]}</span>' if saeb_geral else "—"
 
+        # Colunas de trimestre dinâmicas — mostra T1/T2/(T3) separados, não só a média
+        # acumulada, a pedido (24/08/2026). Usa os mesmos trimestres_com_dado da página toda,
+        # pra manter as colunas iguais em todos os alunos do PDF.
+        colunas_trim_header = "".join(f'<th style="padding:6px 8px; text-align:center;">{t}º Tri.</th>' for t in trimestres_com_dado)
+
+        # Alerta de possível repetente: qualquer disciplina com média (T1+T2)/2 < 5,0
+        # (mesma regra do dashboard) — 24/08/2026.
+        disciplinas_risco = []
+
         linhas_disc = ""
         for disc in BOLETIM_ORDEM_DISCIPLINAS:
             trims = e["notas"].get(disc, {})
             e_numerica = disc in BOLETIM_DISC_NUMERICAS
+
+            colunas_trim_html = ""
+            for t in trimestres_com_dado:
+                valor_trim = trims.get(t)
+                if valor_trim is None:
+                    colunas_trim_html += '<td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center; color:#bbb;">—</td>'
+                elif valor_trim[0] is not None:
+                    colunas_trim_html += f'<td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;">{valor_trim[0]:.1f}</td>'
+                else:
+                    colunas_trim_html += f'<td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;">{valor_trim[1] or "—"}</td>'
+
             if e_numerica:
                 media_disc = e["medias_finais"].get(disc)
                 nivel = _boletim_saeb_nivel(media_disc)
                 nivel_html = f'<span style="color:{nivel["color"]}; font-weight:600;">{nivel["label"]}</span>' if nivel else "—"
                 nota_str = f"{media_disc:.1f}" if media_disc is not None else "—"
+
+                if 1 in trims and 2 in trims and trims[1][0] is not None and trims[2][0] is not None:
+                    media_t1t2 = (trims[1][0] + trims[2][0]) / 2
+                    if media_t1t2 < 5.0:
+                        disciplinas_risco.append((disc, media_t1t2))
             else:
                 # Educação Digital: categórica (PS/PA/PI) ou PD — pega o valor mais recente
                 nota_texto_disc = None
@@ -5194,10 +5220,21 @@ def gerar_boletim_individual(ano: int, turma_id: int, aluno_id: Optional[int] = 
             faltas_disc_str = "—" if not e_numerica else str(faltas_disc_por_aluno.get(e["id"], {}).get(disc, 0))
             linhas_disc += f"""<tr>
                 <td style="padding:6px 8px; border-bottom:1px solid #eee;">{disc}</td>
+                {colunas_trim_html}
                 <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center; font-weight:700;">{nota_str}</td>
                 <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;">{nivel_html}</td>
                 <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;">{faltas_disc_str}</td>
             </tr>"""
+
+        alerta_repetente_html = ""
+        if disciplinas_risco:
+            itens_risco = "".join(f'<li>{disc}: média {media:.1f}</li>' for disc, media in disciplinas_risco)
+            alerta_repetente_html = f"""
+            <div style="background:#fee2e2; border:1px solid #dc2626; border-radius:8px; padding:10px 14px; margin-bottom:14px;">
+                <strong style="color:#dc2626;">⚠ Possível repetente</strong>
+                <span style="font-size:12px; color:#7f1d1d;"> — média do 1º+2º trimestre abaixo de 5,0 em:</span>
+                <ul style="margin:4px 0 0 18px; font-size:12px; color:#7f1d1d;">{itens_risco}</ul>
+            </div>"""
 
         # Comparativo Aluno × Turma (só disciplinas numéricas)
         comparativo_html = ""
@@ -5253,11 +5290,14 @@ def gerar_boletim_individual(ano: int, turma_id: int, aluno_id: Optional[int] = 
             </table>
             <div style="margin-bottom:16px; font-size:13px;"><strong>Situação Geral:</strong> {situacao_html}</div>
 
+            {alerta_repetente_html}
+
             <h3 style="font-size:13px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:4px;">Desempenho por Disciplina — Escala SAEB</h3>
             <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:18px;">
                 <thead><tr style="background:#f5f5f5;">
                     <th style="padding:6px 8px; text-align:left;">Disciplina</th>
-                    <th style="padding:6px 8px; text-align:center;">Nota</th>
+                    {colunas_trim_header}
+                    <th style="padding:6px 8px; text-align:center;">Média</th>
                     <th style="padding:6px 8px; text-align:center;">Nível SAEB</th>
                     <th style="padding:6px 8px; text-align:center;">Faltas</th>
                 </tr></thead>
@@ -5302,12 +5342,37 @@ def gerar_boletim_individual(ano: int, turma_id: int, aluno_id: Optional[int] = 
 
 
 @app.get("/boletim/relatorio-turma", response_class=HTMLResponse)
-def boletim_relatorio_turma(ano: int, turma_id: int):
+def boletim_relatorio_turma(ano: Optional[int] = None, turma_id: Optional[int] = None):
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/boletim", status_code=303)
 
     conn = get_db()
+    if not turma_id or not ano:
+        # Sem turma selecionada (ex: clicou direto no menu) — mostra uma telinha de
+        # seleção em vez de dar erro pedindo os campos (24/08/2026).
+        turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+        conn.close()
+        opts_turmas = "".join(f'<option value="{t["id"]}" data-ano="{t["ano_letivo"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+        content = f"""
+            <div class="page-header"><h1>📄 Relatório por Turma</h1></div>
+            <form action="/boletim/relatorio-turma" method="get">
+                <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+                    <label style="margin:0; flex:1 1 220px;">Turma
+                        <select name="turma_id" id="sel-turma-rel" required onchange="document.getElementById('inp-ano-rel').value = this.selectedOptions[0].dataset.ano;">
+                            <option value="">— selecione —</option>
+                            {opts_turmas}
+                        </select>
+                    </label>
+                    <label style="margin:0; flex:1 1 120px;">Ano
+                        <input type="number" name="ano" id="inp-ano-rel" value="2026" required>
+                    </label>
+                </div>
+                <div class="page-actions"><button type="submit" class="btn btn-primary">Ver relatório</button></div>
+            </form>
+        """
+        return HTMLResponse(render_page("Relatório por Turma", content, active="boletim-relatorio-turma"))
+
     turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
     if not turma:
         conn.close()
@@ -5535,12 +5600,22 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
 
 
 @app.get("/boletim/relatorio-geral", response_class=HTMLResponse)
-def boletim_relatorio_geral(trimestre: int, ano: int, turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
+def boletim_relatorio_geral(trimestre: Optional[int] = None, ano: Optional[int] = None, turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
     prof = _current_prof_ctx.get()
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/boletim", status_code=303)
 
     conn = get_db()
+    if trimestre is None or ano is None:
+        # Sem parâmetro na URL (ex: clicou direto no menu) — usa o trimestre/ano mais
+        # recente com dado importado, em vez de dar erro pedindo os campos (24/08/2026).
+        combinacoes = conn.execute("SELECT trimestre, ano FROM boletim_medias GROUP BY trimestre, ano ORDER BY ano DESC, trimestre DESC").fetchall()
+        if not combinacoes:
+            conn.close()
+            content = '<div class="page-header"><h1>📄 Relatório Geral</h1></div><div class="empty">Nenhum dado importado ainda. <a href="/boletim/importar-ecidade">Importar notas</a></div>'
+            return render_page("Relatório Geral", content, active="boletim-relatorio-geral")
+        trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
+
     turma_nome_filtro = None
     if turma_id:
         row_t = conn.execute("SELECT nome FROM turmas WHERE id = ?", (turma_id,)).fetchone()
