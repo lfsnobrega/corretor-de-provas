@@ -1667,34 +1667,48 @@ def home(request: Request):
         <style>
         .mobile-launcher {{
             display: block;
-            margin: 4px 0 24px 0;
-            max-width: 560px;
+            margin: 4px 0 28px 0;
+            max-width: 900px;
         }}
         .mobile-launcher-grid {{
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 10px;
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 12px;
         }}
         .mobile-badge {{
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 6px;
-            padding: 16px 6px;
+            gap: 8px;
+            padding: 20px 10px;
             background: var(--bg-subtle);
+            border: 1px solid var(--border);
             border-radius: 14px;
             text-decoration: none;
             color: inherit;
             text-align: center;
+            transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
         }}
-        .mobile-badge-icon {{ font-size: 26px; line-height: 1; }}
-        .mobile-badge-label {{ font-size: 11px; font-weight: 600; line-height: 1.2; }}
+        .mobile-badge:hover {{
+            transform: translateY(-2px);
+            border-color: var(--accent);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        }}
+        .mobile-badge-icon {{ font-size: 28px; line-height: 1; }}
+        .mobile-badge-label {{ font-size: 12px; font-weight: 600; line-height: 1.25; }}
+        @media (min-width: 640px) {{
+            .mobile-badge {{ padding: 22px 10px; }}
+            .mobile-badge-icon {{ font-size: 32px; }}
+            .mobile-badge-label {{ font-size: 13px; }}
+        }}
         </style>
     """
 
     # Aplicações abertas do professor — única lista mostrada na tela inicial, além do
     # grid de atalhos (24/08/2026: home simplificada a pedido, tirando Acervo/Painel/stats).
+    # Grid de 2 colunas em telas largas — antes era 1 coluna comprida, deixando muito
+    # vazio ao lado (24/08/2026, ajuste de distribuição).
     if minhas_ultimas:
         linhas = ""
         for u in minhas_ultimas:
@@ -1702,15 +1716,18 @@ def home(request: Request):
             pct = (u["n_entregas"] / u["n_alunos"] * 100) if u["n_alunos"] > 0 else 0
             autor_inline = f' · <span style="color:var(--purple);">por {u["criador_nome"] or "—"}</span>' if is_admin else ""
             linhas += (
-                f'<a href="/aplicacoes/{u["id"]}" style="display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; text-decoration:none; color:inherit;">'
-                f'<div style="min-width:0; flex:1;"><span style="color:var(--green);">●</span> <strong>{u["titulo"]}</strong> <span style="font-size:12px; color:var(--text-muted);">· {u["turma_nome"]} · {modo_label}{autor_inline}</span></div>'
-                f'<div style="font-size:12px; color:var(--text-muted); flex-shrink:0;">{u["n_entregas"]}/{u["n_alunos"]} entregas ({pct:.0f}%)</div>'
+                f'<a href="/aplicacoes/{u["id"]}" style="display:flex; flex-direction:column; gap:6px; padding:12px 14px; border:1px solid var(--border); border-radius:10px; text-decoration:none; color:inherit; background:var(--bg-subtle);">'
+                f'<div style="min-width:0;"><span style="color:var(--green);">●</span> <strong>{u["titulo"]}</strong></div>'
+                f'<div style="font-size:12px; color:var(--text-muted);">{u["turma_nome"]} · {modo_label}{autor_inline}</div>'
+                f'<div style="font-size:12px; color:var(--text-muted);">{u["n_entregas"]}/{u["n_alunos"]} entregas ({pct:.0f}%)</div>'
                 f'</a>'
             )
         label_abertas_titulo = "📤 Aplicações abertas na escola" if is_admin else "📤 Suas aplicações abertas"
         aplicacoes_abertas_html = f"""
             <h2 style="margin-top:28px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">{label_abertas_titulo}</h2>
-            {linhas}
+            <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px; max-width:900px;">
+                {linhas}
+            </div>
         """
     else:
         label_vazio = "Nenhuma aplicação aberta na escola no momento." if is_admin else "Você não tem nenhuma aplicação aberta no momento."
