@@ -491,6 +491,11 @@ def init_db():
         conn.execute("ALTER TABLE alunos ADD COLUMN data_nascimento TEXT")
     if "sexo" not in cols:
         conn.execute("ALTER TABLE alunos ADD COLUMN sexo TEXT")
+    if "codigo_rede" not in cols:
+        # Código do aluno na plataforma oficial da rede (e-cidade). Populado na 1ª importação
+        # do Conselho de Classe por casamento de nome; usado como chave estável nas seguintes (24/08/2026).
+        conn.execute("ALTER TABLE alunos ADD COLUMN codigo_rede TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alunos_codigo_rede ON alunos(codigo_rede)")
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
         conn.execute("ALTER TABLE questoes ADD COLUMN ano TEXT")
@@ -3571,6 +3576,131 @@ BOLETIM_SUBJECT_MAP = {
 BOLETIM_CANONICAL_SUBJECTS = ['Português', 'Matemática', 'Ciências', 'História', 'Geografia',
                               'Inglês', 'Arte', 'Ed. Física', 'Educação Digital', 'Geral']
 
+# Mapeamento das siglas do export oficial do e-cidade pra disciplina canônica.
+# Posições fixas no CSV (24/08/2026): colunas exportadas sempre nesta ordem.
+ECIDADE_COLUNAS_DISCIPLINA = [
+    ("LPOR", "Português"), ("EF", "Ed. Física"), ("A", "Arte"), ("MAT", "Matemática"),
+    ("CIE", "Ciências"), ("HIS", "História"), ("GEO", "Geografia"), ("LI", "Inglês"),
+    ("ED", "Educação Digital"),
+]
+ECIDADE_CAMPOS_MINIMOS = 4 + 3 + len(ECIDADE_COLUNAS_DISCIPLINA) * 2 + 1  # Nº,Nome,S,Código + 3 par + 9×(nota,falta) + TF
+
+
+def _ecidade_normalizar(s):
+    """Normalização pra comparação de PREFIXO de nome (o e-cidade trunca nomes em ~20
+    caracteres, e às vezes o corte cai no meio de uma palavra deixando um ponto solto,
+    tipo 'DA S.' em vez de 'DA SILVA' — removemos os pontos pra não travar esse caso)."""
+    return _boletim_normalizar(s).replace(".", "").strip()
+
+
+def _ecidade_parse_csv(content_bytes):
+    """Faz o parse do CSV exportado do Conselho de Classe do e-cidade (24/08/2026).
+    Retorna dict: {turma_detectada, alunos: [{nº, nome, codigo_rede, notas: {disciplina: valor_ou_None},
+    faltas: {disciplina: int_ou_None}, tf, pd: bool}], avisos: [str]}.
+
+    Formato: ';'-separado, Latin-1. 4 linhas de metadado, 1 linha de cabeçalho, depois 1 linha
+    por aluno com campos fixos (Nº;Nome;S;Código;par;par;par;LPOR nota;falta;EF nota;falta;...;TF).
+
+    ARMADILHA CONHECIDA: alunos com parecer descritivo (currículo adaptado / 'PD') têm o parecer
+    inteiro despejado SEM ESCAPE no meio do CSV, ocupando várias linhas e quebrando a contagem de
+    campos. Detectamos isso pela linha ter menos campos que o esperado e tratamos tudo até a
+    próxima linha válida como parecer (descartado, só um aviso é gerado — decisão de 24/08/2026)."""
+    import re as _re_ecid
+
+    try:
+        texto = content_bytes.decode("latin-1")
+    except Exception:
+        texto = content_bytes.decode("utf-8", errors="replace")
+
+    linhas = texto.split("\n")
+    avisos = []
+
+    # Turma vem de uma linha de metadado tipo "...;;;;;Turma: EF 601"
+    turma_detectada = None
+    for l in linhas[:6]:
+        m = _re_ecid.search(r"Turma:\s*(.+?)\s*(?:;|$)", l)
+        if m:
+            bruto = m.group(1).strip()
+            # "EF 601" -> pega o último grupo de dígitos (o código real da turma)
+            m2 = _re_ecid.search(r"(\d+)\s*$", bruto)
+            turma_detectada = m2.group(1) if m2 else bruto
+            break
+
+    alunos = []
+    i = 0
+    while i < len(linhas):
+        linha = linhas[i].rstrip("\r")
+        i += 1
+        if not linha.strip():
+            continue
+        if linha.strip() in ("<script>", "</script>") or "window.close()" in linha:
+            continue
+        campos = linha.split(";")
+        # Linha de cabeçalho ou metadado institucional — pula
+        if not campos[0].strip().isdigit():
+            continue
+
+        if len(campos) >= ECIDADE_CAMPOS_MINIMOS:
+            # Linha completa e bem-formada
+            num_aluno = campos[0].strip()
+            nome = campos[1].strip()
+            codigo_rede = campos[3].strip()
+            notas = {}
+            faltas = {}
+            idx = 7  # primeira coluna de nota é a posição 7 (0-indexed)
+            for sigla, canon in ECIDADE_COLUNAS_DISCIPLINA:
+                nota_raw = campos[idx].strip() if idx < len(campos) else ""
+                falta_raw = campos[idx + 1].strip() if idx + 1 < len(campos) else ""
+                if nota_raw:
+                    try:
+                        notas[canon] = float(nota_raw.replace(",", "."))
+                    except ValueError:
+                        notas[canon] = nota_raw  # categórico (PS/PA/PI/PD solto)
+                else:
+                    notas[canon] = None
+                try:
+                    faltas[canon] = int(falta_raw) if falta_raw else 0
+                except ValueError:
+                    faltas[canon] = None
+                idx += 2
+            tf_raw = campos[idx].strip() if idx < len(campos) else ""
+            try:
+                tf = int(tf_raw) if tf_raw else None
+            except ValueError:
+                tf = None
+            alunos.append({
+                "num": num_aluno, "nome": nome, "codigo_rede": codigo_rede,
+                "notas": notas, "faltas": faltas, "tf": tf, "pd": False,
+            })
+        else:
+            # Linha malformada — início de um bloco de PARECER (aluno PD). Recupera o que dá
+            # (Nº, Nome, Código, se vieram antes do texto livre começar) e consome as linhas
+            # seguintes até achar a próxima linha válida, sem tentar interpretá-las.
+            num_aluno = campos[0].strip()
+            nome = campos[1].strip() if len(campos) > 1 else "(nome não recuperado)"
+            codigo_rede = campos[3].strip() if len(campos) > 3 else ""
+            n_linhas_parecer = 1
+            while i < len(linhas):
+                prox = linhas[i].rstrip("\r")
+                prox_campos = prox.split(";")
+                if prox_campos[0].strip().isdigit() and len(prox_campos) >= ECIDADE_CAMPOS_MINIMOS:
+                    break  # achou a próxima linha de aluno válida — não consome
+                i += 1
+                n_linhas_parecer += 1
+            avisos.append(
+                f"Aluno {num_aluno} ({nome}) tem parecer descritivo no lugar das notas — "
+                f"gravado como 'PD' em todas as disciplinas; o texto do parecer ({n_linhas_parecer} "
+                f"linha(s)) NÃO foi importado (não há campo pra isso no sistema hoje)."
+            )
+            notas = {canon: "PD" for _, canon in ECIDADE_COLUNAS_DISCIPLINA}
+            faltas = {canon: None for _, canon in ECIDADE_COLUNAS_DISCIPLINA}
+            alunos.append({
+                "num": num_aluno, "nome": nome, "codigo_rede": codigo_rede,
+                "notas": notas, "faltas": faltas, "tf": None, "pd": True,
+            })
+
+    return {"turma_detectada": turma_detectada, "alunos": alunos, "avisos": avisos}
+
 
 def _boletim_normalizar(s):
     """Remove acentos, baixa caixa, colapsa espaços — mesma ideia do clean() do
@@ -3584,6 +3714,184 @@ def _boletim_normalizar(s):
 
 def _boletim_normalizar_disciplina(nome):
     return BOLETIM_SUBJECT_MAP.get(_boletim_normalizar(nome), str(nome or "").strip())
+
+
+@app.get("/boletim/importar-ecidade", response_class=HTMLResponse)
+def form_importar_ecidade(request: Request):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    conn.close()
+    opts_turmas = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+    content = f"""
+        <div class="page-header">
+            <h1>📥 Importar CSV do e-cidade (Conselho de Classe)</h1>
+            <p class="subtitle">Sobe o CSV exportado direto da plataforma oficial da rede (e-cidade) — o mesmo arquivo que vem com as notas lançadas pelos professores.</p>
+        </div>
+        <div class="tip">
+            <strong>Como funciona:</strong> o arquivo já traz a turma no cabeçalho — o sistema tenta detectar
+            automaticamente, mas confirme abaixo antes de importar. Os alunos são casados com os que
+            <strong>já existem</strong> no sistema — nenhum aluno novo é criado aqui. Na primeira importação de
+            cada turma, o casamento é feito por nome (o e-cidade trunca nomes longos, então usamos
+            correspondência por início do nome); o código oficial do aluno é gravado automaticamente pra que as
+            próximas importações dessa turma casem direto por ele, sem depender do nome de novo. Alunos com
+            parecer descritivo (currículo adaptado) entram como "PD" em todas as disciplinas — o texto do
+            parecer não é importado. Rodar de novo pra mesma turma/trimestre <strong>atualiza</strong> os
+            valores (não duplica).
+        </div>
+        <form action="/boletim/importar-ecidade" method="post" enctype="multipart/form-data">
+            <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+                <label style="margin:0; flex:1 1 160px;">Trimestre
+                    <select name="trimestre" required>
+                        <option value="1">1º Trimestre</option>
+                        <option value="2">2º Trimestre</option>
+                        <option value="3">3º Trimestre</option>
+                    </select>
+                </label>
+                <label style="margin:0; flex:1 1 120px;">Ano
+                    <input type="number" name="ano" value="2026" required>
+                </label>
+                <label style="margin:0; flex:1 1 220px;">Turma
+                    <select name="turma_id" required>
+                        <option value="">— selecione —</option>
+                        {opts_turmas}
+                    </select>
+                </label>
+                <label style="margin:0; flex:1 1 220px;">Arquivo CSV do e-cidade
+                    <input type="file" name="arquivo" accept=".csv" required>
+                </label>
+            </div>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Importar</button>
+                <a href="/painel-gestao" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Importar e-cidade", content, active="boletim-importar")
+
+
+@app.post("/boletim/importar-ecidade", response_class=HTMLResponse)
+async def importar_ecidade(request: Request, trimestre: int = Form(...), ano: int = Form(...), turma_id: int = Form(...), arquivo: UploadFile = File(...)):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    if not arquivo.filename.lower().endswith(".csv"):
+        content = '<div class="page-header"><h1>Erro</h1></div><div class="tip">O arquivo precisa ser .csv (o export direto do e-cidade).</div><p><a href="/boletim/importar-ecidade" class="btn">Voltar</a></p>'
+        return HTMLResponse(render_page("Erro", content, active=""))
+
+    content_bytes = await arquivo.read()
+    resultado = _ecidade_parse_csv(content_bytes)
+    avisos = list(resultado["avisos"])
+
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/boletim/importar-ecidade", status_code=303)
+
+    if resultado["turma_detectada"] and str(resultado["turma_detectada"]) != str(turma["nome"]):
+        avisos.append(
+            f"O arquivo indica turma '{resultado['turma_detectada']}', mas você selecionou "
+            f"'{turma['nome']}'. Conferido? Segui com a turma que você selecionou."
+        )
+
+    # Garante que as 9 disciplinas canônicas existem
+    disc_ids = {}
+    for s in BOLETIM_CANONICAL_SUBJECTS:
+        row = conn.execute("SELECT id FROM disciplinas WHERE nome = ?", (s,)).fetchone()
+        if row:
+            disc_ids[s] = row["id"]
+        else:
+            cur = conn.execute("INSERT INTO disciplinas (nome) VALUES (?)", (s,))
+            disc_ids[s] = cur.lastrowid
+
+    # Alunos já cadastrados NESSA turma — casamento por código da rede primeiro, nome-prefixo depois
+    alunos_turma = conn.execute("SELECT id, nome, codigo_rede FROM alunos WHERE turma_id = ?", (turma_id,)).fetchall()
+    por_codigo_rede = {a["codigo_rede"]: a["id"] for a in alunos_turma if a["codigo_rede"]}
+    candidatos_nome = [(a["id"], _ecidade_normalizar(a["nome"])) for a in alunos_turma]
+
+    n_medias = n_faltas = n_pd = n_codigo_gravado = 0
+    nao_casados = []
+
+    for aluno_csv in resultado["alunos"]:
+        aid = por_codigo_rede.get(aluno_csv["codigo_rede"])
+        if not aid:
+            # Casamento por prefixo de nome (e-cidade trunca nomes longos)
+            nome_norm_csv = _ecidade_normalizar(aluno_csv["nome"])
+            matches = [cid for cid, nome_norm in candidatos_nome if nome_norm.startswith(nome_norm_csv) or nome_norm_csv.startswith(nome_norm)]
+            if len(matches) == 1:
+                aid = matches[0]
+                # Grava o código da rede pra próxima importação casar direto
+                if aluno_csv["codigo_rede"]:
+                    conn.execute("UPDATE alunos SET codigo_rede = ? WHERE id = ?", (aluno_csv["codigo_rede"], aid))
+                    n_codigo_gravado += 1
+            elif len(matches) > 1:
+                nao_casados.append(f"{aluno_csv['nome']} (nº{aluno_csv['num']}) — {len(matches)} alunos da turma batem com esse nome, ambíguo, pulado")
+                continue
+            else:
+                nao_casados.append(f"{aluno_csv['nome']} (nº{aluno_csv['num']}) — nenhum aluno da turma encontrado com esse nome, pulado")
+                continue
+
+        if aluno_csv["pd"]:
+            n_pd += 1
+
+        for disciplina, valor in aluno_csv["notas"].items():
+            did = disc_ids.get(disciplina)
+            if not did or valor is None:
+                continue
+            if isinstance(valor, (int, float)):
+                conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                                 VALUES (?,?,?,?,?,NULL)
+                                 ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = excluded.nota, nota_texto = NULL""",
+                             (aid, did, trimestre, ano, float(valor)))
+            else:
+                conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                                 VALUES (?,?,?,?,NULL,?)
+                                 ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = NULL, nota_texto = excluded.nota_texto""",
+                             (aid, did, trimestre, ano, str(valor).strip()))
+            n_medias += 1
+
+        for disciplina, faltas_val in aluno_csv["faltas"].items():
+            did = disc_ids.get(disciplina)
+            if not did or faltas_val is None:
+                continue
+            conn.execute("""INSERT INTO boletim_faltas (aluno_id, disciplina_id, trimestre, ano, faltas)
+                             VALUES (?,?,?,?,?)
+                             ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET faltas = excluded.faltas""",
+                         (aid, did, trimestre, ano, faltas_val))
+            n_faltas += 1
+
+    conn.commit()
+    conn.close()
+
+    if nao_casados:
+        avisos.append(f"{len(nao_casados)} aluno(s) do arquivo não foram casados com ninguém da turma:")
+        avisos.extend(nao_casados)
+
+    resumo_html = f"""
+        <li>{len(resultado["alunos"])} aluno(s) lidos do arquivo (turma detectada no arquivo: {resultado["turma_detectada"] or "não identificada"})</li>
+        <li>{n_medias} notas gravadas/atualizadas</li>
+        <li>{n_faltas} registros de falta gravados/atualizados</li>
+        <li>{n_codigo_gravado} aluno(s) tiveram o código da rede gravado agora (próximas importações casam direto por ele)</li>
+        <li>{n_pd} aluno(s) com parecer descritivo (PD) — gravados como PD em todas as disciplinas, texto do parecer não importado</li>
+    """
+    avisos_html = ""
+    if avisos:
+        itens = "".join(f'<li>{a}</li>' for a in avisos)
+        avisos_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Avisos:</strong><ul style="margin:8px 0 0 18px;">{itens}</ul></div>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>✅ Importação e-cidade concluída — {trimestre}º Trimestre {ano} · Turma {turma["nome"]}</h1>
+        </div>
+        <ul style="line-height:1.9;">{resumo_html}</ul>
+        {avisos_html}
+        <div class="page-actions" style="margin-top:18px;">
+            <a href="/boletim/importar-ecidade" class="btn">Importar outro arquivo</a>
+            <a href="/painel-gestao" class="btn btn-primary">Voltar ao painel</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Importação concluída", content, active="boletim-importar"))
 
 
 @app.get("/boletim/importar", response_class=HTMLResponse)
@@ -4071,6 +4379,41 @@ def _boletim_saeb_nivel(media):
     return {"key": "avancado", "label": "Avançado", "color": "#6366f1"}
 
 
+def _boletim_possiveis_repetentes(conn, ano, turma_id=None):
+    """Lista alunos com risco de repetência: QUALQUER disciplina com média (T1+T2)/2 < 5,0.
+    Só considera disciplinas com nota NUMÉRICA nos dois trimestres (Educação Digital é
+    descritiva e nunca entra; alunos 'PD'/parecer também ficam de fora dessa disciplina).
+    Retorna lista de dicts: {aluno_id, nome, turma_nome, disciplinas: [{nome, t1, t2, media}]},
+    ordenada por nome. (24/08/2026)"""
+    where_turma = "AND a.turma_id = ?" if turma_id else ""
+    params = [ano, ano, ano] + ([turma_id] if turma_id else [])
+
+    rows = conn.execute(f"""
+        SELECT a.id AS aluno_id, a.nome AS aluno_nome, t.nome AS turma_nome, d.nome AS disciplina_nome,
+               m1.nota AS nota_t1, m2.nota AS nota_t2
+        FROM alunos a
+        JOIN turmas t ON t.id = a.turma_id AND t.ano_letivo = ?
+        JOIN boletim_medias m1 ON m1.aluno_id = a.id AND m1.trimestre = 1 AND m1.ano = ? AND m1.nota IS NOT NULL
+        JOIN boletim_medias m2 ON m2.aluno_id = a.id AND m2.trimestre = 2 AND m2.ano = ? AND m2.nota IS NOT NULL
+            AND m2.disciplina_id = m1.disciplina_id
+        JOIN disciplinas d ON d.id = m1.disciplina_id
+        WHERE d.nome != 'Educação Digital' {where_turma}
+        ORDER BY a.nome, d.nome
+    """, params).fetchall()
+
+    por_aluno = {}
+    for r in rows:
+        media = (r["nota_t1"] + r["nota_t2"]) / 2
+        if media >= 5.0:
+            continue
+        chave = r["aluno_id"]
+        if chave not in por_aluno:
+            por_aluno[chave] = {"aluno_id": r["aluno_id"], "nome": r["aluno_nome"], "turma_nome": r["turma_nome"], "disciplinas": []}
+        por_aluno[chave]["disciplinas"].append({"nome": r["disciplina_nome"], "t1": r["nota_t1"], "t2": r["nota_t2"], "media": round(media, 1)})
+
+    return sorted(por_aluno.values(), key=lambda x: x["nome"])
+
+
 def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
     """Monta, por aluno, a média (das 8 disciplinas numéricas — Educação Digital é
     categórica PA/PS/PI e não entra na média), nível SAEB, risco de retenção (4+
@@ -4252,6 +4595,50 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
                 <tbody>{linhas_panorama}</tbody>
             </table>
         </div>"""
+
+    # --- Possíveis repetentes: qualquer disciplina com média (T1+T2)/2 < 5,0 ---
+    # Só faz sentido ver isso a partir do 2º trimestre (24/08/2026).
+    repetentes_html = ""
+    if trimestre == 2:
+        conn2 = get_db()
+        repetentes = _boletim_possiveis_repetentes(conn2, ano, turma_id=turma_id)
+        conn2.close()
+        if repetentes:
+            linhas_rep = ""
+            for r in repetentes:
+                discs_html = "".join(
+                    f'<span class="badge" style="background:var(--red-bg); color:var(--red); margin-right:4px;" '
+                    f'title="T1: {d["t1"]:.1f} · T2: {d["t2"]:.1f}">{d["nome"]} ({d["media"]:.1f})</span>'
+                    for d in r["disciplinas"]
+                )
+                linhas_rep += f"""<tr>
+                    <td style="padding:8px 10px;"><strong>{r["nome"]}</strong></td>
+                    <td style="padding:8px 10px; color:var(--text-muted);">{r["turma_nome"]}</td>
+                    <td style="padding:8px 10px;">{discs_html}</td>
+                </tr>"""
+            repetentes_html = f"""
+            <div class="card" style="margin-bottom:18px; padding:0; overflow:hidden; border-color:var(--red);">
+                <div style="padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; font-size:14px; color:var(--red);">
+                    ⚠️ Possíveis Repetentes — {len(repetentes)} aluno(s)
+                    <span style="font-weight:400; font-size:12px; color:var(--text-muted); display:block; margin-top:2px;">
+                        Média (1º + 2º trimestre) ÷ 2 abaixo de 5,0 em pelo menos uma disciplina
+                    </span>
+                </div>
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                    <thead><tr style="background:var(--bg-subtle);">
+                        <th style="padding:8px 10px; text-align:left;">Aluno</th>
+                        <th style="padding:8px 10px; text-align:left;">Turma</th>
+                        <th style="padding:8px 10px; text-align:left;">Disciplina(s) abaixo de 5,0 (média)</th>
+                    </tr></thead>
+                    <tbody>{linhas_rep}</tbody>
+                </table>
+            </div>"""
+        else:
+            repetentes_html = """
+            <div class="card" style="margin-bottom:18px; padding:14px 16px; border-color:var(--green);">
+                <strong style="color:var(--green);">✅ Nenhum possível repetente</strong>
+                <span style="font-size:12px; color:var(--text-muted);"> — nenhum aluno com média (T1+T2)/2 abaixo de 5,0 em alguma disciplina, considerando os dados já importados.</span>
+            </div>"""
 
     # --- distribuição SAEB por disciplina (Português e Matemática) ---
     def dist_saeb_disciplina(disc):
@@ -4492,6 +4879,8 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
         </div>
 
         {panorama_html}
+
+        {repetentes_html}
 
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:18px;">
             <div class="card">
