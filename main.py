@@ -126,7 +126,12 @@ def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: s
         service = build("drive", "v3", credentials=creds)
         metadata = {"name": nome_arquivo, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(_io.BytesIO(conteudo_bytes), mimetype=mime_type, resumable=False)
-        arquivo = service.files().create(body=metadata, media_body=media, fields="id, webViewLink").execute()
+        # supportsAllDrives=True é obrigatório se a pasta estiver dentro de um Drive
+        # Compartilhado (não "Meu Drive") — sem isso a API nem enxerga a pasta e retorna
+        # 404 "File not found", mesmo com permissão certa (achado em produção, 25/08/2026).
+        arquivo = service.files().create(
+            body=metadata, media_body=media, fields="id, webViewLink", supportsAllDrives=True
+        ).execute()
         return arquivo.get("id"), arquivo.get("webViewLink"), None
     except ImportError:
         return None, None, "Biblioteca do Google Drive não instalada no servidor (google-api-python-client / google-auth)."
