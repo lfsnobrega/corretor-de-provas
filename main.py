@@ -1661,6 +1661,8 @@ def home(request: Request):
         ]),
     ]
     grupos_html = ""
+    TILE_PX = 140   # largura-alvo de cada bloco, igual em todas as fileiras
+    GAP_PX = 12
     for titulo_grupo, cor_grupo, itens in grupos_config:
         itens_visiveis = [it for it in itens if it[3]]
         if not itens_visiveis:
@@ -1669,10 +1671,15 @@ def home(request: Request):
             f'<a href="{href}" class="mobile-badge" style="--badge-accent:{cor_grupo};"><span class="mobile-badge-icon">{icone}</span><span class="mobile-badge-label">{label}</span></a>'
             for icone, label, href, _ in itens_visiveis
         )
+        # Largura da fileira = só o que ela precisa pros seus próprios itens (até um teto
+        # de 6 por linha) — evita tanto "buraco vazio" quanto blocos gigantes/desproporcionais
+        # numa fileira com poucos itens (24/08/2026, ajuste depois de feedback visual).
+        n_cols_linha = min(len(itens_visiveis), 6)
+        largura_max = n_cols_linha * TILE_PX + (n_cols_linha - 1) * GAP_PX
         grupos_html += f"""
         <div class="mobile-launcher-group">
             <div class="mobile-launcher-group-title" style="color:{cor_grupo};">{titulo_grupo}</div>
-            <div class="mobile-launcher-grid">{badges_grupo}</div>
+            <div class="mobile-launcher-grid" style="max-width:{largura_max}px;">{badges_grupo}</div>
         </div>"""
 
     mobile_launcher_html = f"""
@@ -1695,7 +1702,7 @@ def home(request: Request):
         }}
         .mobile-launcher-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
             gap: 12px;
         }}
         .mobile-badge {{
@@ -1748,7 +1755,7 @@ def home(request: Request):
         label_abertas_titulo = "📤 Aplicações abertas na escola" if is_admin else "📤 Suas aplicações abertas"
         aplicacoes_abertas_html = f"""
             <h2 style="margin-top:28px; font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">{label_abertas_titulo}</h2>
-            <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px; max-width:900px;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:10px; max-width:900px;">
                 {linhas}
             </div>
         """
