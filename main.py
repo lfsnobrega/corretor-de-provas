@@ -124,7 +124,23 @@ def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: s
     except ImportError:
         return None, None, "Biblioteca do Google Drive não instalada no servidor (google-api-python-client / google-auth)."
     except Exception as e:
-        return None, None, f"Erro ao enviar pro Google Drive: {e}"
+        import traceback
+        # Algumas exceções do google-auth/googleapiclient têm str(e) vazio — cai pro
+        # repr(e) (mostra ao menos o tipo da exceção) e, se for erro HTTP da API,
+        # extrai o motivo (25/08/2026, depois de ver esse caso em produção).
+        detalhe = str(e).strip() or repr(e)
+        try:
+            from googleapiclient.errors import HttpError
+            if isinstance(e, HttpError):
+                motivo = e._get_reason().strip() if hasattr(e, "_get_reason") else ""
+                detalhe = f"HTTP {e.resp.status} — {motivo or e.content}"
+        except Exception:
+            pass
+        # Log completo (com traceback) vai pro journalctl, mesmo que a mensagem mostrada
+        # ao usuário seja curta — é o que a gente olha pra diagnosticar de verdade.
+        print(f"[Drive upload] Falha ao enviar '{nome_arquivo}': {detalhe}")
+        print(traceback.format_exc())
+        return None, None, f"Erro ao enviar pro Google Drive: {detalhe}"
 
 
 def _pode_editar_questao(prof: Optional[dict], questao_criador_id: Optional[int]) -> bool:
