@@ -92,10 +92,18 @@ def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: s
     Usa a IDENTIDADE DA PRÓPRIA VM (Application Default Credentials) em vez de uma chave
     JSON baixada — não precisa de service account key (a organização pode bloquear a
     criação dessas chaves por política de segurança, como aconteceu aqui em 25/08/2026).
-    Basta a VM ter o escopo do Drive habilitado e a pasta ser compartilhada com o e-mail
-    da conta de serviço da própria VM (a 'Compute Engine default service account' ou uma
-    custom, o que estiver configurado). Se GOOGLE_DRIVE_CREDENTIALS_JSON estiver definida,
-    ainda é aceita como alternativa (ambientes fora do GCP, ou se a política mudar).
+    A VM precisa ter o escopo do Drive habilitado (drive, não só cloud-platform — o
+    Drive fica de fora do cloud-platform) e a pasta compartilhada com o e-mail da conta
+    de serviço da própria VM. Se GOOGLE_DRIVE_CREDENTIALS_JSON estiver definida, ainda é
+    aceita como alternativa (ambientes fora do GCP, ou se a política mudar).
+
+    IMPORTANTE sobre o escopo: usamos 'drive' (completo) e não 'drive.file'. O escopo
+    'drive.file' só enxerga arquivos/pastas que O PRÓPRIO APP criou (ou que foram abertos
+    via seletor do Google) — uma pasta compartilhada manualmente pela interface do Drive
+    fica invisível pra esse escopo, mesmo com a permissão de Editor certinha. Descobrimos
+    isso em produção em 25/08/2026 (erro 404 'File not found' na pasta, mesmo compartilhada
+    corretamente) — trocar pra 'drive' resolve.
+
     Retorna (file_id, link, erro). Se não der pra autenticar, retorna erro claro em vez de
     quebrar — o registro do afastamento é salvo de qualquer forma."""
     if not GOOGLE_DRIVE_FOLDER_ID:
@@ -105,16 +113,15 @@ def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: s
         from googleapiclient.http import MediaIoBaseUpload
         import io as _io
 
+        DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
         creds = None
         if GOOGLE_DRIVE_CREDENTIALS_JSON:
             from google.oauth2 import service_account
             info = json.loads(GOOGLE_DRIVE_CREDENTIALS_JSON)
-            creds = service_account.Credentials.from_service_account_info(
-                info, scopes=["https://www.googleapis.com/auth/drive.file"]
-            )
+            creds = service_account.Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
         else:
             import google.auth
-            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/drive.file"])
+            creds, _ = google.auth.default(scopes=DRIVE_SCOPES)
 
         service = build("drive", "v3", credentials=creds)
         metadata = {"name": nome_arquivo, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
