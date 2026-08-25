@@ -63,6 +63,70 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 dias
 _session_serializer = URLSafeTimedSerializer(SESSION_SECRET_KEY, salt="session-v1")
 
 
+GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
+GOOGLE_DRIVE_CREDENTIALS_JSON = os.environ.get("GOOGLE_DRIVE_CREDENTIALS_JSON", "")
+
+TIPOS_AFASTAMENTO = {
+    "atestado_medico": "Atestado médico",
+    "permissao_ausencia": "Permissão de ausência",
+    "abono_1_3": "Abono 1/3",
+    "abono_2_3": "Abono 2/3",
+}
+
+
+def _extrair_matricula(email: str) -> str:
+    """Extrai a matrícula do e-mail de cadastro do profissional. Formato usado na rede:
+    nome.MATRICULA@smevr.com.br — pega o último trecho separado por ponto, se for só
+    dígitos. Se não achar (email fora do padrão), retorna '—' (25/08/2026)."""
+    if not email or "@" not in email:
+        return "—"
+    local = email.split("@")[0]
+    partes = local.split(".")
+    ultima = partes[-1] if partes else ""
+    return ultima if ultima.isdigit() else "—"
+
+
+def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: str):
+    """Sobe um arquivo pra pasta do Google Drive configurada (GOOGLE_DRIVE_FOLDER_ID).
+
+    Usa a IDENTIDADE DA PRÓPRIA VM (Application Default Credentials) em vez de uma chave
+    JSON baixada — não precisa de service account key (a organização pode bloquear a
+    criação dessas chaves por política de segurança, como aconteceu aqui em 25/08/2026).
+    Basta a VM ter o escopo do Drive habilitado e a pasta ser compartilhada com o e-mail
+    da conta de serviço da própria VM (a 'Compute Engine default service account' ou uma
+    custom, o que estiver configurado). Se GOOGLE_DRIVE_CREDENTIALS_JSON estiver definida,
+    ainda é aceita como alternativa (ambientes fora do GCP, ou se a política mudar).
+    Retorna (file_id, link, erro). Se não der pra autenticar, retorna erro claro em vez de
+    quebrar — o registro do afastamento é salvo de qualquer forma."""
+    if not GOOGLE_DRIVE_FOLDER_ID:
+        return None, None, "Google Drive não configurado ainda (falta GOOGLE_DRIVE_FOLDER_ID no servidor)."
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        import io as _io
+
+        creds = None
+        if GOOGLE_DRIVE_CREDENTIALS_JSON:
+            from google.oauth2 import service_account
+            info = json.loads(GOOGLE_DRIVE_CREDENTIALS_JSON)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive.file"]
+            )
+        else:
+            import google.auth
+            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/drive.file"])
+
+        service = build("drive", "v3", credentials=creds)
+        metadata = {"name": nome_arquivo, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
+        media = MediaIoBaseUpload(_io.BytesIO(conteudo_bytes), mimetype=mime_type, resumable=False)
+        arquivo = service.files().create(body=metadata, media_body=media, fields="id, webViewLink").execute()
+        return arquivo.get("id"), arquivo.get("webViewLink"), None
+    except ImportError:
+        return None, None, "Biblioteca do Google Drive não instalada no servidor (google-api-python-client / google-auth)."
+    except Exception as e:
+        return None, None, f"Erro ao enviar pro Google Drive: {e}"
+
+
 def _pode_editar_questao(prof: Optional[dict], questao_criador_id: Optional[int]) -> bool:
     """Autor da questão OU admin podem editar. Questões legadas (sem dono) só admin edita."""
     if not prof:
@@ -499,9 +563,27 @@ def init_db():
 
     cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
     if "papel" not in cols_prof:
-        # 'docente' ou 'gestao' — preenchido no onboarding obrigatório do primeiro acesso
-        # (admin nunca precisa, já vê a escola toda) — 24/08/2026.
+        # 'docente', 'gestao' ou 'apoio' (Apoio Educacional) — preenchido no onboarding
+        # obrigatório do primeiro acesso (admin nunca precisa, já vê a escola toda) — 24/08/2026.
         conn.execute("ALTER TABLE professores ADD COLUMN papel TEXT")
+
+    # Módulo Administrativo: solicitações de afastamento (atestado/permissão/abono) com
+    # anexo salvo no Google Drive — 25/08/2026.
+    conn.execute("""CREATE TABLE IF NOT EXISTS afastamentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        professor_id INTEGER NOT NULL,
+        tipo TEXT NOT NULL,
+        data_inicio TEXT NOT NULL,
+        data_fim TEXT NOT NULL,
+        observacao TEXT,
+        arquivo_nome TEXT,
+        arquivo_drive_id TEXT,
+        arquivo_drive_link TEXT,
+        status_upload TEXT NOT NULL DEFAULT 'pendente',
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (professor_id) REFERENCES professores(id) ON DELETE CASCADE
+    )""")
+
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
         conn.execute("ALTER TABLE questoes ADD COLUMN ano TEXT")
@@ -1045,6 +1127,9 @@ def form_onboarding(request: Request):
                     <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
                         <input type="radio" name="papel" value="gestao" required style="width:auto;" onchange="document.getElementById('bloco-docente').style.display='none';"> <strong>Gestão</strong> — acompanho a escola toda
                     </label>
+                    <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
+                        <input type="radio" name="papel" value="apoio" required style="width:auto;" onchange="document.getElementById('bloco-docente').style.display='none';"> <strong>Apoio Educacional</strong> — Cuidadores, Agentes Escolares, Biblioteca e Apoio
+                    </label>
                 </fieldset>
 
                 <div id="bloco-docente" style="display:none;">
@@ -1078,7 +1163,7 @@ async def salvar_onboarding(request: Request):
 
     form = await request.form()
     papel = form.get("papel")
-    if papel not in ("docente", "gestao"):
+    if papel not in ("docente", "gestao", "apoio"):
         return RedirectResponse("/onboarding", status_code=303)
 
     conn = get_db()
@@ -1098,6 +1183,206 @@ async def salvar_onboarding(request: Request):
     conn.commit()
     conn.close()
     return RedirectResponse("/", status_code=303)
+
+
+# ============ MÓDULO ADMINISTRATIVO — afastamentos (25/08/2026) ============
+
+@app.get("/administrativo/afastamentos/novo", response_class=HTMLResponse)
+def form_novo_afastamento(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    opts_tipo = "".join(f'<option value="{k}">{v}</option>' for k, v in TIPOS_AFASTAMENTO.items())
+    content = f"""
+        <div class="page-header">
+            <h1>📄 Nova solicitação de afastamento</h1>
+            <p class="subtitle">Atestado médico, permissão de ausência ou abono. Anexe o documento — ele é enviado direto pro Drive da escola.</p>
+        </div>
+        <form action="/administrativo/afastamentos/novo" method="post" enctype="multipart/form-data">
+            <label>Tipo de documento
+                <select name="tipo" required>
+                    <option value="">— selecione —</option>
+                    {opts_tipo}
+                </select>
+            </label>
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 200px;">Data de início
+                    <input type="date" name="data_inicio" required>
+                </label>
+                <label style="flex:1 1 200px;">Data de término
+                    <input type="date" name="data_fim" required>
+                </label>
+            </div>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:-8px;">Pra um único dia, use a mesma data nos dois campos.</p>
+            <label>Observação (opcional)
+                <textarea name="observacao" rows="3" placeholder="Algum detalhe adicional, se necessário"></textarea>
+            </label>
+            <label>Documento (PDF, foto ou imagem do atestado/permissão)
+                <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png" required>
+            </label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Enviar solicitação</button>
+                <a href="/administrativo/afastamentos" class="btn">Ver minhas solicitações</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Nova solicitação", content, active="administrativo"))
+
+
+@app.post("/administrativo/afastamentos/novo", response_class=HTMLResponse)
+async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio: str = Form(...),
+                             data_fim: str = Form(...), observacao: str = Form(""), arquivo: UploadFile = File(...)):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    if tipo not in TIPOS_AFASTAMENTO:
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Tipo de documento inválido.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo"))
+
+    conteudo = await arquivo.read()
+    ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
+    nome_no_drive = f"{prof['nome']} - {TIPOS_AFASTAMENTO[tipo]} - {data_inicio}{ext}"
+    mime = arquivo.content_type or "application/octet-stream"
+
+    drive_id, drive_link, erro_drive = _drive_upload_arquivo(nome_no_drive, conteudo, mime)
+    status_upload = "enviado" if drive_id else "erro"
+
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO afastamentos (professor_id, tipo, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (prof["id"], tipo, data_inicio, data_fim, observacao.strip() or None, arquivo.filename, drive_id, drive_link, status_upload))
+    conn.commit()
+    conn.close()
+
+    aviso_html = ""
+    if erro_drive:
+        aviso_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> a solicitação foi registrada, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador; o arquivo original fica só com você por enquanto.</div>'
+
+    content = f"""
+        <div class="page-header"><h1>✅ Solicitação enviada</h1></div>
+        <p>Tipo: <strong>{TIPOS_AFASTAMENTO[tipo]}</strong> · Período: {data_inicio} a {data_fim}</p>
+        {aviso_html}
+        <div class="page-actions" style="margin-top:16px;">
+            <a href="/administrativo/afastamentos" class="btn btn-primary">Ver minhas solicitações</a>
+            <a href="/administrativo/afastamentos/novo" class="btn">Nova solicitação</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Solicitação enviada", content, active="administrativo"))
+
+
+@app.get("/administrativo/afastamentos", response_class=HTMLResponse)
+def listar_meus_afastamentos(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    registros = conn.execute("""
+        SELECT * FROM afastamentos WHERE professor_id = ? ORDER BY data_inicio DESC
+    """, (prof["id"],)).fetchall()
+    conn.close()
+
+    if not registros:
+        linhas = '<tr><td colspan="5" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma solicitação ainda.</td></tr>'
+    else:
+        linhas = ""
+        for r in registros:
+            dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
+            status_badge = (
+                '<span style="color:var(--green);">✓ Anexado</span>' if r["status_upload"] == "enviado"
+                else '<span style="color:var(--orange);">⚠ Pendente de envio</span>'
+            )
+            link_html = f' · <a href="{r["arquivo_drive_link"]}" target="_blank">Ver documento</a>' if r["arquivo_drive_link"] else ""
+            linhas += f"""<tr>
+                <td style="padding:8px;">{TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"])}</td>
+                <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px; text-align:center;">{dias}</td>
+                <td style="padding:8px;">{status_badge}{link_html}</td>
+            </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📄 Minhas solicitações de afastamento</h1>
+        </div>
+        <div class="page-actions" style="margin-bottom:14px;">
+            <a href="/administrativo/afastamentos/novo" class="btn btn-primary">+ Nova solicitação</a>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left;">Tipo</th>
+                <th style="padding:8px; text-align:left;">Período</th>
+                <th style="padding:8px;">Dias</th>
+                <th style="padding:8px; text-align:left;">Documento</th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+    """
+    return HTMLResponse(render_page("Minhas solicitações", content, active="administrativo"))
+
+
+@app.get("/administrativo/relatorio", response_class=HTMLResponse)
+def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Optional[int] = None):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    hoje = date.today()
+    mes = mes or hoje.month
+    ano = ano or hoje.year
+
+    conn = get_db()
+    registros = conn.execute("""
+        SELECT a.*, p.nome AS prof_nome, p.email AS prof_email
+        FROM afastamentos a
+        JOIN professores p ON p.id = a.professor_id
+        WHERE strftime('%Y-%m', a.data_inicio) = ?
+        ORDER BY p.nome, a.data_inicio
+    """, (f"{ano:04d}-{mes:02d}",)).fetchall()
+    conn.close()
+
+    if not registros:
+        linhas = '<tr><td colspan="6" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum afastamento registrado nesse mês.</td></tr>'
+    else:
+        linhas = ""
+        for r in registros:
+            dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
+            matricula = _extrair_matricula(r["prof_email"])
+            link_html = f'<a href="{r["arquivo_drive_link"]}" target="_blank">Ver</a>' if r["arquivo_drive_link"] else "—"
+            linhas += f"""<tr>
+                <td style="padding:8px;">{r["prof_nome"]}</td>
+                <td style="padding:8px; text-align:center;">{matricula}</td>
+                <td style="padding:8px;">{TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"])}</td>
+                <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px; text-align:center;">{dias}</td>
+                <td style="padding:8px;">{link_html}</td>
+            </tr>"""
+
+    meses_nomes = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+    opts_mes = "".join(f'<option value="{i}"{" selected" if i==mes else ""}>{meses_nomes[i]}</option>' for i in range(1, 13))
+
+    content = f"""
+        <div class="page-header">
+            <h1>📊 Relatório de Afastamentos — {meses_nomes[mes]}/{ano}</h1>
+        </div>
+        <form method="get" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:18px;">
+            <label style="margin:0;">Mês <select name="mes">{opts_mes}</select></label>
+            <label style="margin:0;">Ano <input type="number" name="ano" value="{ano}"></label>
+            <button type="submit" class="btn">Filtrar</button>
+        </form>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left;">Nome</th>
+                <th style="padding:8px;">Matrícula</th>
+                <th style="padding:8px; text-align:left;">Tipo</th>
+                <th style="padding:8px; text-align:left;">Período</th>
+                <th style="padding:8px;">Dias</th>
+                <th style="padding:8px; text-align:left;">Documento</th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+    """
+    return HTMLResponse(render_page("Relatório de Afastamentos", content, active="administrativo"))
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1470,9 +1755,10 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
                 <div class="sidebar-section">Análise</div>
                 {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
-                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
-                {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim")) if professor else ""}
+                {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
                 {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {('<div class="sidebar-section">Administrativo</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo", "📄", "Nova solicitação") + nav_item("/administrativo/afastamentos", "administrativo", "📋", "Minhas solicitações") + (nav_item("/administrativo/relatorio", "administrativo", "📊", "Relatório de Afastamentos") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
             </nav>
             {user_block}
@@ -1761,6 +2047,7 @@ def home(request: Request):
             ("📋", "Minhas aplic.", "/minhas-aplicacoes", True),
             ("📷", "Digitalizar", "/escanear", True),
             ("📊", "Simulados", "/simulados", True),
+            ("📈", "Análises", "/analises-pedagogicas", True),
         ]),
         ("Banco", "#16a34a", [
             ("📚", "Disciplinas", "/disciplinas", is_admin),
@@ -1769,7 +2056,6 @@ def home(request: Request):
         ]),
         ("Gestão", "#7c3aed", [
             ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
-            ("📈", "Análises", "/analises-pedagogicas", is_admin or is_gestor),
             ("👤", "Usuários", "/admin/usuarios", is_admin),
         ]),
     ]
@@ -4701,9 +4987,14 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
 
 @app.get("/boletim/dashboard", response_class=HTMLResponse)
 def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
-                       turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
-    _r = _require_admin_or_403(request)
-    if _r is not None: return _r
+                       turma_id: Optional[str] = None, ano_esc: Optional[str] = None):
+    # Liberado pra todos os docentes (antes só admin) — 25/08/2026
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    # turma_id chega como "" quando o filtro é "todas as turmas" — Optional[int] quebrava
+    # aqui com erro 422 (25/08/2026). Aceita como string e converte manualmente.
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
     conn = get_db()
 
     combinacoes = conn.execute("""
@@ -5320,9 +5611,10 @@ def _boletim_ranking_faltas(dados_turma):
 
 @app.get("/boletim/boletim-individual", response_class=HTMLResponse)
 def form_boletim_individual(request: Request):
+    # Liberado pra todos os docentes (antes só admin/gestão) — 25/08/2026
     prof = _current_prof_ctx.get()
-    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return RedirectResponse("/boletim", status_code=303)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
 
     conn = get_db()
     turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
@@ -5356,10 +5648,16 @@ def form_boletim_individual(request: Request):
 
 
 @app.get("/boletim/boletim-individual/gerar", response_class=HTMLResponse)
-def gerar_boletim_individual(ano: int, turma_id: int, aluno_id: Optional[int] = None):
+def gerar_boletim_individual(ano: int, turma_id: str, aluno_id: Optional[str] = None):
+    # Liberado pra todos os docentes (antes só admin/gestão) — 25/08/2026
     prof = _current_prof_ctx.get()
-    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return RedirectResponse("/boletim", status_code=303)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    # Mesma proteção contra string vazia do formulário (25/08/2026)
+    if not turma_id or not turma_id.strip().isdigit():
+        return RedirectResponse("/boletim/boletim-individual", status_code=303)
+    turma_id = int(turma_id)
+    aluno_id = int(aluno_id) if aluno_id and aluno_id.strip().isdigit() else None
 
     conn = get_db()
     turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
@@ -5580,10 +5878,12 @@ def gerar_boletim_individual(ano: int, turma_id: int, aluno_id: Optional[int] = 
 
 
 @app.get("/boletim/relatorio-turma", response_class=HTMLResponse)
-def boletim_relatorio_turma(ano: Optional[int] = None, turma_id: Optional[int] = None):
+def boletim_relatorio_turma(ano: Optional[int] = None, turma_id: Optional[str] = None):
+    # Liberado pra todos os docentes (antes só admin/gestão) — 25/08/2026
     prof = _current_prof_ctx.get()
-    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return RedirectResponse("/boletim", status_code=303)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
 
     conn = get_db()
     if not turma_id or not ano:
@@ -5718,9 +6018,12 @@ def boletim_relatorio_turma(ano: Optional[int] = None, turma_id: Optional[int] =
 
 @app.get("/boletim/estudantes", response_class=HTMLResponse)
 def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
-                        turma_id: Optional[int] = None, ano_esc: Optional[str] = None, q: Optional[str] = None):
-    _r = _require_admin_or_403(request)
-    if _r is not None: return _r
+                        turma_id: Optional[str] = None, ano_esc: Optional[str] = None, q: Optional[str] = None):
+    # Liberado pra todos os docentes (antes só admin) — 25/08/2026
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
     conn = get_db()
 
     combinacoes = conn.execute("""
@@ -5838,10 +6141,12 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
 
 
 @app.get("/boletim/relatorio-geral", response_class=HTMLResponse)
-def boletim_relatorio_geral(trimestre: Optional[int] = None, ano: Optional[int] = None, turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
+def boletim_relatorio_geral(trimestre: Optional[int] = None, ano: Optional[int] = None, turma_id: Optional[str] = None, ano_esc: Optional[str] = None):
+    # Liberado pra todos os docentes (antes só admin/gestão) — 25/08/2026
     prof = _current_prof_ctx.get()
-    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return RedirectResponse("/boletim", status_code=303)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
 
     conn = get_db()
     if trimestre is None or ano is None:
@@ -5987,9 +6292,12 @@ def boletim_relatorio_geral(trimestre: Optional[int] = None, ano: Optional[int] 
 @app.get("/boletim/comparativo", response_class=HTMLResponse)
 def boletim_comparativo(request: Request, ano: Optional[int] = None,
                          trimestre_a: Optional[int] = None, trimestre_b: Optional[int] = None,
-                         turma_id: Optional[int] = None, ano_esc: Optional[str] = None):
-    _r = _require_admin_or_403(request)
-    if _r is not None: return _r
+                         turma_id: Optional[str] = None, ano_esc: Optional[str] = None):
+    # Liberado pra todos os docentes (antes só admin) — 25/08/2026
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
     conn = get_db()
 
     trimestres_disponiveis = conn.execute("""
@@ -6212,11 +6520,13 @@ def boletim_comparativo(request: Request, ano: Optional[int] = None,
 
 @app.get("/boletim/analise", response_class=HTMLResponse)
 def boletim_analise_form(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
-                          turma_id: Optional[int] = None, disciplina_id: Optional[int] = None):
+                          turma_id: Optional[str] = None, disciplina_id: Optional[str] = None):
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
     eh_admin = bool(prof.get("is_admin") or prof.get("is_gestor"))
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
+    disciplina_id = int(disciplina_id) if disciplina_id and disciplina_id.strip().isdigit() else None
 
     conn = get_db()
 
@@ -13018,9 +13328,10 @@ def relatorio_composicao_nota_aluno(par: str, turma_id: int, aluno_id: int):
 
 @app.get("/simulados/relatorio-notas", response_class=HTMLResponse)
 def form_relatorio_notas_simulado():
+    # Liberado pra todos os docentes (antes só admin/gestão) — 25/08/2026
     prof = _current_prof_ctx.get()
-    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return RedirectResponse("/simulados", status_code=303)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
     conn = get_db()
     sims = conn.execute(
         "SELECT * FROM simulados ORDER BY ano DESC, trimestre DESC, ano_escolaridade, dia"
@@ -13065,10 +13376,14 @@ def form_relatorio_notas_simulado():
 
 
 @app.get("/simulados/relatorio-notas/gerar", response_class=HTMLResponse)
-def gerar_relatorio_notas_simulado(par: str, turma_id: int, ponderado: int = 0):
+def gerar_relatorio_notas_simulado(par: str, turma_id: str, ponderado: int = 0):
+    # Liberado pra todos os docentes (antes só admin/gestão) — 25/08/2026
     prof = _current_prof_ctx.get()
-    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return RedirectResponse("/simulados", status_code=303)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    if not turma_id or not turma_id.strip().isdigit():
+        return RedirectResponse("/simulados/relatorio-notas", status_code=303)
+    turma_id = int(turma_id)
     try:
         sim1_id_str, sim2_id_str = par.split(":")
         sim1_id, sim2_id = int(sim1_id_str), int(sim2_id_str)
@@ -13797,9 +14112,10 @@ def analises_pedagogicas_hub():
     num só lugar. Não substitui os links que já existem dentro de Simulados e de
     cada aplicação de prova — é só um atalho central a mais (ver conversa sobre
     Opção 1 de organização, 28/07/2026)."""
+    # Liberado pra todos os docentes (antes só admin/gestão) — 25/08/2026
     prof = _current_prof_ctx.get()
-    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
-        return RedirectResponse("/", status_code=303)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
 
     def card(icone, titulo, desc, href, texto_btn="Abrir"):
         return f"""
