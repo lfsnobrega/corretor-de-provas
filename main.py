@@ -496,6 +496,12 @@ def init_db():
         # do Conselho de Classe por casamento de nome; usado como chave estável nas seguintes (24/08/2026).
         conn.execute("ALTER TABLE alunos ADD COLUMN codigo_rede TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alunos_codigo_rede ON alunos(codigo_rede)")
+
+    cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
+    if "papel" not in cols_prof:
+        # 'docente' ou 'gestao' — preenchido no onboarding obrigatório do primeiro acesso
+        # (admin nunca precisa, já vê a escola toda) — 24/08/2026.
+        conn.execute("ALTER TABLE professores ADD COLUMN papel TEXT")
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
         conn.execute("ALTER TABLE questoes ADD COLUMN ano TEXT")
@@ -929,12 +935,16 @@ def get_current_professor(request: Request) -> Optional[dict]:
     return {
         "id": prof["id"], "email": prof["email"], "nome": prof["nome"],
         "foto_url": prof["foto_url"], "is_admin": bool(prof["is_admin"]), "is_gestor": bool(prof["is_gestor"] if "is_gestor" in prof.keys() else 0), "status": (prof["status"] if "status" in prof.keys() else "ativo"),
+        "papel": (prof["papel"] if "papel" in prof.keys() else None),
     }
 
 
 # Rotas públicas (sem login)
 PUBLIC_PATHS = {"/login", "/auth/google", "/auth/google/callback", "/auth/dev-login", "/logout", "/acesso-pendente", "/acesso-bloqueado"}
 PUBLIC_PREFIXES = ("/static/", "/responder/")
+# Rotas que continuam acessíveis mesmo pra quem ainda não completou o onboarding
+# (senão o próprio onboarding fica inacessível — causaria loop de redirecionamento).
+ONBOARDING_ISENTAS = {"/onboarding", "/logout"}
 
 
 @app.middleware("http")
@@ -951,6 +961,11 @@ async def auth_middleware(request: Request, call_next):
         return RedirectResponse("/acesso-pendente", status_code=303)
     if status_prof == "bloqueado" and path != "/acesso-bloqueado":
         return RedirectResponse("/acesso-bloqueado", status_code=303)
+    # Onboarding obrigatório (24/08/2026): professor sem papel definido (e que não é
+    # admin) precisa escolher docente/gestão antes de usar o resto do sistema. Admin
+    # nunca passa por isso — já enxerga a escola toda.
+    if not prof.get("is_admin") and not prof.get("papel") and path not in ONBOARDING_ISENTAS:
+        return RedirectResponse("/onboarding", status_code=303)
     request.state.professor = prof
     token = _current_prof_ctx.set(prof)
     try:
@@ -989,6 +1004,100 @@ def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> 
     conn.commit()
     conn.close()
     return {"id": prof_id, "email": email, "nome": nome, "is_admin": is_admin, "is_gestor": is_gestor, "status": status}
+
+
+@app.get("/onboarding", response_class=HTMLResponse)
+def form_onboarding(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    if prof.get("is_admin") or prof.get("papel"):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    disciplinas = conn.execute("SELECT id, nome FROM disciplinas WHERE nome != 'Geral' ORDER BY nome").fetchall()
+    turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    conn.close()
+
+    opts_disc = "".join(
+        f'<label style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer;">'
+        f'<input type="checkbox" name="disciplina_id" value="{d["id"]}" style="width:auto;"> {d["nome"]}</label>'
+        for d in disciplinas
+    )
+    opts_turma = "".join(
+        f'<label style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer;">'
+        f'<input type="checkbox" name="turma_id" value="{t["id"]}" style="width:auto;"> {t["nome"]} ({t["ano_letivo"]})</label>'
+        for t in turmas
+    )
+
+    content = f"""
+        <div style="max-width:560px; margin:40px auto; padding:0 16px;">
+            <div class="page-header">
+                <h1>👋 Bem-vindo(a), {prof["nome"]}</h1>
+                <p class="subtitle">Antes de continuar, conta pra gente seu papel na escola — isso personaliza o que você vê na tela inicial.</p>
+            </div>
+            <form action="/onboarding" method="post">
+                <fieldset>
+                    <legend>Qual é o seu papel?</legend>
+                    <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
+                        <input type="radio" name="papel" value="docente" required style="width:auto;" onchange="document.getElementById('bloco-docente').style.display='block';"> <strong>Docente</strong> — dou aula em turmas específicas
+                    </label>
+                    <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
+                        <input type="radio" name="papel" value="gestao" required style="width:auto;" onchange="document.getElementById('bloco-docente').style.display='none';"> <strong>Gestão</strong> — acompanho a escola toda
+                    </label>
+                </fieldset>
+
+                <div id="bloco-docente" style="display:none;">
+                    <div class="tip" style="margin-top:14px;">Marque as disciplinas e turmas que você leciona. Isso filtra o que aparece pra você — não afeta o que outros professores veem.</div>
+                    <fieldset style="margin-top:10px;">
+                        <legend>Disciplina(s) que você leciona</legend>
+                        {opts_disc}
+                    </fieldset>
+                    <fieldset style="margin-top:10px;">
+                        <legend>Turma(s) em que você leciona</legend>
+                        {opts_turma}
+                    </fieldset>
+                </div>
+
+                <div class="page-actions">
+                    <button type="submit" class="btn btn-primary">Continuar</button>
+                </div>
+            </form>
+        </div>
+    """
+    return HTMLResponse(render_page("Bem-vindo", content, active=""))
+
+
+@app.post("/onboarding")
+async def salvar_onboarding(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    if prof.get("is_admin") or prof.get("papel"):
+        return RedirectResponse("/", status_code=303)
+
+    form = await request.form()
+    papel = form.get("papel")
+    if papel not in ("docente", "gestao"):
+        return RedirectResponse("/onboarding", status_code=303)
+
+    conn = get_db()
+    conn.execute("UPDATE professores SET papel = ? WHERE id = ?", (papel, prof["id"]))
+
+    if papel == "docente":
+        disciplina_ids = [int(v) for v in form.getlist("disciplina_id") if v.strip().isdigit()]
+        turma_ids = [int(v) for v in form.getlist("turma_id") if v.strip().isdigit()]
+        # Grava o produto disciplina × turma selecionado — assume que o professor leciona
+        # a(s) mesma(s) disciplina(s) em todas as turmas marcadas (caso comum; quem dá
+        # disciplinas diferentes em turmas diferentes pode ajustar depois, se necessário).
+        for did in disciplina_ids:
+            for tid in turma_ids:
+                conn.execute("""INSERT OR IGNORE INTO boletim_professor_turma (professor_id, turma_id, disciplina_id)
+                                 VALUES (?, ?, ?)""", (prof["id"], tid, did))
+
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1633,6 +1742,10 @@ def home(request: Request):
             WHERE a.criada_por_professor_id = ? AND a.aberta = 1
             ORDER BY a.id DESC LIMIT 10
         """, (prof_id,)).fetchall()
+
+    # Card "Alunos que precisam de atenção" — precisa do prof completo (papel/id), não só
+    # is_admin, então busca antes de fechar a conexão (24/08/2026).
+    atencao_dados = _home_alunos_atencao(conn, prof) if prof else None
     conn.close()
 
     # ----- HTML -----
@@ -1766,13 +1879,65 @@ def home(request: Request):
             <p style="color:var(--text-muted); font-size:13px;">{label_vazio}</p>
         """
 
+    # Card "Alunos que precisam de atenção" — reaproveita a mesma regra de risco de
+    # repetência do dashboard (qualquer disciplina com média T1+T2 < 5,0) + maiores
+    # faltas. Vai na coluna direita da tela inicial, no espaço que ficava vazio (24/08/2026).
+    if not atencao_dados:
+        atencao_html = ""
+    else:
+        risco_html = ""
+        for al in atencao_dados["risco"]:
+            discs_txt = ", ".join(f'{d["nome"]} ({d["media"]:.1f})' for d in al["disciplinas"])
+            risco_html += (
+                f'<div style="padding:8px 0; border-bottom:1px solid var(--border);">'
+                f'<strong style="font-size:13px;">{al["nome"]}</strong> <span style="font-size:11px; color:var(--text-muted);">· {al["turma_nome"]}</span>'
+                f'<div style="font-size:11px; color:var(--red);">{discs_txt}</div>'
+                f'</div>'
+            )
+        if not risco_html:
+            risco_html = '<p style="font-size:12px; color:var(--text-muted);">Nenhum aluno em risco no momento. 🎉</p>'
+
+        faltas_html = ""
+        for al in atencao_dados["faltas"]:
+            faltas_html += (
+                f'<div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;">'
+                f'<span><strong>{al["nome"]}</strong> <span style="font-size:11px; color:var(--text-muted);">· {al["turma_nome"]}</span></span>'
+                f'<span style="color:var(--orange); font-weight:600;">{al["total"]} faltas</span>'
+                f'</div>'
+            )
+        if not faltas_html:
+            faltas_html = '<p style="font-size:12px; color:var(--text-muted);">Sem dados de falta ainda.</p>'
+
+        atencao_html = f"""
+        <div class="card" style="padding:16px;">
+            <h2 style="margin:0 0 4px 0; font-size:14px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">⚠️ Alunos que precisam de atenção</h2>
+            <p style="font-size:11px; color:var(--text-muted); margin:0 0 12px 0;">Ano {atencao_dados["ano"]} · Risco de repetência = média (1º+2º tri.) abaixo de 5,0</p>
+            <h3 style="font-size:12px; margin:10px 0 4px 0; color:var(--red);">Risco de repetência</h3>
+            {risco_html}
+            <h3 style="font-size:12px; margin:14px 0 4px 0; color:var(--orange);">Mais faltas</h3>
+            {faltas_html}
+        </div>
+        """
+
     content = f"""
         <div class="page-header">
             <h1 style="margin-bottom:4px;">Olá, {nome_prof} 👋</h1>
             <p class="subtitle" style="margin-top:0;">Veja seu panorama atualizado.</p>
         </div>
-        {mobile_launcher_html}
-        {aplicacoes_abertas_html}
+        <div class="home-layout">
+            <div class="home-layout-main">
+                {mobile_launcher_html}
+                {aplicacoes_abertas_html}
+            </div>
+            <div class="home-layout-side">
+                {atencao_html}
+            </div>
+        </div>
+        <style>
+        .home-layout {{ display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }}
+        .home-layout-main {{ flex: 1 1 640px; min-width: 0; }}
+        .home-layout-side {{ flex: 0 1 320px; min-width: 280px; }}
+        </style>
     """
     return render_page("Início", content, active="home")
 
@@ -4360,6 +4525,72 @@ def _boletim_saeb_nivel(media):
     if media < 8.5:
         return {"key": "n3", "label": "N3 — Adequado", "color": "#16a34a"}
     return {"key": "n4", "label": "N4 — Avançado", "color": "#6366f1"}
+
+
+def _home_alunos_atencao(conn, prof):
+    """Monta o card 'Alunos que precisam de atenção' da tela inicial (24/08/2026):
+    combina risco de repetência (mesma regra do dashboard: qualquer disciplina com média
+    T1+T2 < 5,0) e maiores faltas. Admin/gestão vê a escola toda; docente só vê o que
+    está vinculado a ele em boletim_professor_turma (disciplina+turma específicas).
+    Retorna dict {risco: [...], faltas: [...], ano: int} ou None se não há dado ainda."""
+    combinacoes = conn.execute("SELECT ano FROM boletim_medias GROUP BY ano ORDER BY ano DESC LIMIT 1").fetchone()
+    if not combinacoes:
+        return None
+    ano = combinacoes["ano"]
+
+    eh_docente_restrito = not prof.get("is_admin") and prof.get("papel") == "docente"
+    turma_ids_permitidas = None
+    pares_permitidos = None  # set de (turma_nome, disciplina_nome) — só pra docente
+    if eh_docente_restrito:
+        vinculos = conn.execute("""
+            SELECT t.id AS turma_id, t.nome AS turma_nome, d.nome AS disciplina_nome
+            FROM boletim_professor_turma bpt
+            JOIN turmas t ON t.id = bpt.turma_id
+            JOIN disciplinas d ON d.id = bpt.disciplina_id
+            WHERE bpt.professor_id = ?
+        """, (prof["id"],)).fetchall()
+        if not vinculos:
+            return {"risco": [], "faltas": [], "ano": ano}
+        turma_ids_permitidas = {v["turma_id"] for v in vinculos}
+        pares_permitidos = {(v["turma_nome"], v["disciplina_nome"]) for v in vinculos}
+
+    # --- Risco de repetência ---
+    risco_bruto = _boletim_possiveis_repetentes(conn, ano, turma_id=None)
+    if eh_docente_restrito:
+        risco_filtrado = []
+        for aluno in risco_bruto:
+            discs_ok = [d for d in aluno["disciplinas"] if (aluno["turma_nome"], d["nome"]) in pares_permitidos]
+            if discs_ok:
+                risco_filtrado.append({**aluno, "disciplinas": discs_ok})
+        risco_bruto = risco_filtrado
+    risco = risco_bruto[:5]
+
+    # --- Maiores faltas ---
+    if eh_docente_restrito:
+        placeholders = ",".join("?" * len(turma_ids_permitidas))
+        faltas_rows = conn.execute(f"""
+            SELECT a.id, a.nome, t.nome AS turma_nome, SUM(bf.faltas) AS total
+            FROM boletim_faltas bf
+            JOIN alunos a ON a.id = bf.aluno_id
+            JOIN turmas t ON t.id = a.turma_id
+            JOIN disciplinas d ON d.id = bf.disciplina_id
+            WHERE bf.ano = ? AND bf.aluno_id IN (
+                SELECT id FROM alunos WHERE turma_id IN ({placeholders})
+            )
+            GROUP BY a.id ORDER BY total DESC LIMIT 5
+        """, [ano] + list(turma_ids_permitidas)).fetchall()
+    else:
+        faltas_rows = conn.execute("""
+            SELECT a.id, a.nome, t.nome AS turma_nome, SUM(bf.faltas) AS total
+            FROM boletim_faltas bf
+            JOIN alunos a ON a.id = bf.aluno_id
+            JOIN turmas t ON t.id = a.turma_id
+            WHERE bf.ano = ?
+            GROUP BY a.id ORDER BY total DESC LIMIT 5
+        """, (ano,)).fetchall()
+    faltas = [dict(r) for r in faltas_rows if r["total"]]
+
+    return {"risco": risco, "faltas": faltas, "ano": ano}
 
 
 def _boletim_possiveis_repetentes(conn, ano, turma_id=None):
