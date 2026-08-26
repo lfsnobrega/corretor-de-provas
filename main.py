@@ -1076,6 +1076,14 @@ async def auth_middleware(request: Request, call_next):
     # nunca passa por isso — já enxerga a escola toda.
     if not prof.get("is_admin") and not prof.get("papel") and path not in ONBOARDING_ISENTAS:
         return RedirectResponse("/onboarding", status_code=303)
+    # Apoio Educacional (Cuidadores/Agentes/Biblioteca/Apoio) só acessa a solicitação de
+    # afastamento — nenhuma outra área do sistema (25/08/2026, a pedido).
+    if prof.get("papel") == "apoio" and not prof.get("is_admin") and not prof.get("is_gestor"):
+        rotas_permitidas_apoio = {
+            "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos",
+        }
+        if path not in rotas_permitidas_apoio and path not in ONBOARDING_ISENTAS:
+            return RedirectResponse("/administrativo/afastamentos/novo", status_code=303)
     request.state.professor = prof
     token = _current_prof_ctx.set(prof)
     try:
@@ -1255,7 +1263,7 @@ def form_novo_afastamento(request: Request):
             </div>
         </form>
     """
-    return HTMLResponse(render_page("Nova solicitação", content, active="administrativo"))
+    return HTMLResponse(render_page("Nova solicitação", content, active="administrativo-novo"))
 
 
 @app.post("/administrativo/afastamentos/novo", response_class=HTMLResponse)
@@ -1265,7 +1273,7 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     if not prof:
         return RedirectResponse("/login", status_code=303)
     if tipo not in TIPOS_AFASTAMENTO:
-        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Tipo de documento inválido.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo"))
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Tipo de documento inválido.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
 
     conteudo = await arquivo.read()
     ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
@@ -1296,7 +1304,7 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
             <a href="/administrativo/afastamentos/novo" class="btn">Nova solicitação</a>
         </div>
     """
-    return HTMLResponse(render_page("Solicitação enviada", content, active="administrativo"))
+    return HTMLResponse(render_page("Solicitação enviada", content, active="administrativo-novo"))
 
 
 @app.get("/administrativo/afastamentos", response_class=HTMLResponse)
@@ -1346,7 +1354,7 @@ def listar_meus_afastamentos(request: Request):
             <tbody>{linhas}</tbody>
         </table>
     """
-    return HTMLResponse(render_page("Minhas solicitações", content, active="administrativo"))
+    return HTMLResponse(render_page("Minhas solicitações", content, active="administrativo-minhas"))
 
 
 @app.get("/administrativo/relatorio", response_class=HTMLResponse)
@@ -1397,6 +1405,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
             <label style="margin:0;">Mês <select name="mes">{opts_mes}</select></label>
             <label style="margin:0;">Ano <input type="number" name="ano" value="{ano}"></label>
             <button type="submit" class="btn">Filtrar</button>
+            <a href="/administrativo/relatorio/exportar?mes={mes}&ano={ano}" class="btn">📥 Baixar Excel</a>
         </form>
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
             <thead><tr style="background:var(--bg-subtle);">
@@ -1410,7 +1419,61 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
             <tbody>{linhas}</tbody>
         </table>
     """
-    return HTMLResponse(render_page("Relatório de Afastamentos", content, active="administrativo"))
+    return HTMLResponse(render_page("Relatório de Afastamentos", content, active="administrativo-relatorio"))
+
+
+@app.get("/administrativo/relatorio/exportar")
+def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Optional[int] = None):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    hoje = date.today()
+    mes = mes or hoje.month
+    ano = ano or hoje.year
+
+    conn = get_db()
+    registros = conn.execute("""
+        SELECT a.*, p.nome AS prof_nome, p.email AS prof_email
+        FROM afastamentos a
+        JOIN professores p ON p.id = a.professor_id
+        WHERE strftime('%Y-%m', a.data_inicio) = ?
+        ORDER BY p.nome, a.data_inicio
+    """, (f"{ano:04d}-{mes:02d}",)).fetchall()
+    conn.close()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Afastamentos"
+    cabecalho = ["Nome", "Matrícula", "Tipo", "Data início", "Data fim", "Dias", "Observação", "Link do documento"]
+    ws.append(cabecalho)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="4B5563", end_color="4B5563", fill_type="solid")
+        cell.alignment = Alignment(horizontal="center")
+
+    for r in registros:
+        dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
+        matricula = _extrair_matricula(r["prof_email"])
+        ws.append([
+            r["prof_nome"], matricula, TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"]),
+            r["data_inicio"], r["data_fim"], dias, r["observacao"] or "", r["arquivo_drive_link"] or "",
+        ])
+
+    for i, largura in enumerate([28, 12, 22, 12, 12, 8, 30, 40], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = largura
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    meses_nomes_arq = ["", "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+    filename = f"afastamentos_{meses_nomes_arq[mes]}_{ano}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1738,6 +1801,41 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     link_habilidades = nav_item("/habilidades", "habilidades", "🎯", "Habilidades BNCC") if is_admin_view else ''
     link_turmas = nav_item("/turmas", "turmas", "👥", "Turmas") if is_admin_view else ''
 
+    # Apoio Educacional (Cuidadores/Agentes/Biblioteca/Apoio) só vê Início + Administrativo
+    # no menu — nenhuma outra área (25/08/2026, a pedido).
+    eh_apoio_restrito = bool(professor and professor.get("papel") == "apoio" and not professor.get("is_admin") and not professor.get("is_gestor"))
+
+    if eh_apoio_restrito:
+        nav_body = f"""
+                {nav_item("/", "home", "🏠", "Início")}
+                <div class="sidebar-section">Administrativo</div>
+                {nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova solicitação")}
+                {nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas solicitações")}
+        """
+    else:
+        nav_body = f"""
+                {nav_item("/", "home", "🏠", "Início")}
+                <div class="sidebar-section">Banco</div>
+                {link_disciplinas}
+                {link_habilidades}
+                {nav_item("/questoes", "questoes", "✏️", "Cadastrar questão")}
+                <div class="sidebar-section">Avaliações</div>
+                {nav_item("/provas", "provas", "📝", "Cadastrar atividade")}
+                {link_turmas}
+                {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
+                {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
+                {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
+                {nav_item("/simulados", "simulados", "📊", "Simulados")}
+                <div class="sidebar-section">Análise</div>
+                {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
+                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim")) if professor else ""}
+                {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
+                {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {('<div class="sidebar-section">Administrativo</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova solicitação") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas solicitações") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório de Afastamentos") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
+                {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
+        """
+
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1768,26 +1866,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 <div class="sidebar-brand-text" style="font-size:11px; color:var(--text-muted); margin-top:6px; font-weight:600; letter-spacing:0.3px;">Sistema Pedagógico</div>
             </div>
             <nav>
-                {nav_item("/", "home", "🏠", "Início")}
-                <div class="sidebar-section">Banco</div>
-                {link_disciplinas}
-                {link_habilidades}
-                {nav_item("/questoes", "questoes", "✏️", "Cadastrar questão")}
-                <div class="sidebar-section">Avaliações</div>
-                {nav_item("/provas", "provas", "📝", "Cadastrar atividade")}
-                {link_turmas}
-                {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
-                {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
-                {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
-                {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
-                {nav_item("/simulados", "simulados", "📊", "Simulados")}
-                <div class="sidebar-section">Análise</div>
-                {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
-                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim")) if professor else ""}
-                {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
-                {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
-                {('<div class="sidebar-section">Administrativo</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo", "📄", "Nova solicitação") + nav_item("/administrativo/afastamentos", "administrativo", "📋", "Minhas solicitações") + (nav_item("/administrativo/relatorio", "administrativo", "📊", "Relatório de Afastamentos") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
-                {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
+                {nav_body}
             </nav>
             {user_block}
         </aside>
@@ -2067,26 +2146,40 @@ def home(request: Request):
     # cor de destaque por grupo) em vez de um grid único e monótono — 24/08/2026, revisão
     # depois de feedback de que a versão anterior ficou genérica/sem hierarquia.
     is_gestor = bool(prof and prof.get("is_gestor"))
-    grupos_config = [
-        ("Ação rápida", "#2563eb", [
-            ("✏️", "Nova questão", "/questoes/nova", True),
-            ("📝", "Atividades", "/provas", True),
-            ("📤", "Aplicar", "/aplicacoes/nova", True),
-            ("📋", "Minhas aplic.", "/minhas-aplicacoes", True),
-            ("📷", "Digitalizar", "/escanear", True),
-            ("📊", "Simulados", "/simulados", True),
-            ("📈", "Análises", "/analises-pedagogicas", True),
-        ]),
-        ("Banco", "#16a34a", [
-            ("📚", "Disciplinas", "/disciplinas", is_admin),
-            ("🎯", "Habilidades", "/habilidades", is_admin),
-            ("👥", "Turmas", "/turmas", is_admin),
-        ]),
-        ("Gestão", "#7c3aed", [
-            ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
-            ("👤", "Usuários", "/admin/usuarios", is_admin),
-        ]),
-    ]
+    eh_apoio_restrito = bool(prof and prof.get("papel") == "apoio" and not is_admin and not is_gestor)
+
+    grupo_administrativo = ("Administrativo", "#0891b2", [
+        ("📄", "Nova solicitação", "/administrativo/afastamentos/novo", True),
+        ("📋", "Minhas solicitações", "/administrativo/afastamentos", True),
+        ("📊", "Relatório de Afastamentos", "/administrativo/relatorio", is_admin or is_gestor),
+    ])
+
+    if eh_apoio_restrito:
+        # Apoio Educacional só acessa a solicitação de afastamento — a tela inicial
+        # mostra só isso, sem os atalhos de áreas que ele não pode abrir (25/08/2026).
+        grupos_config = [grupo_administrativo]
+    else:
+        grupos_config = [
+            ("Ação rápida", "#2563eb", [
+                ("✏️", "Nova questão", "/questoes/nova", True),
+                ("📝", "Atividades", "/provas", True),
+                ("📤", "Aplicar", "/aplicacoes/nova", True),
+                ("📋", "Minhas aplic.", "/minhas-aplicacoes", True),
+                ("📷", "Digitalizar", "/escanear", True),
+                ("📊", "Simulados", "/simulados", True),
+                ("📈", "Análises", "/analises-pedagogicas", True),
+            ]),
+            ("Banco", "#16a34a", [
+                ("📚", "Disciplinas", "/disciplinas", is_admin),
+                ("🎯", "Habilidades", "/habilidades", is_admin),
+                ("👥", "Turmas", "/turmas", is_admin),
+            ]),
+            grupo_administrativo,
+            ("Gestão", "#7c3aed", [
+                ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
+                ("👤", "Usuários", "/admin/usuarios", is_admin),
+            ]),
+        ]
     grupos_html = ""
     TILE_PX = 140   # largura-alvo de cada bloco, igual em todas as fileiras
     GAP_PX = 12
