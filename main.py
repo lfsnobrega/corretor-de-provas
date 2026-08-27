@@ -5805,21 +5805,34 @@ def form_boletim_individual(request: Request):
 
     conn = get_db()
     turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    alunos_todos = conn.execute("SELECT id, turma_id, nome FROM alunos ORDER BY nome").fetchall()
     conn.close()
     opts_turmas = "".join(f'<option value="{t["id"]}" data-ano="{t["ano_letivo"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+
+    # Mapa turma_id -> [alunos] embutido como JSON pro <select> de aluno se popular
+    # sozinho no navegador, sem precisar recarregar a página (26/08/2026, a pedido).
+    alunos_por_turma = {}
+    for a in alunos_todos:
+        alunos_por_turma.setdefault(a["turma_id"], []).append({"id": a["id"], "nome": a["nome"]})
+    alunos_por_turma_json = json.dumps(alunos_por_turma, ensure_ascii=False)
 
     content = f"""
         <div class="page-header">
             <h1>🧾 Gerar Boletim Individual</h1>
             <p class="subtitle">Gera o boletim de cada aluno com as notas acumuladas de todos os trimestres já importados (1º, 2º e/ou 3º), no modelo oficial da escola.</p>
         </div>
-        <div class="tip">Escolha a turma e o ano. O boletim de <strong>todos os alunos</strong> da turma é gerado, um por página — use "Imprimir" no navegador e escolha "Salvar como PDF" pra baixar. Se quiser só um aluno específico, escolha depois de carregar a turma.</div>
+        <div class="tip">Escolha a turma — dá pra gerar o boletim de <strong>toda a turma</strong> (um aluno por página) ou escolher um aluno específico depois de carregar a turma. Use "Imprimir" no navegador e escolha "Salvar como PDF" pra baixar.</div>
         <form action="/boletim/boletim-individual/gerar" method="get" target="_blank">
             <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
                 <label style="margin:0; flex:1 1 220px;">Turma
-                    <select name="turma_id" id="sel-turma-boletim" required onchange="document.getElementById('inp-ano-boletim').value = this.selectedOptions[0].dataset.ano;">
+                    <select name="turma_id" id="sel-turma-boletim" required onchange="_atualizarAlunosBoletim(this)">
                         <option value="">— selecione —</option>
                         {opts_turmas}
+                    </select>
+                </label>
+                <label style="margin:0; flex:1 1 220px;">Aluno (opcional)
+                    <select name="aluno_id" id="sel-aluno-boletim">
+                        <option value="">— toda a turma —</option>
                     </select>
                 </label>
                 <label style="margin:0; flex:1 1 120px;">Ano
@@ -5827,9 +5840,21 @@ def form_boletim_individual(request: Request):
                 </label>
             </div>
             <div class="page-actions">
-                <button type="submit" class="btn btn-primary">Gerar boletins da turma</button>
+                <button type="submit" class="btn btn-primary">Gerar boletim</button>
             </div>
         </form>
+        <script>
+        const _alunosPorTurmaBoletim = {alunos_por_turma_json};
+        function _atualizarAlunosBoletim(selTurma) {{
+            const opt = selTurma.selectedOptions[0];
+            document.getElementById('inp-ano-boletim').value = opt.dataset.ano || '';
+            const selAluno = document.getElementById('sel-aluno-boletim');
+            const lista = _alunosPorTurmaBoletim[selTurma.value] || [];
+            lista.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+            selAluno.innerHTML = '<option value="">— toda a turma —</option>' +
+                lista.map(a => `<option value="${{a.id}}">${{a.nome}}</option>`).join('');
+        }}
+        </script>
     """
     return render_page("Boletim Individual", content, active="boletim-individual")
 
@@ -5951,16 +5976,17 @@ def gerar_boletim_individual(ano: int, turma_id: str, aluno_id: Optional[str] = 
 
         alerta_repetente_html = ""
         if disciplinas_risco:
-            itens_risco = "".join(f'<li>{disc}: média {media:.1f}</li>' for disc, media in disciplinas_risco)
+            itens_risco = ", ".join(f'{disc} ({media:.1f})' for disc, media in disciplinas_risco)
             alerta_repetente_html = f"""
-            <div style="background:#fee2e2; border:1px solid #dc2626; border-radius:8px; padding:10px 14px; margin-bottom:14px;">
+            <div style="background:#fee2e2; border:1px solid #dc2626; border-radius:6px; padding:5px 10px; margin-bottom:8px; font-size:11px;">
                 <strong style="color:#dc2626;">⚠ Possível repetente</strong>
-                <span style="font-size:12px; color:#7f1d1d;"> — média do 1º+2º trimestre abaixo de 5,0 em:</span>
-                <ul style="margin:4px 0 0 18px; font-size:12px; color:#7f1d1d;">{itens_risco}</ul>
+                <span style="color:#7f1d1d;"> — média 1º+2º tri. abaixo de 5,0: {itens_risco}</span>
             </div>"""
 
-        # Comparativo Aluno × Turma (só disciplinas numéricas)
-        comparativo_html = ""
+        # Comparativo Aluno × Turma (só disciplinas numéricas) — em grid de 2 colunas
+        # pra economizar espaço vertical (antes um gráfico embaixo do outro estourava a
+        # página A4) — 26/08/2026, a pedido.
+        comparativo_itens = ""
         for disc in BOLETIM_DISC_NUMERICAS:
             nota_aluno = e["medias_finais"].get(disc)
             nota_turma = medias_turma.get(disc)
@@ -5969,24 +5995,25 @@ def gerar_boletim_individual(ano: int, turma_id: str, aluno_id: Optional[str] = 
             pct_aluno = min(100, (nota_aluno / 10) * 100)
             pct_turma = min(100, (nota_turma / 10) * 100) if nota_turma is not None else 0
             turma_str = f"{nota_turma:.1f}" if nota_turma is not None else "—"
-            comparativo_html += f"""
-            <div style="margin-bottom:10px;">
-                <div style="font-size:11px; font-weight:600; margin-bottom:3px;">{disc}</div>
-                <div style="display:flex; align-items:center; gap:6px; margin-bottom:2px;">
-                    <span style="font-size:10px; width:38px; color:#555;">Aluno</span>
-                    <div style="flex:1; background:#eee; border-radius:3px; height:10px; position:relative;">
+            comparativo_itens += f"""
+            <div>
+                <div style="font-size:10px; font-weight:600; margin-bottom:2px;">{disc}</div>
+                <div style="display:flex; align-items:center; gap:4px; margin-bottom:1px;">
+                    <span style="font-size:9px; width:32px; color:#555;">Aluno</span>
+                    <div style="flex:1; background:#eee; border-radius:3px; height:7px; position:relative;">
                         <div style="width:{pct_aluno}%; background:#2563eb; height:100%; border-radius:3px;"></div>
                     </div>
-                    <span style="font-size:10px; width:26px; text-align:right;">{nota_aluno:.1f}</span>
+                    <span style="font-size:9px; width:22px; text-align:right;">{nota_aluno:.1f}</span>
                 </div>
-                <div style="display:flex; align-items:center; gap:6px;">
-                    <span style="font-size:10px; width:38px; color:#555;">Turma</span>
-                    <div style="flex:1; background:#eee; border-radius:3px; height:10px; position:relative;">
+                <div style="display:flex; align-items:center; gap:4px;">
+                    <span style="font-size:9px; width:32px; color:#555;">Turma</span>
+                    <div style="flex:1; background:#eee; border-radius:3px; height:7px; position:relative;">
                         <div style="width:{pct_turma}%; background:#94a3b8; height:100%; border-radius:3px;"></div>
                     </div>
-                    <span style="font-size:10px; width:26px; text-align:right;">{turma_str}</span>
+                    <span style="font-size:9px; width:22px; text-align:right;">{turma_str}</span>
                 </div>
             </div>"""
+        comparativo_html = f'<div style="display:grid; grid-template-columns:1fr 1fr; gap:4px 20px;">{comparativo_itens}</div>'
 
         faltas_total = sum(v for v in e["faltas_por_trim"].values() if v)
         pos, total_turma = ranking_faltas.get(e["id"], (None, None))
@@ -5999,53 +6026,71 @@ def gerar_boletim_individual(ano: int, turma_id: str, aluno_id: Optional[str] = 
 
         quebra = "page-break-after: always;" if i < len(dados_turma) - 1 else ""
         paginas_html += f"""
-        <div style="{quebra} padding:24px; font-family: Helvetica, Arial, sans-serif; max-width:760px; margin:0 auto;">
-            <div style="text-align:center; margin-bottom:6px;">
-                <div style="font-weight:700; font-size:15px;">E.M Walmir de Freitas Monteiro</div>
-                <div style="font-size:12px; color:#555;">Volta Redonda — RJ</div>
+        <div style="{quebra} padding:14px 20px; font-family: Helvetica, Arial, sans-serif; max-width:760px; margin:0 auto; font-size:12px;">
+            <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:4px;">
+                <img src="/static/imagens/logo_walmir.png" alt="" style="height:38px; width:auto;">
+                <div style="text-align:center;">
+                    <div style="font-weight:700; font-size:14px;">E.M Walmir de Freitas Monteiro</div>
+                    <div style="font-size:11px; color:#555;">Volta Redonda — RJ</div>
+                </div>
             </div>
-            <h2 style="text-align:center; margin:14px 0 2px 0;">BOLETIM INDIVIDUAL</h2>
-            <div style="text-align:center; font-size:13px; color:#555; margin-bottom:16px;">{periodo_label}</div>
+            <h2 style="text-align:center; margin:8px 0 2px 0; font-size:16px;">BOLETIM INDIVIDUAL</h2>
+            <div style="text-align:center; font-size:12px; color:#555; margin-bottom:10px;">{periodo_label}</div>
 
-            <table style="width:100%; margin-bottom:10px; font-size:13px;">
+            <table style="width:100%; margin-bottom:6px; font-size:12px;">
                 <tr><td style="width:80px; color:#555;">Nome</td><td style="font-weight:700;">{e["nome"]}</td></tr>
                 <tr><td style="color:#555;">Turma</td><td>{turma["nome"]}</td></tr>
             </table>
-            <div style="margin-bottom:16px; font-size:13px;"><strong>Situação Geral:</strong> {situacao_html}</div>
+            <div style="margin-bottom:10px; font-size:12px;"><strong>Situação Geral:</strong> {situacao_html}</div>
 
             {alerta_repetente_html}
 
-            <h3 style="font-size:13px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:4px;">Desempenho por Disciplina — Escala SAEB</h3>
-            <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:18px;">
+            <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:3px; margin:10px 0 6px 0;">Desempenho por Disciplina — Escala SAEB</h3>
+            <table style="width:100%; border-collapse:collapse; font-size:11px; margin-bottom:10px;">
                 <thead><tr style="background:#f5f5f5;">
-                    <th style="padding:6px 8px; text-align:left;">Disciplina</th>
+                    <th style="padding:4px 6px; text-align:left;">Disciplina</th>
                     {colunas_trim_header}
-                    <th style="padding:6px 8px; text-align:center;">Média</th>
-                    <th style="padding:6px 8px; text-align:center;">Nível SAEB</th>
-                    <th style="padding:6px 8px; text-align:center;">Faltas</th>
+                    <th style="padding:4px 6px; text-align:center;">Média</th>
+                    <th style="padding:4px 6px; text-align:center;">Nível SAEB</th>
+                    <th style="padding:4px 6px; text-align:center;">Faltas</th>
                 </tr></thead>
                 <tbody>{linhas_disc}</tbody>
             </table>
 
-            <h3 style="font-size:13px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:4px;">📊 Comparativo: Nota do Aluno × Média da Turma</h3>
-            <div style="margin-bottom:18px;">{comparativo_html}</div>
+            <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:3px; margin:10px 0 6px 0;">📊 Comparativo: Nota do Aluno × Média da Turma</h3>
+            <div style="margin-bottom:10px;">{comparativo_html}</div>
 
-            <div style="display:flex; gap:14px; margin-bottom:18px;">
-                <div style="flex:1; text-align:center; padding:12px; background:#f5f5f5; border-radius:6px;">
-                    <div style="font-size:22px; font-weight:700;">{media_geral_str}</div>
-                    <div style="font-size:11px; color:#555;">Média geral · {saeb_geral["label"] if saeb_geral else "—"}</div>
+            <div style="display:flex; gap:10px; margin-bottom:10px;">
+                <div style="flex:1; text-align:center; padding:8px; background:#f5f5f5; border-radius:6px;">
+                    <div style="font-size:18px; font-weight:700;">{media_geral_str}</div>
+                    <div style="font-size:10px; color:#555;">Média geral · {saeb_geral["label"] if saeb_geral else "—"}</div>
                 </div>
-                <div style="flex:1; text-align:center; padding:12px; background:#f5f5f5; border-radius:6px;">
-                    <div style="font-size:22px; font-weight:700;">{faltas_total}</div>
-                    <div style="font-size:11px; color:#555;">Total de faltas · {ranking_str}</div>
+                <div style="flex:1; text-align:center; padding:8px; background:#f5f5f5; border-radius:6px;">
+                    <div style="font-size:18px; font-weight:700;">{faltas_total}</div>
+                    <div style="font-size:10px; color:#555;">Total de faltas · {ranking_str}</div>
                 </div>
-                <div style="flex:1; text-align:center; padding:12px; background:#f5f5f5; border-radius:6px;">
-                    <div style="font-size:22px;">{emoji}</div>
-                    <div style="font-size:11px; color:#555;">Estado emocional · {label_emo}</div>
+                <div style="flex:1; text-align:center; padding:8px; background:#f5f5f5; border-radius:6px;">
+                    <div style="font-size:18px;">{emoji}</div>
+                    <div style="font-size:10px; color:#555;">Estado emocional · {label_emo}</div>
                 </div>
             </div>
 
-            <div style="font-size:10px; color:#888; border-top:1px solid #ddd; padding-top:8px; margin-top:20px; text-align:center;">
+            <h3 style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:3px; margin:8px 0 4px 0;">📏 Escala SAEB</h3>
+            <table style="width:100%; border-collapse:collapse; font-size:9px; margin-bottom:6px;">
+                <thead><tr style="background:#f5f5f5;">
+                    <th style="padding:3px 5px; text-align:left;">Nível</th>
+                    <th style="padding:3px 5px; text-align:center;">Faixa</th>
+                    <th style="padding:3px 5px; text-align:left;">O que significa</th>
+                </tr></thead>
+                <tbody>
+                    <tr><td style="padding:3px 5px; color:#dc2626; font-weight:600;">N1 — Insuficiente</td><td style="padding:3px 5px; text-align:center;">0,0–4,9</td><td style="padding:3px 5px;">Não demonstra os conhecimentos mínimos esperados; necessita intervenção urgente.</td></tr>
+                    <tr><td style="padding:3px 5px; color:#ea580c; font-weight:600;">N2 — Básico</td><td style="padding:3px 5px; text-align:center;">5,0–6,9</td><td style="padding:3px 5px;">Conhecimentos elementares; ainda há lacunas importantes a superar.</td></tr>
+                    <tr><td style="padding:3px 5px; color:#16a34a; font-weight:600;">N3 — Adequado</td><td style="padding:3px 5px; text-align:center;">7,0–8,4</td><td style="padding:3px 5px;">Atingiu o nível de aprendizagem esperado para o ano.</td></tr>
+                    <tr><td style="padding:3px 5px; color:#6366f1; font-weight:600;">N4 — Avançado</td><td style="padding:3px 5px; text-align:center;">8,5–10,0</td><td style="padding:3px 5px;">Supera os conhecimentos esperados; excelente domínio das habilidades.</td></tr>
+                </tbody>
+            </table>
+
+            <div style="font-size:9px; color:#888; border-top:1px solid #ddd; padding-top:5px; margin-top:8px; text-align:center;">
                 Gerado automaticamente — E.M Walmir de Freitas Monteiro · {datetime.now().strftime("%d de %B de %Y")}
             </div>
         </div>
@@ -6055,7 +6100,7 @@ def gerar_boletim_individual(ano: int, turma_id: str, aluno_id: Optional[str] = 
 <html lang="pt-BR"><head><meta charset="utf-8">
 <title>Boletim Individual · {turma["nome"]}</title>
 <style>
-    @media print {{ @page {{ margin: 12mm; }} body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
+    @media print {{ @page {{ size: A4; margin: 10mm; }} body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
     body {{ margin:0; background:#fff; }}
 </style>
 </head><body>{paginas_html}
@@ -17399,183 +17444,4 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
                 blocos_info = []
                 ng = 0
                 for b in blocos:
-                    blocos_info.append({"numero": b["numero"], "disciplina_nome": b["disciplina_nome"], "q_inicio": ng + 1, "n_questoes": 10})
-                    ng += 10
-
-                result = await asyncio.to_thread(_processar_cartao_simulado, image_bytes, blocos_info, filename)
-                if not result["success"]:
-                    cards_html_parts.append(_render_card_erro(idx, filename, result.get("error", "Erro"), result.get("preview_base64")))
-                    n_erro += 1; idx += 1
-                    continue
-
-                ja_entregue_row = conn.execute("SELECT id FROM entregas WHERE aplicacao_id=? AND aluno_id=?", (app_id, aluno_id)).fetchone()
-                duplicata = aluno_id in alunos_no_lote
-                alunos_no_lote.add(aluno_id)
-
-                result["aluno_nome"] = aluno["nome"]
-                result["aluno_numero"] = aluno["numero"]
-                result["aluno_codigo"] = aluno["codigo_unico"]
-
-                if result.get("warnings") or duplicata or ja_entregue_row:
-                    n_warn += 1
-                else:
-                    n_ok += 1
-
-                cards_html_parts.append(
-                    f'<input type="hidden" name="card_{idx}_tipo" value="simulado">'
-                    f'<input type="hidden" name="card_{idx}_ctx_aplicacao_id" value="{app_id}">'
-                    f'<input type="hidden" name="card_{idx}_ctx_sim_id" value="{sim_id}">'
-                    + _render_card_revisao_simulado(idx, filename, result, blocos_info,
-                                                     ja_entregue=ja_entregue_row, duplicata_lote=duplicata)
-                )
-                idx += 1
-            else:
-                cards_html_parts.append(_render_card_erro(idx, filename, f"QR não reconhecido: '{qr_data[:30]}'"))
-                n_erro += 1; idx += 1
-    finally:
-        conn.close()
-
-    if not cards_html_parts:
-        return HTMLResponse(render_page("Lote vazio", '<div class="empty">Nenhuma foto foi processada.</div>', active="aplicacoes"))
-
-    resumo = f"""
-        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:18px;">
-            <div class="metric"><div class="metric-label">Cartões processados</div><div class="metric-value">{idx}</div></div>
-            <div class="metric"><div class="metric-label">Lidas OK</div><div class="metric-value" style="color:var(--green);">{n_ok}</div></div>
-            <div class="metric"><div class="metric-label">Com avisos</div><div class="metric-value" style="color:var(--orange);">{n_warn}</div></div>
-            <div class="metric"><div class="metric-label">Com erro</div><div class="metric-value" style="color:var(--red);">{n_erro}</div></div>
-        </div>
-    """
-    legenda = """
-        <div class="tip" style="font-size:12px;">
-            <strong>Como usar:</strong>
-            Essa tela detecta sozinha se cada cartão é de prova normal ou simulado. Cartões em <strong style="color:var(--red);">vermelho</strong> têm questão em branco ou marcação ambígua/dupla. Cartões em <strong style="color:var(--orange);">laranja</strong> têm avisos mais leves. Cartões cinza (erro) NÃO serão salvos. Clique no nome pra expandir e ver a foto + corrigir. Ao final, clique em <strong>"Salvar todos confirmados"</strong> — nada é gravado antes disso.
-        </div>
-    """
-    cards_html = "".join(cards_html_parts)
-
-    content = f"""
-        <div class="page-header">
-            <h1>📋 Revisão do lote (universal)</h1>
-            <p class="subtitle">Provas normais e simulados detectados automaticamente pelo QR Code</p>
-        </div>
-        {resumo}
-        {legenda}
-        <form action="/escanear/lote/confirmar" method="post">
-            <div style="margin-bottom:10px; display:flex; gap:8px;">
-                <button type="button" id="btn-marcar-todos" class="btn" style="font-size:12px;">☑ Marcar todos</button>
-                <button type="button" id="btn-desmarcar-todos" class="btn" style="font-size:12px;">☐ Desmarcar todos</button>
-            </div>
-            {cards_html}
-            <div style="position:sticky; bottom:0; background:var(--bg); padding:14px; border-top:2px solid var(--border); margin-top:18px; display:flex; gap:10px; align-items:center;">
-                <button type="submit" class="btn btn-primary" style="font-size:15px;">✓ Salvar todos confirmados</button>
-                <a href="/escanear" class="btn">📷 Escanear mais</a>
-                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">Cards desmarcados NÃO serão salvos.</span>
-            </div>
-        </form>
-        <script>
-        document.getElementById('btn-marcar-todos').addEventListener('click', () => {{
-            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = true);
-        }});
-        document.getElementById('btn-desmarcar-todos').addEventListener('click', () => {{
-            document.querySelectorAll('.card-confirmar-checkbox').forEach(cb => cb.checked = false);
-        }});
-        document.addEventListener('click', e => {{
-            const btn = e.target.closest('[data-toggle-card]');
-            if (!btn) return;
-            const card = btn.closest('.lote-card');
-            const body = card.querySelector('.lote-card-body');
-            const open = body.style.display !== 'none';
-            body.style.display = open ? 'none' : 'block';
-            btn.textContent = open ? '▼ Expandir' : '▲ Recolher';
-        }});
-        </script>
-    """
-    return HTMLResponse(render_page("Revisão do lote", content, active="aplicacoes"))
-
-
-@app.post("/escanear/lote/confirmar", response_class=HTMLResponse)
-async def confirmar_lote_universal(request: Request):
-    """Salva no banco os cards confirmados do lote universal (mistura de provas e simulados)."""
-    prof = _current_prof_ctx.get()
-    if not prof:
-        return RedirectResponse("/login", status_code=303)
-
-    form = await request.form()
-    confirmados_idx = set()
-    for key in form.keys():
-        if key.startswith("card_") and key.endswith("_confirmar"):
-            try:
-                confirmados_idx.add(int(key.split("_")[1]))
-            except (ValueError, IndexError):
-                continue
-
-    conn = get_db()
-    salvos = []
-    for idx in sorted(confirmados_idx):
-        tipo = form.get(f"card_{idx}_tipo")
-        aluno_id_str = form.get(f"card_{idx}_aluno_id")
-        aplicacao_id_str = form.get(f"card_{idx}_ctx_aplicacao_id")
-        if not tipo or not aluno_id_str or not aplicacao_id_str:
-            continue
-        try:
-            aluno_id = int(aluno_id_str)
-            aplicacao_id = int(aplicacao_id_str)
-        except ValueError:
-            continue
-        aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
-        if not aluno:
-            continue
-
-        if tipo == "prova":
-            apl = conn.execute("SELECT prova_id FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
-            if not apl:
-                continue
-            questoes = conn.execute(
-                "SELECT questao_id FROM prova_questoes WHERE prova_id = ? ORDER BY ordem", (apl["prova_id"],)
-            ).fetchall()
-        else:
-            sim_id_str = form.get(f"card_{idx}_ctx_sim_id")
-            if not sim_id_str:
-                continue
-            questoes = conn.execute("""
-                SELECT sq.questao_id FROM simulado_questoes sq
-                JOIN simulado_blocos b ON b.id = sq.bloco_id
-                WHERE b.simulado_id = ? ORDER BY b.numero, sq.ordem
-            """, (int(sim_id_str),)).fetchall()
-        questao_ids = [q["questao_id"] for q in questoes]
-
-        conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
-        n_ok = 0
-        for q_num, q_id in enumerate(questao_ids, start=1):
-            letra = form.get(f"card_{idx}_q_{q_num}", "").strip()
-            if letra in ("A", "B", "C", "D"):
-                conn.execute(
-                    "INSERT INTO respostas (aplicacao_id, aluno_id, questao_id, alternativa_letra) VALUES (?,?,?,?)",
-                    (aplicacao_id, aluno_id, q_id, letra)
-                )
-                n_ok += 1
-
-        existente = conn.execute("SELECT id FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id)).fetchone()
-        if not existente:
-            conn.execute("INSERT INTO entregas (aplicacao_id, aluno_id) VALUES (?,?)", (aplicacao_id, aluno_id))
-        else:
-            conn.execute("UPDATE entregas SET finalizada_em = CURRENT_TIMESTAMP WHERE aplicacao_id = ? AND aluno_id = ?", (aplicacao_id, aluno_id))
-        salvos.append({"nome": aluno["nome"], "n_respondidas": n_ok, "total": len(questao_ids)})
-
-    conn.commit()
-    conn.close()
-
-    linhas = "".join(
-        f"<tr><td style='padding:5px 8px;'>{s['nome']}</td><td style='padding:5px 8px;text-align:center;'>{s['n_respondidas']}/{s['total']}</td></tr>"
-        for s in salvos
-    )
-    content = f"""
-        <div class="page-header"><h1>✅ Lote salvo</h1><p class="subtitle">{len(salvos)} cartão(ões) confirmado(s) e salvo(s)</p></div>
-        <table style="width:100%;border-collapse:collapse;font-size:13px;">
-            <thead><tr style="background:var(--bg-subtle);"><th style="padding:5px 8px;text-align:left;">Aluno</th><th style="padding:5px 8px;">Respondidas</th></tr></thead>
-            <tbody>{linhas}</tbody>
-        </table>
-        <div style="margin-top:20px;"><a href="/escanear" class="btn btn-primary">📷 Escanear mais</a></div>
-    """
-    return HTMLResponse(render_page("Lote salvo", content, active="aplicacoes"))
+                    blocos_info.append({"numero": b["numero"], "disciplina_nome": b["d
