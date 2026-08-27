@@ -71,7 +71,12 @@ TIPOS_AFASTAMENTO = {
     "permissao_ausencia": "Permissão de ausência",
     "abono_1_3": "Abono 1/3",
     "abono_2_3": "Abono 2/3",
+    "folga_tre": "Folga TRE",
+    "abono_integral": "Abono Integral",
+    "declaracao_comparecimento": "Declaração de comparecimento",
 }
+# Tipos que precisam de horário específico (não é o dia inteiro) — 26/08/2026
+TIPOS_COM_HORARIO = {"permissao_ausencia"}
 
 
 def _extrair_matricula(email: str) -> str:
@@ -611,6 +616,13 @@ def init_db():
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (professor_id) REFERENCES professores(id) ON DELETE CASCADE
     )""")
+    cols_afast = {row[1] for row in conn.execute("PRAGMA table_info(afastamentos)").fetchall()}
+    if "horario_inicio" not in cols_afast:
+        # Só preenchido quando o tipo é 'Permissão de ausência' — a pessoa saiu/voltou
+        # num horário específico do dia, não o dia inteiro (26/08/2026).
+        conn.execute("ALTER TABLE afastamentos ADD COLUMN horario_inicio TEXT")
+    if "horario_fim" not in cols_afast:
+        conn.execute("ALTER TABLE afastamentos ADD COLUMN horario_fim TEXT")
 
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
@@ -1230,14 +1242,15 @@ def form_novo_afastamento(request: Request):
         return RedirectResponse("/login", status_code=303)
 
     opts_tipo = "".join(f'<option value="{k}">{v}</option>' for k, v in TIPOS_AFASTAMENTO.items())
+    tipos_com_horario_js = json.dumps(list(TIPOS_COM_HORARIO))
     content = f"""
         <div class="page-header">
-            <h1>📄 Nova solicitação de afastamento</h1>
-            <p class="subtitle">Atestado médico, permissão de ausência ou abono. Anexe o documento — ele é enviado direto pro Drive da escola.</p>
+            <h1>📄 Nova Justificativa para o Ponto</h1>
+            <p class="subtitle">Atestado médico, permissão de ausência, abono ou outro documento. Anexe o arquivo — ele é enviado direto pro Drive da escola.</p>
         </div>
         <form action="/administrativo/afastamentos/novo" method="post" enctype="multipart/form-data">
             <label>Tipo de documento
-                <select name="tipo" required>
+                <select name="tipo" id="sel-tipo-afastamento" required onchange="_toggleHorarioAfastamento(this.value)">
                     <option value="">— selecione —</option>
                     {opts_tipo}
                 </select>
@@ -1251,6 +1264,17 @@ def form_novo_afastamento(request: Request):
                 </label>
             </div>
             <p style="font-size:12px; color:var(--text-muted); margin-top:-8px;">Pra um único dia, use a mesma data nos dois campos.</p>
+            <div id="bloco-horario-afastamento" style="display:none;">
+                <div class="tip" style="margin-bottom:10px;">Permissão de ausência: informe o horário de saída e de retorno nesse dia.</div>
+                <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                    <label style="flex:1 1 200px;">Horário de saída
+                        <input type="time" name="horario_inicio" id="inp-horario-inicio">
+                    </label>
+                    <label style="flex:1 1 200px;">Horário de retorno
+                        <input type="time" name="horario_fim" id="inp-horario-fim">
+                    </label>
+                </div>
+            </div>
             <label>Observação (opcional)
                 <textarea name="observacao" rows="3" placeholder="Algum detalhe adicional, se necessário"></textarea>
             </label>
@@ -1262,18 +1286,35 @@ def form_novo_afastamento(request: Request):
                 <a href="/administrativo/afastamentos" class="btn">Ver minhas solicitações</a>
             </div>
         </form>
+        <script>
+        const _tiposComHorario = {tipos_com_horario_js};
+        function _toggleHorarioAfastamento(valor) {{
+            const bloco = document.getElementById('bloco-horario-afastamento');
+            const precisa = _tiposComHorario.includes(valor);
+            bloco.style.display = precisa ? 'block' : 'none';
+            document.getElementById('inp-horario-inicio').required = precisa;
+            document.getElementById('inp-horario-fim').required = precisa;
+        }}
+        </script>
     """
-    return HTMLResponse(render_page("Nova solicitação", content, active="administrativo-novo"))
+    return HTMLResponse(render_page("Nova Justificativa", content, active="administrativo-novo"))
 
 
 @app.post("/administrativo/afastamentos/novo", response_class=HTMLResponse)
 async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio: str = Form(...),
-                             data_fim: str = Form(...), observacao: str = Form(""), arquivo: UploadFile = File(...)):
+                             data_fim: str = Form(...), observacao: str = Form(""), arquivo: UploadFile = File(...),
+                             horario_inicio: str = Form(""), horario_fim: str = Form("")):
     prof = get_current_professor(request)
     if not prof:
         return RedirectResponse("/login", status_code=303)
     if tipo not in TIPOS_AFASTAMENTO:
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Tipo de documento inválido.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
+
+    # Horário só é obrigatório pra tipos como Permissão de ausência (26/08/2026)
+    horario_inicio = horario_inicio.strip() or None
+    horario_fim = horario_fim.strip() or None
+    if tipo in TIPOS_COM_HORARIO and (not horario_inicio or not horario_fim):
+        return HTMLResponse(render_page("Erro", f'<div class="page-header"><h1>Erro</h1></div><p>Pra "{TIPOS_AFASTAMENTO[tipo]}" é preciso informar o horário de saída e retorno.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
 
     conteudo = await arquivo.read()
     ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
@@ -1285,9 +1326,9 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
 
     conn = get_db()
     conn.execute("""
-        INSERT INTO afastamentos (professor_id, tipo, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (prof["id"], tipo, data_inicio, data_fim, observacao.strip() or None, arquivo.filename, drive_id, drive_link, status_upload))
+        INSERT INTO afastamentos (professor_id, tipo, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, horario_inicio, horario_fim)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (prof["id"], tipo, data_inicio, data_fim, observacao.strip() or None, arquivo.filename, drive_id, drive_link, status_upload, horario_inicio, horario_fim))
     conn.commit()
     conn.close()
 
@@ -1295,16 +1336,17 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     if erro_drive:
         aviso_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> a solicitação foi registrada, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador; o arquivo original fica só com você por enquanto.</div>'
 
+    horario_str = f' · Horário: {horario_inicio} às {horario_fim}' if horario_inicio and horario_fim else ""
     content = f"""
-        <div class="page-header"><h1>✅ Solicitação enviada</h1></div>
-        <p>Tipo: <strong>{TIPOS_AFASTAMENTO[tipo]}</strong> · Período: {data_inicio} a {data_fim}</p>
+        <div class="page-header"><h1>✅ Justificativa enviada</h1></div>
+        <p>Tipo: <strong>{TIPOS_AFASTAMENTO[tipo]}</strong> · Período: {data_inicio} a {data_fim}{horario_str}</p>
         {aviso_html}
         <div class="page-actions" style="margin-top:16px;">
-            <a href="/administrativo/afastamentos" class="btn btn-primary">Ver minhas solicitações</a>
-            <a href="/administrativo/afastamentos/novo" class="btn">Nova solicitação</a>
+            <a href="/administrativo/afastamentos" class="btn btn-primary">Ver minhas Justificativas</a>
+            <a href="/administrativo/afastamentos/novo" class="btn">Nova Justificativa</a>
         </div>
     """
-    return HTMLResponse(render_page("Solicitação enviada", content, active="administrativo-novo"))
+    return HTMLResponse(render_page("Justificativa enviada", content, active="administrativo-novo"))
 
 
 @app.get("/administrativo/afastamentos", response_class=HTMLResponse)
@@ -1320,7 +1362,7 @@ def listar_meus_afastamentos(request: Request):
     conn.close()
 
     if not registros:
-        linhas = '<tr><td colspan="5" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma solicitação ainda.</td></tr>'
+        linhas = '<tr><td colspan="6" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma Justificativa ainda.</td></tr>'
     else:
         linhas = ""
         for r in registros:
@@ -1330,31 +1372,34 @@ def listar_meus_afastamentos(request: Request):
                 else '<span style="color:var(--orange);">⚠ Pendente de envio</span>'
             )
             link_html = f' · <a href="{r["arquivo_drive_link"]}" target="_blank">Ver documento</a>' if r["arquivo_drive_link"] else ""
+            horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
             linhas += f"""<tr>
                 <td style="padding:8px;">{TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"])}</td>
                 <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px; text-align:center;">{horario_col}</td>
                 <td style="padding:8px; text-align:center;">{dias}</td>
                 <td style="padding:8px;">{status_badge}{link_html}</td>
             </tr>"""
 
     content = f"""
         <div class="page-header">
-            <h1>📄 Minhas solicitações de afastamento</h1>
+            <h1>📄 Minhas Justificativas para o Ponto</h1>
         </div>
         <div class="page-actions" style="margin-bottom:14px;">
-            <a href="/administrativo/afastamentos/novo" class="btn btn-primary">+ Nova solicitação</a>
+            <a href="/administrativo/afastamentos/novo" class="btn btn-primary">+ Nova Justificativa</a>
         </div>
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
             <thead><tr style="background:var(--bg-subtle);">
                 <th style="padding:8px; text-align:left;">Tipo</th>
                 <th style="padding:8px; text-align:left;">Período</th>
+                <th style="padding:8px;">Horário</th>
                 <th style="padding:8px;">Dias</th>
                 <th style="padding:8px; text-align:left;">Documento</th>
             </tr></thead>
             <tbody>{linhas}</tbody>
         </table>
     """
-    return HTMLResponse(render_page("Minhas solicitações", content, active="administrativo-minhas"))
+    return HTMLResponse(render_page("Minhas Justificativas", content, active="administrativo-minhas"))
 
 
 @app.get("/administrativo/relatorio", response_class=HTMLResponse)
@@ -1378,18 +1423,20 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
     conn.close()
 
     if not registros:
-        linhas = '<tr><td colspan="6" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum afastamento registrado nesse mês.</td></tr>'
+        linhas = '<tr><td colspan="7" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma Justificativa registrada nesse mês.</td></tr>'
     else:
         linhas = ""
         for r in registros:
             dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
             matricula = _extrair_matricula(r["prof_email"])
             link_html = f'<a href="{r["arquivo_drive_link"]}" target="_blank">Ver</a>' if r["arquivo_drive_link"] else "—"
+            horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
             linhas += f"""<tr>
                 <td style="padding:8px;">{r["prof_nome"]}</td>
                 <td style="padding:8px; text-align:center;">{matricula}</td>
                 <td style="padding:8px;">{TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"])}</td>
                 <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px; text-align:center;">{horario_col}</td>
                 <td style="padding:8px; text-align:center;">{dias}</td>
                 <td style="padding:8px;">{link_html}</td>
             </tr>"""
@@ -1399,7 +1446,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
 
     content = f"""
         <div class="page-header">
-            <h1>📊 Relatório de Afastamentos — {meses_nomes[mes]}/{ano}</h1>
+            <h1>📊 Relatório de Justificativas para o Ponto — {meses_nomes[mes]}/{ano}</h1>
         </div>
         <form method="get" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:18px;">
             <label style="margin:0;">Mês <select name="mes">{opts_mes}</select></label>
@@ -1413,13 +1460,14 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
                 <th style="padding:8px;">Matrícula</th>
                 <th style="padding:8px; text-align:left;">Tipo</th>
                 <th style="padding:8px; text-align:left;">Período</th>
+                <th style="padding:8px;">Horário</th>
                 <th style="padding:8px;">Dias</th>
                 <th style="padding:8px; text-align:left;">Documento</th>
             </tr></thead>
             <tbody>{linhas}</tbody>
         </table>
     """
-    return HTMLResponse(render_page("Relatório de Afastamentos", content, active="administrativo-relatorio"))
+    return HTMLResponse(render_page("Relatório de Justificativas", content, active="administrativo-relatorio"))
 
 
 @app.get("/administrativo/relatorio/exportar")
@@ -1444,8 +1492,8 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Afastamentos"
-    cabecalho = ["Nome", "Matrícula", "Tipo", "Data início", "Data fim", "Dias", "Observação", "Link do documento"]
+    ws.title = "Justificativas"
+    cabecalho = ["Nome", "Matrícula", "Tipo", "Data início", "Data fim", "Horário saída", "Horário retorno", "Dias", "Observação", "Link do documento"]
     ws.append(cabecalho)
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
@@ -1455,12 +1503,15 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
     for r in registros:
         dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
         matricula = _extrair_matricula(r["prof_email"])
+        horario_inicio_r = r["horario_inicio"] if ("horario_inicio" in r.keys() and r["horario_inicio"]) else ""
+        horario_fim_r = r["horario_fim"] if ("horario_fim" in r.keys() and r["horario_fim"]) else ""
         ws.append([
             r["prof_nome"], matricula, TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"]),
-            r["data_inicio"], r["data_fim"], dias, r["observacao"] or "", r["arquivo_drive_link"] or "",
+            r["data_inicio"], r["data_fim"], horario_inicio_r, horario_fim_r, dias,
+            r["observacao"] or "", r["arquivo_drive_link"] or "",
         ])
 
-    for i, largura in enumerate([28, 12, 22, 12, 12, 8, 30, 40], start=1):
+    for i, largura in enumerate([28, 12, 22, 12, 12, 13, 14, 8, 30, 40], start=1):
         ws.column_dimensions[get_column_letter(i)].width = largura
 
     buffer = BytesIO()
@@ -1468,7 +1519,7 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
     buffer.seek(0)
 
     meses_nomes_arq = ["", "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
-    filename = f"afastamentos_{meses_nomes_arq[mes]}_{ano}.xlsx"
+    filename = f"justificativas_ponto_{meses_nomes_arq[mes]}_{ano}.xlsx"
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1808,31 +1859,45 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     if eh_apoio_restrito:
         nav_body = f"""
                 {nav_item("/", "home", "🏠", "Início")}
-                <div class="sidebar-section">Administrativo</div>
-                {nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova solicitação")}
-                {nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas solicitações")}
+                <div class="sidebar-section">Justificativas para o Ponto</div>
+                {nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa")}
+                {nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas")}
         """
     else:
+        # "Gerar Boletim" fica visível pra qualquer profissional (como já era), mas agora
+        # agrupado dentro da seção "Boletim" — por isso o cabeçalho e os itens de
+        # importação (admin/gestão) são montados separadamente (25/08/2026, reorganização).
+        itens_boletim = []
+        itens_boletim.append(nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim"))
+        if professor and (professor.get("is_admin") or professor.get("is_gestor")):
+            itens_boletim.append(nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)"))
+            itens_boletim.append(nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha"))
+        secao_boletim = ('<div class="sidebar-section">Boletim</div>' + "".join(itens_boletim)) if professor else ""
+
+        # "Configurações" reúne o que era cadastro estrutural espalhado (Habilidades BNCC
+        # e Turmas saíram de onde estavam) — admin apenas, mesma regra de antes (25/08/2026).
+        secao_configuracoes = (
+            '<div class="sidebar-section">Configurações</div>' + link_disciplinas + link_habilidades + link_turmas
+        ) if is_admin_view else ""
+
         nav_body = f"""
                 {nav_item("/", "home", "🏠", "Início")}
-                <div class="sidebar-section">Banco</div>
-                {link_disciplinas}
-                {link_habilidades}
+                <div class="sidebar-section">Banco de questões</div>
                 {nav_item("/questoes", "questoes", "✏️", "Cadastrar questão")}
-                <div class="sidebar-section">Avaliações</div>
+                <div class="sidebar-section">Tarefas</div>
                 {nav_item("/provas", "provas", "📝", "Cadastrar atividade")}
-                {link_turmas}
                 {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
                 {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
-                {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Painel de gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Gestão de tarefas") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
-                <div class="sidebar-section">Análise</div>
+                <div class="sidebar-section">Análises pedagógicas</div>
                 {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
-                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Estudantes") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma") + nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim")) if professor else ""}
+                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Mapa de notas") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma")) if professor else ""}
                 {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
-                {('<div class="sidebar-section">Boletim</div>' + nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)") + nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha")) if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
-                {('<div class="sidebar-section">Administrativo</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova solicitação") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas solicitações") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório de Afastamentos") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
+                {secao_boletim}
+                {secao_configuracoes}
+                {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
         """
 
@@ -2148,10 +2213,10 @@ def home(request: Request):
     is_gestor = bool(prof and prof.get("is_gestor"))
     eh_apoio_restrito = bool(prof and prof.get("papel") == "apoio" and not is_admin and not is_gestor)
 
-    grupo_administrativo = ("Administrativo", "#0891b2", [
-        ("📄", "Nova solicitação", "/administrativo/afastamentos/novo", True),
-        ("📋", "Minhas solicitações", "/administrativo/afastamentos", True),
-        ("📊", "Relatório de Afastamentos", "/administrativo/relatorio", is_admin or is_gestor),
+    grupo_administrativo = ("Justificativas para o Ponto", "#0891b2", [
+        ("📄", "Nova Justificativa", "/administrativo/afastamentos/novo", True),
+        ("📋", "Minhas Justificativas", "/administrativo/afastamentos", True),
+        ("📊", "Relatório", "/administrativo/relatorio", is_admin or is_gestor),
     ])
 
     if eh_apoio_restrito:
@@ -2168,6 +2233,7 @@ def home(request: Request):
                 ("📷", "Digitalizar", "/escanear", True),
                 ("📊", "Simulados", "/simulados", True),
                 ("📈", "Análises", "/analises-pedagogicas", True),
+                ("📊", "Dashboard Pedagógico", "/boletim/dashboard", True),
             ]),
             ("Banco", "#16a34a", [
                 ("📚", "Disciplinas", "/disciplinas", is_admin),
