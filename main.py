@@ -76,7 +76,7 @@ TIPOS_AFASTAMENTO = {
     "declaracao_comparecimento": "Declaração de comparecimento",
 }
 # Tipos que precisam de horário específico (não é o dia inteiro) — 26/08/2026
-TIPOS_COM_HORARIO = {"permissao_ausencia"}
+TIPOS_COM_HORARIO = {"permissao_ausencia", "declaracao_comparecimento"}
 
 
 def _extrair_matricula(email: str) -> str:
