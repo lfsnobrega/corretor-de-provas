@@ -21,6 +21,7 @@ import qrcode
 import base64
 import html
 import secrets
+import hashlib
 import json
 import urllib.parse
 import unicodedata
@@ -89,6 +90,50 @@ def _extrair_matricula(email: str) -> str:
     partes = local.split(".")
     ultima = partes[-1] if partes else ""
     return ultima if ultima.isdigit() else "—"
+
+
+def _matricula_professor(prof_row) -> str:
+    """Matrícula de exibição pra relatórios: prioriza o campo explícito 'matricula'
+    (obrigatório pra contas locais sem e-mail institucional) e só cai pra extração do
+    e-mail se esse campo estiver vazio — 27/08/2026."""
+    matricula_explicita = prof_row["matricula"] if "matricula" in prof_row.keys() else None
+    if matricula_explicita:
+        return matricula_explicita
+    return _extrair_matricula(prof_row["email"])
+
+
+def _hash_senha(senha: str, salt: Optional[str] = None) -> tuple:
+    """Gera hash de senha com PBKDF2-SHA256 (biblioteca padrão do Python, sem dependência
+    nova) — 100.000 iterações, salt aleatório de 16 bytes. Retorna (hash_hex, salt_hex).
+    Se salt for passado, reusa (pra verificar uma senha existente) — 27/08/2026."""
+    if salt is None:
+        salt = secrets.token_hex(16)
+    hash_bytes = hashlib.pbkdf2_hmac("sha256", senha.encode("utf-8"), bytes.fromhex(salt), 100_000)
+    return hash_bytes.hex(), salt
+
+
+def _verificar_senha(senha: str, hash_salvo: str, salt: str) -> bool:
+    hash_calculado, _ = _hash_senha(senha, salt)
+    return secrets.compare_digest(hash_calculado, hash_salvo or "")
+
+
+def _gerar_senha_temporaria(tamanho: int = 8) -> str:
+    """Gera senha provisória legível (sem caracteres ambíguos tipo 0/O, 1/l) — 27/08/2026."""
+    alfabeto = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alfabeto) for _ in range(tamanho))
+
+
+def _gerar_username(nome_completo: str, conn) -> str:
+    """Gera um username único a partir do nome (primeiro.ultimo, minúsculo, sem acento),
+    adicionando um número se já existir — 27/08/2026."""
+    base = _boletim_normalizar(nome_completo).replace(" ", ".")
+    base = "".join(c for c in base if c.isalnum() or c == ".")
+    candidato = base
+    n = 1
+    while conn.execute("SELECT 1 FROM professores WHERE username = ?", (candidato,)).fetchone():
+        n += 1
+        candidato = f"{base}{n}"
+    return candidato
 
 
 def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: str):
@@ -600,6 +645,24 @@ def init_db():
         # obrigatório do primeiro acesso (admin nunca precisa, já vê a escola toda) — 24/08/2026.
         conn.execute("ALTER TABLE professores ADD COLUMN papel TEXT")
 
+    if "tipo_login" not in cols_prof:
+        # 'google' (padrão, via OAuth institucional) ou 'local' (usuário/senha, pra quem
+        # não tem e-mail @smevr.com.br — cuidadores, agentes etc.) — 27/08/2026.
+        conn.execute("ALTER TABLE professores ADD COLUMN tipo_login TEXT NOT NULL DEFAULT 'google'")
+    if "username" not in cols_prof:
+        conn.execute("ALTER TABLE professores ADD COLUMN username TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_professores_username ON professores(username)")
+    if "senha_hash" not in cols_prof:
+        conn.execute("ALTER TABLE professores ADD COLUMN senha_hash TEXT")
+    if "senha_salt" not in cols_prof:
+        conn.execute("ALTER TABLE professores ADD COLUMN senha_salt TEXT")
+    if "senha_temporaria" not in cols_prof:
+        conn.execute("ALTER TABLE professores ADD COLUMN senha_temporaria INTEGER NOT NULL DEFAULT 0")
+    if "matricula" not in cols_prof:
+        # Matrícula explícita — usada quando não dá pra extrair do e-mail (contas locais
+        # sem e-mail institucional). Tem prioridade sobre a extração automática — 27/08/2026.
+        conn.execute("ALTER TABLE professores ADD COLUMN matricula TEXT")
+
     # Módulo Administrativo: solicitações de afastamento (atestado/permissão/abono) com
     # anexo salvo no Google Drive — 25/08/2026.
     conn.execute("""CREATE TABLE IF NOT EXISTS afastamentos (
@@ -1058,11 +1121,13 @@ def get_current_professor(request: Request) -> Optional[dict]:
         "id": prof["id"], "email": prof["email"], "nome": prof["nome"],
         "foto_url": prof["foto_url"], "is_admin": bool(prof["is_admin"]), "is_gestor": bool(prof["is_gestor"] if "is_gestor" in prof.keys() else 0), "status": (prof["status"] if "status" in prof.keys() else "ativo"),
         "papel": (prof["papel"] if "papel" in prof.keys() else None),
+        "senha_temporaria": bool(prof["senha_temporaria"]) if "senha_temporaria" in prof.keys() else False,
+        "tipo_login": (prof["tipo_login"] if "tipo_login" in prof.keys() else "google"),
     }
 
 
 # Rotas públicas (sem login)
-PUBLIC_PATHS = {"/login", "/auth/google", "/auth/google/callback", "/auth/dev-login", "/logout", "/acesso-pendente", "/acesso-bloqueado"}
+PUBLIC_PATHS = {"/login", "/auth/google", "/auth/google/callback", "/auth/dev-login", "/login/local", "/logout", "/acesso-pendente", "/acesso-bloqueado"}
 PUBLIC_PREFIXES = ("/static/", "/responder/")
 # Rotas que continuam acessíveis mesmo pra quem ainda não completou o onboarding
 # (senão o próprio onboarding fica inacessível — causaria loop de redirecionamento).
@@ -1083,6 +1148,10 @@ async def auth_middleware(request: Request, call_next):
         return RedirectResponse("/acesso-pendente", status_code=303)
     if status_prof == "bloqueado" and path != "/acesso-bloqueado":
         return RedirectResponse("/acesso-bloqueado", status_code=303)
+    # Senha provisória (contas locais sem e-mail institucional): precisa trocar antes de
+    # usar qualquer outra parte do sistema — 27/08/2026.
+    if prof.get("senha_temporaria") and path not in ("/trocar-senha", "/logout"):
+        return RedirectResponse("/trocar-senha", status_code=303)
     # Onboarding obrigatório (24/08/2026): professor sem papel definido (e que não é
     # admin) precisa escolher docente/gestão antes de usar o resto do sistema. Admin
     # nunca passa por isso — já enxerga a escola toda.
@@ -1092,7 +1161,7 @@ async def auth_middleware(request: Request, call_next):
     # afastamento — nenhuma outra área do sistema (25/08/2026, a pedido).
     if prof.get("papel") == "apoio" and not prof.get("is_admin") and not prof.get("is_gestor"):
         rotas_permitidas_apoio = {
-            "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos",
+            "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos", "/trocar-senha",
         }
         if path not in rotas_permitidas_apoio and path not in ONBOARDING_ISENTAS:
             return RedirectResponse("/administrativo/afastamentos/novo", status_code=303)
@@ -1414,7 +1483,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
 
     conn = get_db()
     registros = conn.execute("""
-        SELECT a.*, p.nome AS prof_nome, p.email AS prof_email
+        SELECT a.*, p.nome AS prof_nome, p.email AS prof_email, p.matricula AS prof_matricula
         FROM afastamentos a
         JOIN professores p ON p.id = a.professor_id
         WHERE strftime('%Y-%m', a.data_inicio) = ?
@@ -1428,7 +1497,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
         linhas = ""
         for r in registros:
             dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
-            matricula = _extrair_matricula(r["prof_email"])
+            matricula = r["prof_matricula"] if r["prof_matricula"] else _extrair_matricula(r["prof_email"])
             link_html = f'<a href="{r["arquivo_drive_link"]}" target="_blank">Ver</a>' if r["arquivo_drive_link"] else "—"
             horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
             linhas += f"""<tr>
@@ -1482,7 +1551,7 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
 
     conn = get_db()
     registros = conn.execute("""
-        SELECT a.*, p.nome AS prof_nome, p.email AS prof_email
+        SELECT a.*, p.nome AS prof_nome, p.email AS prof_email, p.matricula AS prof_matricula
         FROM afastamentos a
         JOIN professores p ON p.id = a.professor_id
         WHERE strftime('%Y-%m', a.data_inicio) = ?
@@ -1502,7 +1571,7 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
 
     for r in registros:
         dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
-        matricula = _extrair_matricula(r["prof_email"])
+        matricula = r["prof_matricula"] if r["prof_matricula"] else _extrair_matricula(r["prof_email"])
         horario_inicio_r = r["horario_inicio"] if ("horario_inicio" in r.keys() and r["horario_inicio"]) else ""
         horario_fim_r = r["horario_fim"] if ("horario_fim" in r.keys() and r["horario_fim"]) else ""
         ws.append([
@@ -1566,10 +1635,107 @@ def pagina_login(request: Request, next: str = "/", erro: str = ""):
         <h1 style="margin:0 0 6px 0; text-align:center; font-size:22px;">Sistema Pedagógico</h1>
         <p class="muted-line" style="margin:0 0 24px 0; text-align:center;">E.M. Walmir de Freitas Monteiro</p>
         {erro_html}
-        {botao_login}
+
+        <div style="display:flex; border-bottom:1px solid var(--border); margin-bottom:18px;">
+            <button type="button" id="aba-google-btn" onclick="_trocarAbaLogin('google')" style="flex:1; padding:10px; border:none; background:none; cursor:pointer; font-weight:600; border-bottom:2px solid var(--accent); color:var(--accent);">Entrar com Google</button>
+            <button type="button" id="aba-local-btn" onclick="_trocarAbaLogin('local')" style="flex:1; padding:10px; border:none; background:none; cursor:pointer; font-weight:600; border-bottom:2px solid transparent; color:var(--text-muted);">Usuário e senha</button>
+        </div>
+
+        <div id="aba-google">
+            {botao_login}
+        </div>
+
+        <div id="aba-local" style="display:none;">
+            <form action="/login/local" method="post">
+                <input type="hidden" name="next" value="{_html.escape(next, quote=True)}">
+                <label>Usuário<input type="text" name="username" required placeholder="seu.usuario" autocomplete="username"></label>
+                <label>Senha<input type="password" name="senha" required placeholder="Sua senha" autocomplete="current-password"></label>
+                <button type="submit" class="btn btn-primary" style="width:100%; margin-top:10px;">Entrar</button>
+            </form>
+            <p class="muted-line" style="font-size:12px; text-align:center; margin-top:14px;">Pra funcionários sem e-mail institucional (usuário e senha fornecidos pela gestão da escola).</p>
+        </div>
+
+        <script>
+        function _trocarAbaLogin(aba) {{
+            document.getElementById('aba-google').style.display = aba === 'google' ? 'block' : 'none';
+            document.getElementById('aba-local').style.display = aba === 'local' ? 'block' : 'none';
+            document.getElementById('aba-google-btn').style.borderBottomColor = aba === 'google' ? 'var(--accent)' : 'transparent';
+            document.getElementById('aba-google-btn').style.color = aba === 'google' ? 'var(--accent)' : 'var(--text-muted)';
+            document.getElementById('aba-local-btn').style.borderBottomColor = aba === 'local' ? 'var(--accent)' : 'transparent';
+            document.getElementById('aba-local-btn').style.color = aba === 'local' ? 'var(--accent)' : 'var(--text-muted)';
+        }}
+        </script>
     </div>
     """
     return render_page("Entrar", content, active="", standalone=True)
+
+
+@app.post("/login/local")
+async def login_local(request: Request, username: str = Form(...), senha: str = Form(...), next: str = Form("/")):
+    """Login por usuário/senha — pra funcionários sem e-mail institucional (cuidadores,
+    agentes escolares etc.). Conta criada pelo admin em /admin/usuarios/novo-local,
+    com senha provisória que precisa ser trocada no primeiro acesso (27/08/2026)."""
+    conn = get_db()
+    prof = conn.execute("SELECT * FROM professores WHERE username = ? AND tipo_login = 'local'", (username.strip(),)).fetchone()
+    conn.close()
+
+    erro_generico = "Usuário ou senha inválidos."
+    if not prof or not prof["senha_hash"] or not _verificar_senha(senha, prof["senha_hash"], prof["senha_salt"]):
+        return RedirectResponse(f"/login?erro={urllib.parse.quote(erro_generico)}", status_code=303)
+
+    status_prof = prof["status"] if "status" in prof.keys() else "ativo"
+    if status_prof == "bloqueado":
+        return RedirectResponse("/login?erro=" + urllib.parse.quote("Acesso bloqueado. Fale com a administração."), status_code=303)
+
+    token = _criar_sessao(prof["id"], prof["email"])
+    response = RedirectResponse(next or "/", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE, value=token,
+        max_age=SESSION_MAX_AGE, httponly=True, samesite="lax",
+    )
+    return response
+
+
+@app.get("/trocar-senha", response_class=HTMLResponse)
+def form_trocar_senha(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    content = """
+        <div style="max-width:420px; margin:60px auto; padding:30px; background:var(--bg); border:1px solid var(--border); border-radius:8px;">
+            <h1 style="margin:0 0 6px 0; text-align:center; font-size:20px;">🔑 Trocar senha</h1>
+            <p class="muted-line" style="text-align:center; margin-bottom:20px;">Sua senha é provisória — defina uma nova senha antes de continuar.</p>
+            <form action="/trocar-senha" method="post">
+                <label>Nova senha<input type="password" name="senha" required minlength="6" autocomplete="new-password"></label>
+                <label>Confirmar nova senha<input type="password" name="senha_confirma" required minlength="6" autocomplete="new-password"></label>
+                <button type="submit" class="btn btn-primary" style="width:100%; margin-top:10px;">Salvar e continuar</button>
+            </form>
+        </div>
+    """
+    return HTMLResponse(render_page("Trocar senha", content, active="", standalone=True))
+
+
+@app.post("/trocar-senha")
+async def salvar_trocar_senha(request: Request, senha: str = Form(...), senha_confirma: str = Form(...)):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    if senha != senha_confirma or len(senha) < 6:
+        content = """
+            <div style="max-width:420px; margin:60px auto; padding:30px; background:var(--bg); border:1px solid var(--border); border-radius:8px;">
+                <div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:12px; border-radius:6px; margin-bottom:16px;">As senhas não coincidem ou têm menos de 6 caracteres.</div>
+                <a href="/trocar-senha" class="btn btn-primary" style="width:100%;">Tentar de novo</a>
+            </div>
+        """
+        return HTMLResponse(render_page("Trocar senha", content, active="", standalone=True))
+
+    hash_novo, salt_novo = _hash_senha(senha)
+    conn = get_db()
+    conn.execute("UPDATE professores SET senha_hash = ?, senha_salt = ?, senha_temporaria = 0 WHERE id = ?",
+                 (hash_novo, salt_novo, prof["id"]))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/auth/google")
@@ -7343,6 +7509,9 @@ def admin_usuarios(request: Request):
             <td style="padding:10px 8px;">{acoes}</td></tr>'''
     body = f"""<div class="page-header"><h1>👤 Gerenciamento de usuários</h1><p class="subtitle">Gerencie perfis de acesso</p></div>
         {alerta}
+        <div class="page-actions" style="margin-bottom:14px;">
+            <a href="/admin/usuarios/novo-local" class="btn btn-primary">+ Cadastrar sem e-mail institucional</a>
+        </div>
         <div class="tip" style="margin-bottom:18px;"><strong>Perfis:</strong> Admin — acesso total. Gestor — aprova/devolve provas. Professor — acesso padrão. Novos usuários entram como <strong>Pendente</strong>.</div>
         <table style="width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; border:1px solid var(--border);">
             <thead><tr style="background:var(--bg-subtle); font-size:12px; text-transform:uppercase; color:var(--text-muted);">
@@ -7351,6 +7520,81 @@ def admin_usuarios(request: Request):
                 <th style="padding:10px 8px; text-align:left;">Ações</th></tr></thead>
             <tbody>{rows}</tbody></table>"""
     return render_page("Usuários", body, active="")
+
+
+@app.get("/admin/usuarios/novo-local", response_class=HTMLResponse)
+def form_novo_usuario_local(request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/login", status_code=303)
+    content = """
+        <div class="page-header">
+            <h1>➕ Cadastrar funcionário sem e-mail institucional</h1>
+            <p class="subtitle">Pra cuidadores, agentes escolares e outros profissionais de apoio que só têm e-mail pessoal (Gmail). Um usuário e senha provisória são gerados — repasse essas credenciais pessoalmente à pessoa.</p>
+        </div>
+        <form action="/admin/usuarios/novo-local" method="post">
+            <label>Nome completo
+                <input type="text" name="nome" required placeholder="Nome completo do funcionário">
+            </label>
+            <label>Matrícula
+                <input type="text" name="matricula" required placeholder="Número de matrícula">
+            </label>
+            <label>Papel na escola
+                <select name="papel" required>
+                    <option value="apoio">Apoio Educacional (Cuidadores, Agentes, Biblioteca, Apoio)</option>
+                    <option value="docente">Docente</option>
+                    <option value="gestao">Gestão</option>
+                </select>
+            </label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Cadastrar</button>
+                <a href="/admin/usuarios" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Novo usuário local", content, active=""))
+
+
+@app.post("/admin/usuarios/novo-local", response_class=HTMLResponse)
+def criar_usuario_local(request: Request, nome: str = Form(...), matricula: str = Form(...), papel: str = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/login", status_code=303)
+    if papel not in ("apoio", "docente", "gestao"):
+        papel = "apoio"
+
+    conn = get_db()
+    username = _gerar_username(nome, conn)
+    senha_provisoria = _gerar_senha_temporaria()
+    hash_senha, salt_senha = _hash_senha(senha_provisoria)
+    # E-mail sintético só pra satisfazer o UNIQUE NOT NULL da coluna — nunca usado pra
+    # login (login local é por username) nem exibido como e-mail de contato real.
+    email_sintetico = f"{username}@local.smevr"
+
+    cursor = conn.execute("""
+        INSERT INTO professores (email, nome, is_admin, status, tipo_login, username, senha_hash, senha_salt, senha_temporaria, matricula, papel)
+        VALUES (?, ?, 0, 'ativo', 'local', ?, ?, ?, 1, ?, ?)
+    """, (email_sintetico, nome.strip(), username, hash_senha, salt_senha, matricula.strip(), papel))
+    conn.commit()
+    conn.close()
+
+    content = f"""
+        <div class="page-header"><h1>✅ Funcionário cadastrado</h1></div>
+        <div class="tip" style="background:var(--green-bg); border-color:var(--green);">
+            <strong>Anote e repasse essas credenciais pessoalmente</strong> — elas não ficam salvas em nenhum outro lugar do sistema depois desta tela.
+        </div>
+        <table style="margin-top:14px; font-size:14px;">
+            <tr><td style="padding:6px 12px; color:var(--text-muted);">Nome</td><td style="padding:6px 12px; font-weight:600;">{nome}</td></tr>
+            <tr><td style="padding:6px 12px; color:var(--text-muted);">Usuário</td><td style="padding:6px 12px; font-weight:600; font-family:monospace;">{username}</td></tr>
+            <tr><td style="padding:6px 12px; color:var(--text-muted);">Senha provisória</td><td style="padding:6px 12px; font-weight:600; font-family:monospace; font-size:16px;">{senha_provisoria}</td></tr>
+        </table>
+        <p style="font-size:12px; color:var(--text-muted); margin-top:10px;">A pessoa vai precisar trocar essa senha assim que fizer o primeiro login — vai ser pedido automaticamente.</p>
+        <div class="page-actions" style="margin-top:16px;">
+            <a href="/admin/usuarios" class="btn btn-primary">Voltar pra usuários</a>
+            <a href="/admin/usuarios/novo-local" class="btn">Cadastrar outro</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Funcionário cadastrado", content, active=""))
 
 
 @app.post("/admin/usuarios/{usuario_id}/toggle-gestor")
