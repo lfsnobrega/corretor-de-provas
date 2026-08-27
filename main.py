@@ -67,6 +67,35 @@ _session_serializer = URLSafeTimedSerializer(SESSION_SECRET_KEY, salt="session-v
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
 GOOGLE_DRIVE_CREDENTIALS_JSON = os.environ.get("GOOGLE_DRIVE_CREDENTIALS_JSON", "")
 
+# Carômetro — link do Canva por turma (27/08/2026). Chave é o "nome" da turma como
+# cadastrado no sistema (ex: "601"), valor é o link de edição do Canva.
+CAROMETRO_LINKS = {
+    "601": "https://www.canva.com/design/DAHEN-ksHO8/9Ykhjf1LGyyPnZZl1MdXig/edit",
+    "602": "https://www.canva.com/design/DAHEOcTmzFg/zfv-NRhcFJGNJ34LzNXYCw/edit",
+    "603": "https://www.canva.com/design/DAHFEfYfRyc/cspiSRDtFhyPB9mNlYRciQ/edit",
+    "604": "https://www.canva.com/design/DAHFEjXeXe4/F48EAv74k1MQcTJYei4etA/edit",
+    "605": "https://www.canva.com/design/DAHFEtGHDZ8/eO-56qic40iGCwmDJP7MSA/edit",
+    "701": "https://www.canva.com/design/DAHEUIxdAs4/z_prhoP1-IlXYoGHfne-eg/edit",
+    "702": "https://www.canva.com/design/DAHEaeggrrk/Eqdi8aLJoZMiOv28atmkRw/edit",
+    "703": "https://www.canva.com/design/DAHIUidV7KU/vfEeF87Yy31MAZpRsF9vIw/edit",
+    "704": "https://www.canva.com/design/DAHFEzqBCFM/3gD1U23C9X76eeA9uaA5hQ/edit",
+    "705": "https://www.canva.com/design/DAHFE2T_vNo/jdNRTyK_kcQmc_qBYV0r6Q/edit",
+    "706": "https://www.canva.com/design/DAHFKEgR98A/mTY7EfaRYobnaevCHW9R-Q/edit",
+    "801": "https://www.canva.com/design/DAHIuXourb0/aFZN75HuC2k4W0I0U9y2Sw/edit",
+    "802": "https://www.canva.com/design/DAHEau91N0w/j9-dj3Xyqr9Lyvi3pYlbAg/edit",
+    "803": "https://www.canva.com/design/DAHE4GBygM4/zBZjLgRg1Bagvk3yNSQplg/edit",
+    "804": "https://www.canva.com/design/DAHFKHbOhG8/dOUjrABAI9syhR51-pLHXA/edit",
+    "805": "https://www.canva.com/design/DAHFKIhCLT4/3AMLtREHd0TOb3FACiufJQ/edit",
+    "806": "https://www.canva.com/design/DAHFKSTLDtw/ReXpbS2WNRdQkh3-070d_A/edit",
+    "901": "https://www.canva.com/design/DAHE4AwrbtA/DdoUEWVqY458entcNtcFaQ/edit",
+    "902": "https://www.canva.com/design/DAHE4OalXbE/DFNYtX9dYX6a7UsVzyM1DQ/edit",
+    "903": "https://www.canva.com/design/DAHE4DxyszI/0R8spuPXuwRmZBsMu4Vt-A/edit",
+    "904": "https://www.canva.com/design/DAHFEVSy02A/Uhsae-hV4zkHRiI3Vg5OPQ/edit",
+    "905": "https://www.canva.com/design/DAHFKbtUt_Q/Y9gnyo1QrSiKU40UnQEvSQ/edit",
+    "906": "https://www.canva.com/design/DAHFKqjvA7g/nDlp_bUFmU6miVmYWvv2qA/edit",
+}
+
+
 TIPOS_AFASTAMENTO = {
     "atestado_medico": "Atestado médico",
     "permissao_ausencia": "Permissão de ausência",
@@ -2368,8 +2397,10 @@ def home(request: Request):
         """, (prof_id,)).fetchall()
 
     # Card "Alunos que precisam de atenção" — precisa do prof completo (papel/id), não só
-    # is_admin, então busca antes de fechar a conexão (24/08/2026).
-    atencao_dados = _home_alunos_atencao(conn, prof) if prof else None
+    # is_admin, então busca antes de fechar a conexão (24/08/2026). Apoio Educacional não
+    # vê esse quadro — não faz parte do que ele acompanha (27/08/2026, a pedido).
+    eh_apoio_puro = bool(prof and prof.get("papel") == "apoio" and not prof["is_admin"] and not prof.get("is_gestor"))
+    atencao_dados = _home_alunos_atencao(conn, prof) if (prof and not eh_apoio_puro) else None
     conn.close()
 
     # ----- HTML -----
@@ -2400,6 +2431,7 @@ def home(request: Request):
                 ("📊", "Simulados", "/simulados", True),
                 ("📈", "Análises", "/analises-pedagogicas", True),
                 ("📊", "Dashboard Pedagógico", "/boletim/dashboard", True),
+                ("🖼️", "Carômetro", "/carometro", True),
             ]),
             ("Banco", "#16a34a", [
                 ("📚", "Disciplinas", "/disciplinas", is_admin),
@@ -5338,6 +5370,68 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
     return resultado
 
 
+@app.get("/carometro", response_class=HTMLResponse)
+def pagina_carometro(request: Request):
+    """Lista todas as turmas em bullets clicáveis, cada uma levando pro carômetro da
+    turma no Canva (27/08/2026)."""
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    conn.close()
+
+    itens_html = ""
+    for t in turmas:
+        link = CAROMETRO_LINKS.get(t["nome"])
+        if link:
+            itens_html += (
+                f'<a href="{link}" target="_blank" rel="noopener" class="mobile-badge" style="--badge-accent:#0891b2;">'
+                f'<span class="mobile-badge-icon">🖼️</span><span class="mobile-badge-label">Turma {t["nome"]}</span></a>'
+            )
+        else:
+            itens_html += (
+                f'<div class="mobile-badge" style="opacity:0.4; cursor:not-allowed;" title="Sem carômetro cadastrado ainda">'
+                f'<span class="mobile-badge-icon">🖼️</span><span class="mobile-badge-label">Turma {t["nome"]}</span></div>'
+            )
+
+    content = f"""
+        <div class="page-header">
+            <h1>🖼️ Carômetro</h1>
+            <p class="subtitle">Clique numa turma pra abrir o carômetro dela no Canva.</p>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:12px; max-width:900px;">
+            {itens_html}
+        </div>
+        <style>
+        .mobile-badge {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 20px 10px;
+            background: var(--bg-subtle);
+            border: 1px solid var(--border);
+            border-top: 3px solid var(--badge-accent, var(--border));
+            border-radius: 12px;
+            text-decoration: none;
+            color: inherit;
+            text-align: center;
+            transition: transform 0.12s ease, box-shadow 0.12s ease;
+        }}
+        .mobile-badge:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        }}
+        .mobile-badge-icon {{ font-size: 28px; line-height: 1; }}
+        .mobile-badge-label {{ font-size: 13px; font-weight: 600; line-height: 1.25; }}
+        </style>
+    """
+    return HTMLResponse(render_page("Carômetro", content, active="carometro"))
+
+
 @app.get("/boletim/dashboard", response_class=HTMLResponse)
 def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
                        turma_id: Optional[str] = None, ano_esc: Optional[str] = None):
@@ -5361,6 +5455,16 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
         trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
 
     turmas = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
+
+    # Carômetro: se uma turma específica estiver selecionada no filtro, vai direto pro
+    # link dela no Canva; senão, vai pra lista geral de turmas (27/08/2026).
+    carometro_link = "/carometro"
+    carometro_label_extra = ""
+    if turma_id:
+        turma_sel = next((t for t in turmas if t["id"] == turma_id), None)
+        if turma_sel and CAROMETRO_LINKS.get(turma_sel["nome"]):
+            carometro_link = CAROMETRO_LINKS[turma_sel["nome"]]
+            carometro_label_extra = f' — {turma_sel["nome"]}'
 
     enriquecidos = _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=turma_id)
     conn.close()
@@ -5712,6 +5816,7 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
                 <h1>📈 Dashboard Pedagógico</h1>
                 <p class="subtitle">{total} estudante(s) · {trimestre}º Trimestre {ano}</p>
             </div>
+            <a href="{carometro_link}" class="btn" target="_blank" rel="noopener">🖼️ Carômetro{carometro_label_extra}</a>
             <a href="/boletim/relatorio-geral?trimestre={trimestre}&ano={ano}{f'&turma_id={turma_id}' if turma_id else ''}{f'&ano_esc={ano_esc}' if ano_esc else ''}" class="btn" target="_blank">🖨️ Relatório Geral de Gestão</a>
         </div>
         <form method="get" action="/boletim/dashboard" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
