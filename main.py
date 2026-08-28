@@ -65,6 +65,10 @@ _session_serializer = URLSafeTimedSerializer(SESSION_SECRET_KEY, salt="session-v
 
 
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
+# Pasta separada pros atestados médicos de ALUNOS (já compartilhada com a conta de
+# serviço da VM, confirmado por Felipe em 27/08/2026) — pode ser sobrescrita por
+# variável de ambiente se a pasta mudar no futuro.
+GOOGLE_DRIVE_FOLDER_ID_ALUNOS = os.environ.get("GOOGLE_DRIVE_FOLDER_ID_ALUNOS", "1uLJrM4BiCiGnBkLHPI1f5SuknK24f9sL")
 GOOGLE_DRIVE_CREDENTIALS_JSON = os.environ.get("GOOGLE_DRIVE_CREDENTIALS_JSON", "")
 
 # Carômetro — link do Canva por turma (27/08/2026). Chave é o "nome" da turma como
@@ -165,8 +169,11 @@ def _gerar_username(nome_completo: str, conn) -> str:
     return candidato
 
 
-def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: str):
-    """Sobe um arquivo pra pasta do Google Drive configurada (GOOGLE_DRIVE_FOLDER_ID).
+def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: str, folder_id: Optional[str] = None):
+    """Sobe um arquivo pra uma pasta do Google Drive. Se folder_id não for passado, usa
+    GOOGLE_DRIVE_FOLDER_ID (pasta dos afastamentos de profissionais) — mantido assim pra
+    não quebrar quem já chama essa função sem passar pasta. Pra outras pastas (ex: atestados
+    de alunos), passe folder_id explicitamente — 27/08/2026.
 
     Usa a IDENTIDADE DA PRÓPRIA VM (Application Default Credentials) em vez de uma chave
     JSON baixada — não precisa de service account key (a organização pode bloquear a
@@ -185,8 +192,9 @@ def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: s
 
     Retorna (file_id, link, erro). Se não der pra autenticar, retorna erro claro em vez de
     quebrar — o registro do afastamento é salvo de qualquer forma."""
-    if not GOOGLE_DRIVE_FOLDER_ID:
-        return None, None, "Google Drive não configurado ainda (falta GOOGLE_DRIVE_FOLDER_ID no servidor)."
+    folder_id = folder_id or GOOGLE_DRIVE_FOLDER_ID
+    if not folder_id:
+        return None, None, "Google Drive não configurado ainda (falta o ID da pasta no servidor)."
     try:
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaIoBaseUpload
@@ -203,7 +211,7 @@ def _drive_upload_arquivo(nome_arquivo: str, conteudo_bytes: bytes, mime_type: s
             creds, _ = google.auth.default(scopes=DRIVE_SCOPES)
 
         service = build("drive", "v3", credentials=creds)
-        metadata = {"name": nome_arquivo, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
+        metadata = {"name": nome_arquivo, "parents": [folder_id]}
         media = MediaIoBaseUpload(_io.BytesIO(conteudo_bytes), mimetype=mime_type, resumable=False)
         # supportsAllDrives=True é obrigatório se a pasta estiver dentro de um Drive
         # Compartilhado (não "Meu Drive") — sem isso a API nem enxerga a pasta e retorna
@@ -716,6 +724,43 @@ def init_db():
     if "horario_fim" not in cols_afast:
         conn.execute("ALTER TABLE afastamentos ADD COLUMN horario_fim TEXT")
 
+    # Atestado médico de ALUNOS — mesma estrutura dos afastamentos de profissionais,
+    # cadastrado por Apoio/Gestão. Anexo salvo numa pasta separada do Drive (27/08/2026).
+    conn.execute("""CREATE TABLE IF NOT EXISTS atestados_alunos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        aluno_id INTEGER NOT NULL,
+        data_inicio TEXT NOT NULL,
+        data_fim TEXT NOT NULL,
+        observacao TEXT,
+        arquivo_nome TEXT,
+        arquivo_drive_id TEXT,
+        arquivo_drive_link TEXT,
+        status_upload TEXT NOT NULL DEFAULT 'pendente',
+        criado_por_professor_id INTEGER,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP,
+        FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
+        FOREIGN KEY (criado_por_professor_id) REFERENCES professores(id)
+    )""")
+
+    # Atestado médico de ESTUDANTE — mesma estrutura do módulo de afastamentos de
+    # profissionais, mas associado a aluno_id em vez de professor_id (27/08/2026).
+    conn.execute("""CREATE TABLE IF NOT EXISTS atestados_alunos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        aluno_id INTEGER NOT NULL,
+        cadastrado_por_id INTEGER,
+        data_inicio TEXT NOT NULL,
+        data_fim TEXT NOT NULL,
+        observacao TEXT,
+        arquivo_nome TEXT,
+        arquivo_drive_id TEXT,
+        arquivo_drive_link TEXT,
+        status_upload TEXT NOT NULL DEFAULT 'pendente',
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
+        FOREIGN KEY (cadastrado_por_id) REFERENCES professores(id)
+    )""")
+
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
         conn.execute("ALTER TABLE questoes ADD COLUMN ano TEXT")
@@ -1187,10 +1232,12 @@ async def auth_middleware(request: Request, call_next):
     if not prof.get("is_admin") and not prof.get("papel") and path not in ONBOARDING_ISENTAS:
         return RedirectResponse("/onboarding", status_code=303)
     # Apoio Educacional (Cuidadores/Agentes/Biblioteca/Apoio) só acessa a solicitação de
-    # afastamento — nenhuma outra área do sistema (25/08/2026, a pedido).
+    # afastamento e os atestados de alunos — nenhuma outra área do sistema (25/08/2026,
+    # ampliado em 27/08/2026 pros atestados de alunos).
     if prof.get("papel") == "apoio" and not prof.get("is_admin") and not prof.get("is_gestor"):
         rotas_permitidas_apoio = {
             "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos", "/trocar-senha",
+            "/administrativo/atestados-alunos/novo", "/administrativo/atestados-alunos",
         }
         if path not in rotas_permitidas_apoio and path not in ONBOARDING_ISENTAS:
             return RedirectResponse("/administrativo/afastamentos/novo", status_code=303)
@@ -1521,7 +1568,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
     conn.close()
 
     if not registros:
-        linhas = '<tr><td colspan="7" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma Justificativa registrada nesse mês.</td></tr>'
+        linhas = '<tr><td colspan="8" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma Justificativa registrada nesse mês.</td></tr>'
     else:
         linhas = ""
         for r in registros:
@@ -1529,6 +1576,11 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
             matricula = r["prof_matricula"] if r["prof_matricula"] else _extrair_matricula(r["prof_email"])
             link_html = f'<a href="{r["arquivo_drive_link"]}" target="_blank">Ver</a>' if r["arquivo_drive_link"] else "—"
             horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
+            acoes = (
+                f'<a href="/administrativo/afastamentos/{r["id"]}/editar" class="btn" style="padding:3px 8px; font-size:11px;">✏️</a> '
+                f'<form method="post" action="/administrativo/afastamentos/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir esta justificativa? Não dá pra desfazer.\');">'
+                f'<button type="submit" class="btn" style="padding:3px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>'
+            )
             linhas += f"""<tr>
                 <td style="padding:8px;">{r["prof_nome"]}</td>
                 <td style="padding:8px; text-align:center;">{matricula}</td>
@@ -1537,6 +1589,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
                 <td style="padding:8px; text-align:center;">{horario_col}</td>
                 <td style="padding:8px; text-align:center;">{dias}</td>
                 <td style="padding:8px;">{link_html}</td>
+                <td style="padding:8px; white-space:nowrap;">{acoes}</td>
             </tr>"""
 
     meses_nomes = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -1561,11 +1614,87 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
                 <th style="padding:8px;">Horário</th>
                 <th style="padding:8px;">Dias</th>
                 <th style="padding:8px; text-align:left;">Documento</th>
+                <th style="padding:8px;">Ações</th>
             </tr></thead>
             <tbody>{linhas}</tbody>
         </table>
     """
     return HTMLResponse(render_page("Relatório de Justificativas", content, active="administrativo-relatorio"))
+
+
+@app.get("/administrativo/afastamentos/{afastamento_id}/editar", response_class=HTMLResponse)
+def form_editar_afastamento(request: Request, afastamento_id: int):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT a.*, p.nome AS prof_nome FROM afastamentos a JOIN professores p ON p.id = a.professor_id WHERE a.id = ?", (afastamento_id,)).fetchone()
+    conn.close()
+    if not r:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Justificativa não encontrada.</div>', active=""))
+
+    opts_tipo = "".join(f'<option value="{k}"{" selected" if k==r["tipo"] else ""}>{v}</option>' for k, v in TIPOS_AFASTAMENTO.items())
+    horario_atual = ""
+    if r["horario_inicio"]:
+        horario_atual = f"""
+        <div style="display:flex; flex-wrap:wrap; gap:14px;">
+            <label style="flex:1 1 200px;">Horário de saída<input type="time" name="horario_inicio" value="{r["horario_inicio"]}"></label>
+            <label style="flex:1 1 200px;">Horário de retorno<input type="time" name="horario_fim" value="{r["horario_fim"] or ""}"></label>
+        </div>"""
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar Justificativa — {r["prof_nome"]}</h1></div>
+        <form action="/administrativo/afastamentos/{afastamento_id}/editar" method="post">
+            <label>Tipo de documento
+                <select name="tipo" id="sel-tipo-edicao" onchange="_toggleHorarioAfastamento(this.value)">{opts_tipo}</select>
+            </label>
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 200px;">Data de início<input type="date" name="data_inicio" value="{r["data_inicio"]}" required></label>
+                <label style="flex:1 1 200px;">Data de término<input type="date" name="data_fim" value="{r["data_fim"]}" required></label>
+            </div>
+            <div id="bloco-horario-edicao" style="display:{'block' if r['horario_inicio'] else 'none'};">{horario_atual}</div>
+            <label>Observação<textarea name="observacao" rows="3">{r["observacao"] or ""}</textarea></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar alterações</button>
+                <a href="/administrativo/relatorio" class="btn">Cancelar</a>
+            </div>
+        </form>
+        <script>
+        const _tiposComHorarioEd = {json.dumps(list(TIPOS_COM_HORARIO))};
+        function _toggleHorarioAfastamento(valor) {{
+            document.getElementById('bloco-horario-edicao').style.display = _tiposComHorarioEd.includes(valor) ? 'block' : 'none';
+        }}
+        </script>
+    """
+    return HTMLResponse(render_page("Editar Justificativa", content, active="administrativo-relatorio"))
+
+
+@app.post("/administrativo/afastamentos/{afastamento_id}/editar")
+async def salvar_edicao_afastamento(request: Request, afastamento_id: int, tipo: str = Form(...),
+                                     data_inicio: str = Form(...), data_fim: str = Form(...),
+                                     observacao: str = Form(""), horario_inicio: str = Form(""), horario_fim: str = Form("")):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    conn.execute("""UPDATE afastamentos SET tipo=?, data_inicio=?, data_fim=?, observacao=?, horario_inicio=?, horario_fim=? WHERE id=?""",
+                 (tipo, data_inicio, data_fim, observacao.strip() or None, horario_inicio.strip() or None, horario_fim.strip() or None, afastamento_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/administrativo/relatorio", status_code=303)
+
+
+@app.post("/administrativo/afastamentos/{afastamento_id}/excluir")
+def excluir_afastamento(request: Request, afastamento_id: int):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    # Só apaga o registro do banco — o arquivo no Drive fica, por segurança (evita perda
+    # de documento por exclusão acidental) — 27/08/2026.
+    conn = get_db()
+    conn.execute("DELETE FROM afastamentos WHERE id = ?", (afastamento_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/administrativo/relatorio", status_code=303)
 
 
 @app.get("/administrativo/relatorio/exportar")
@@ -1623,6 +1752,289 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+# ============ ATESTADOS MÉDICOS DE ALUNOS (27/08/2026) ============
+# Mesma estrutura das Justificativas para o Ponto (afastamentos de profissionais), mas
+# pra estudantes. Só Apoio Educacional, Gestão e Admin enxergam esse módulo — não
+# aparece pra docentes comuns. Editar/excluir é exclusivo de Gestão/Admin (Apoio só
+# cadastra) — a pedido.
+
+def _pode_ver_atestados_alunos(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor") or prof.get("papel") in ("apoio", "gestao")))
+
+
+def _pode_editar_atestados_alunos(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor") or prof.get("papel") == "gestao"))
+
+
+@app.get("/administrativo/atestados-alunos/novo", response_class=HTMLResponse)
+def form_novo_atestado_aluno(request: Request, aluno_id: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not _pode_ver_atestados_alunos(prof):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    alunos_todos = conn.execute("SELECT id, turma_id, nome FROM alunos ORDER BY nome").fetchall()
+    conn.close()
+    opts_turmas = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+
+    alunos_por_turma = {}
+    for a in alunos_todos:
+        alunos_por_turma.setdefault(a["turma_id"], []).append({"id": a["id"], "nome": a["nome"]})
+    alunos_por_turma_json = json.dumps(alunos_por_turma, ensure_ascii=False)
+
+    # Se veio com aluno_id na URL (atalho da tela inicial), pré-seleciona turma e aluno
+    # ao carregar a página — 28/08/2026.
+    aluno_id_int = int(aluno_id) if aluno_id and aluno_id.strip().isdigit() else None
+    turma_pre_selecionada = None
+    if aluno_id_int:
+        aluno_encontrado = next((a for a in alunos_todos if a["id"] == aluno_id_int), None)
+        if aluno_encontrado:
+            turma_pre_selecionada = aluno_encontrado["turma_id"]
+    pre_selecao_js = (
+        f"document.getElementById('sel-turma-atestado').value = '{turma_pre_selecionada}'; "
+        f"_atualizarAlunosAtestado(document.getElementById('sel-turma-atestado'), {aluno_id_int});"
+        if turma_pre_selecionada else ""
+    )
+
+    content = f"""
+        <div class="page-header">
+            <h1>🩺 Novo Atestado Médico de Aluno</h1>
+            <p class="subtitle">Anexe o atestado — ele é enviado direto pro Drive da escola (pasta separada dos documentos de profissionais).</p>
+        </div>
+        <form action="/administrativo/atestados-alunos/novo" method="post" enctype="multipart/form-data">
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 220px; margin:0;">Turma
+                    <select id="sel-turma-atestado" required onchange="_atualizarAlunosAtestado(this)">
+                        <option value="">— selecione —</option>
+                        {opts_turmas}
+                    </select>
+                </label>
+                <label style="flex:1 1 220px; margin:0;">Aluno
+                    <select name="aluno_id" id="sel-aluno-atestado" required>
+                        <option value="">— selecione a turma primeiro —</option>
+                    </select>
+                </label>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 200px;">Data de início
+                    <input type="date" name="data_inicio" required>
+                </label>
+                <label style="flex:1 1 200px;">Data de término
+                    <input type="date" name="data_fim" required>
+                </label>
+            </div>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:-8px;">Pra um único dia, use a mesma data nos dois campos.</p>
+            <label>Observação (opcional)
+                <textarea name="observacao" rows="3" placeholder="Algum detalhe adicional, se necessário"></textarea>
+            </label>
+            <label>Atestado (PDF, foto ou imagem)
+                <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png" required>
+            </label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Enviar atestado</button>
+                <a href="/administrativo/atestados-alunos" class="btn">Ver atestados cadastrados</a>
+            </div>
+        </form>
+        <script>
+        const _alunosPorTurmaAtestado = {alunos_por_turma_json};
+        function _atualizarAlunosAtestado(selTurma, alunoIdPreSelecionado) {{
+            const selAluno = document.getElementById('sel-aluno-atestado');
+            const lista = _alunosPorTurmaAtestado[selTurma.value] || [];
+            lista.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+            selAluno.innerHTML = '<option value="">— selecione —</option>' +
+                lista.map(a => `<option value="${{a.id}}">${{a.nome}}</option>`).join('');
+            if (alunoIdPreSelecionado) {{ selAluno.value = String(alunoIdPreSelecionado); }}
+        }}
+        {pre_selecao_js}
+        </script>
+    """
+    return HTMLResponse(render_page("Novo Atestado de Aluno", content, active="atestados-alunos-novo"))
+
+
+@app.post("/administrativo/atestados-alunos/novo", response_class=HTMLResponse)
+async def criar_atestado_aluno(request: Request, aluno_id: int = Form(...), data_inicio: str = Form(...),
+                                data_fim: str = Form(...), observacao: str = Form(""), arquivo: UploadFile = File(...)):
+    prof = get_current_professor(request)
+    if not _pode_ver_atestados_alunos(prof):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    aluno = conn.execute("SELECT nome FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Aluno não encontrado.</p><a href="/administrativo/atestados-alunos/novo" class="btn">Voltar</a>', active="atestados-alunos-novo"))
+
+    conteudo = await arquivo.read()
+    ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
+    nome_no_drive = f"{aluno['nome']} - Atestado médico - {data_inicio}{ext}"
+    mime = arquivo.content_type or "application/octet-stream"
+
+    drive_id, drive_link, erro_drive = _drive_upload_arquivo(nome_no_drive, conteudo, mime, folder_id=GOOGLE_DRIVE_FOLDER_ID_ALUNOS)
+    status_upload = "enviado" if drive_id else "erro"
+
+    conn.execute("""
+        INSERT INTO atestados_alunos (aluno_id, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, criado_por_professor_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (aluno_id, data_inicio, data_fim, observacao.strip() or None, arquivo.filename, drive_id, drive_link, status_upload, prof["id"]))
+    conn.commit()
+    conn.close()
+
+    aviso_html = ""
+    if erro_drive:
+        aviso_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> o atestado foi registrado, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador.</div>'
+
+    content = f"""
+        <div class="page-header"><h1>✅ Atestado registrado</h1></div>
+        <p>Aluno: <strong>{aluno["nome"]}</strong> · Período: {data_inicio} a {data_fim}</p>
+        {aviso_html}
+        <div class="page-actions" style="margin-top:16px;">
+            <a href="/administrativo/atestados-alunos" class="btn btn-primary">Ver atestados cadastrados</a>
+            <a href="/administrativo/atestados-alunos/novo" class="btn">Novo atestado</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Atestado registrado", content, active="atestados-alunos-novo"))
+
+
+@app.get("/administrativo/atestados-alunos", response_class=HTMLResponse)
+def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not _pode_ver_atestados_alunos(prof):
+        return RedirectResponse("/", status_code=303)
+    turma_id_int = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
+    pode_editar = _pode_editar_atestados_alunos(prof)
+
+    conn = get_db()
+    turmas = conn.execute("SELECT id, nome FROM turmas ORDER BY nome").fetchall()
+    where_turma = "AND al.turma_id = ?" if turma_id_int else ""
+    params = [turma_id_int] if turma_id_int else []
+    registros = conn.execute(f"""
+        SELECT at.*, al.nome AS aluno_nome, t.nome AS turma_nome
+        FROM atestados_alunos at
+        JOIN alunos al ON al.id = at.aluno_id
+        JOIN turmas t ON t.id = al.turma_id
+        WHERE 1=1 {where_turma}
+        ORDER BY at.data_inicio DESC
+    """, params).fetchall()
+    conn.close()
+
+    opts_turmas = '<option value="">— todas as turmas —</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id_int == t["id"] else ""}>{t["nome"]}</option>' for t in turmas
+    )
+
+    if not registros:
+        linhas = f'<tr><td colspan="{7 if pode_editar else 6}" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum atestado registrado ainda.</td></tr>'
+    else:
+        linhas = ""
+        for r in registros:
+            dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
+            status_badge = (
+                '<span style="color:var(--green);">✓ Anexado</span>' if r["status_upload"] == "enviado"
+                else '<span style="color:var(--orange);">⚠ Pendente de envio</span>'
+            )
+            link_html = f' · <a href="{r["arquivo_drive_link"]}" target="_blank">Ver</a>' if r["arquivo_drive_link"] else ""
+            acoes_html = ""
+            if pode_editar:
+                acoes_html = (
+                    f'<a href="/administrativo/atestados-alunos/{r["id"]}/editar" class="btn" style="padding:3px 8px; font-size:11px;">✏️</a> '
+                    f'<form method="post" action="/administrativo/atestados-alunos/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir esse atestado? O documento no Drive não é apagado.\');">'
+                    f'<button type="submit" class="btn" style="padding:3px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>'
+                )
+            linhas += f"""<tr>
+                <td style="padding:8px;">{r["aluno_nome"]}</td>
+                <td style="padding:8px;">{r["turma_nome"]}</td>
+                <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px; text-align:center;">{dias}</td>
+                <td style="padding:8px;">{status_badge}{link_html}</td>
+                <td style="padding:8px; font-size:12px; color:var(--text-muted);">{r["observacao"] or "—"}</td>
+                {f'<td style="padding:8px; white-space:nowrap;">{acoes_html}</td>' if pode_editar else ""}
+            </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🩺 Atestados Médicos de Alunos</h1>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
+            <a href="/administrativo/atestados-alunos/novo" class="btn btn-primary">+ Novo atestado</a>
+            <form method="get" style="margin:0;">
+                <label style="margin:0;">Turma <select name="turma_id" onchange="this.form.submit();">{opts_turmas}</select></label>
+            </form>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left;">Aluno</th>
+                <th style="padding:8px; text-align:left;">Turma</th>
+                <th style="padding:8px; text-align:left;">Período</th>
+                <th style="padding:8px;">Dias</th>
+                <th style="padding:8px; text-align:left;">Documento</th>
+                <th style="padding:8px; text-align:left;">Observação</th>
+                {'<th style="padding:8px;">Ações</th>' if pode_editar else ""}
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+    """
+    return HTMLResponse(render_page("Atestados de Alunos", content, active="atestados-alunos"))
+
+
+@app.get("/administrativo/atestados-alunos/{atestado_id}/editar", response_class=HTMLResponse)
+def form_editar_atestado_aluno(request: Request, atestado_id: int):
+    prof = get_current_professor(request)
+    if not _pode_editar_atestados_alunos(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("""
+        SELECT at.*, al.nome AS aluno_nome FROM atestados_alunos at
+        JOIN alunos al ON al.id = at.aluno_id WHERE at.id = ?
+    """, (atestado_id,)).fetchone()
+    conn.close()
+    if not r:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Atestado não encontrado.</div>', active=""))
+
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar Atestado — {r["aluno_nome"]}</h1></div>
+        <form action="/administrativo/atestados-alunos/{atestado_id}/editar" method="post">
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 200px;">Data de início<input type="date" name="data_inicio" value="{r["data_inicio"]}" required></label>
+                <label style="flex:1 1 200px;">Data de término<input type="date" name="data_fim" value="{r["data_fim"]}" required></label>
+            </div>
+            <label>Observação<textarea name="observacao" rows="3">{r["observacao"] or ""}</textarea></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar alterações</button>
+                <a href="/administrativo/atestados-alunos" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Editar Atestado", content, active="atestados-alunos"))
+
+
+@app.post("/administrativo/atestados-alunos/{atestado_id}/editar")
+async def salvar_edicao_atestado_aluno(request: Request, atestado_id: int, data_inicio: str = Form(...),
+                                        data_fim: str = Form(...), observacao: str = Form("")):
+    prof = get_current_professor(request)
+    if not _pode_editar_atestados_alunos(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    conn.execute("""UPDATE atestados_alunos SET data_inicio=?, data_fim=?, observacao=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                 (data_inicio, data_fim, observacao.strip() or None, atestado_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/administrativo/atestados-alunos", status_code=303)
+
+
+@app.post("/administrativo/atestados-alunos/{atestado_id}/excluir")
+def excluir_atestado_aluno(request: Request, atestado_id: int):
+    prof = get_current_professor(request)
+    if not _pode_editar_atestados_alunos(prof):
+        return RedirectResponse("/", status_code=303)
+    # Só apaga o registro do banco — o arquivo no Drive fica, por segurança (evita perda
+    # de documento por exclusão acidental) — 27/08/2026.
+    conn = get_db()
+    conn.execute("DELETE FROM atestados_alunos WHERE id = ?", (atestado_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/administrativo/atestados-alunos", status_code=303)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -2057,6 +2469,9 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 <div class="sidebar-section">Justificativas para o Ponto</div>
                 {nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa")}
                 {nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas")}
+                <div class="sidebar-section">Atestados de Alunos</div>
+                {nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado")}
+                {nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")}
         """
     else:
         # "Gerar Boletim" fica visível pra qualquer profissional (como já era), mas agora
@@ -2093,6 +2508,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {secao_boletim}
                 {secao_configuracoes}
                 {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
+                {('<div class="sidebar-section">Atestados de Alunos</div>' + nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado") + nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")) if _pode_ver_atestados_alunos(professor) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
         """
 
@@ -2401,6 +2817,14 @@ def home(request: Request):
     # vê esse quadro — não faz parte do que ele acompanha (27/08/2026, a pedido).
     eh_apoio_puro = bool(prof and prof.get("papel") == "apoio" and not prof["is_admin"] and not prof.get("is_gestor"))
     atencao_dados = _home_alunos_atencao(conn, prof) if (prof and not eh_apoio_puro) else None
+
+    # Atalho "Novo atestado de aluno" — seleção de turma+aluno direto na tela inicial,
+    # que já leva pro cadastro com o aluno pré-selecionado (27/08/2026, a pedido).
+    atestado_widget_dados = None
+    if _pode_ver_atestados_alunos(prof):
+        turmas_widget = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+        alunos_widget = conn.execute("SELECT id, turma_id, nome FROM alunos ORDER BY nome").fetchall()
+        atestado_widget_dados = (turmas_widget, alunos_widget)
     conn.close()
 
     # ----- HTML -----
@@ -2550,6 +2974,57 @@ def home(request: Request):
             <p style="color:var(--text-muted); font-size:13px;">{label_vazio}</p>
         """
 
+    # Widget de atalho pro cadastro de atestado — dropdowns turma+aluno populados via JS,
+    # levando pro form já com o aluno selecionado (27/08/2026).
+    if not atestado_widget_dados:
+        atestado_widget_html = ""
+    else:
+        turmas_widget, alunos_widget = atestado_widget_dados
+        opts_turmas_widget = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas_widget)
+        alunos_por_turma_widget = {}
+        for a in alunos_widget:
+            alunos_por_turma_widget.setdefault(a["turma_id"], []).append({"id": a["id"], "nome": a["nome"]})
+        alunos_por_turma_widget_json = json.dumps(alunos_por_turma_widget, ensure_ascii=False)
+        atestado_widget_html = f"""
+        <div class="card" style="padding:16px; margin-bottom:16px;">
+            <h2 style="margin:0 0 10px 0; font-size:14px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">🩺 Novo atestado de aluno</h2>
+            <label style="margin:0 0 8px 0;">Turma
+                <select id="sel-turma-atestado-home" onchange="_atualizarAlunosAtestadoHome(this)">
+                    <option value="">— selecione —</option>
+                    {opts_turmas_widget}
+                </select>
+            </label>
+            <label style="margin:0 0 10px 0;">Aluno
+                <select id="sel-aluno-atestado-home" disabled>
+                    <option value="">— selecione a turma primeiro —</option>
+                </select>
+            </label>
+            <button type="button" class="btn btn-primary" style="width:100%;" onclick="_irParaAtestadoHome()" id="btn-ir-atestado-home" disabled>Cadastrar atestado</button>
+        </div>
+        <script>
+        const _alunosPorTurmaAtestadoHome = {alunos_por_turma_widget_json};
+        function _atualizarAlunosAtestadoHome(selTurma) {{
+            const selAluno = document.getElementById('sel-aluno-atestado-home');
+            const btnIr = document.getElementById('btn-ir-atestado-home');
+            const lista = _alunosPorTurmaAtestadoHome[selTurma.value] || [];
+            lista.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+            selAluno.innerHTML = '<option value="">— selecione —</option>' +
+                lista.map(a => `<option value="${{a.id}}">${{a.nome}}</option>`).join('');
+            selAluno.disabled = lista.length === 0;
+            btnIr.disabled = true;
+        }}
+        document.addEventListener('DOMContentLoaded', function() {{
+            document.getElementById('sel-aluno-atestado-home').addEventListener('change', function() {{
+                document.getElementById('btn-ir-atestado-home').disabled = !this.value;
+            }});
+        }});
+        function _irParaAtestadoHome() {{
+            const alunoId = document.getElementById('sel-aluno-atestado-home').value;
+            if (alunoId) window.location.href = '/administrativo/atestados-alunos/novo?aluno_id=' + alunoId;
+        }}
+        </script>
+        """
+
     # Card "Alunos que precisam de atenção" — reaproveita a mesma regra de risco de
     # repetência do dashboard (qualquer disciplina com média T1+T2 < 5,0) + maiores
     # faltas. Vai na coluna direita da tela inicial, no espaço que ficava vazio (24/08/2026).
@@ -2601,6 +3076,7 @@ def home(request: Request):
                 {aplicacoes_abertas_html}
             </div>
             <div class="home-layout-side">
+                {atestado_widget_html}
                 {atencao_html}
             </div>
         </div>
