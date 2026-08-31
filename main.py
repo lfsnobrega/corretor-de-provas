@@ -113,6 +113,18 @@ TIPOS_AFASTAMENTO = {
 TIPOS_COM_HORARIO = {"permissao_ausencia", "declaracao_comparecimento"}
 
 
+def _fmt_data_br(data_iso: str) -> str:
+    """Converte data ISO (AAAA-MM-DD, como fica salva no banco) pro formato brasileiro
+    DD/MM/AAAA, só pra exibição — os campos <input type=date> continuam recebendo ISO
+    normalmente, essa função é só pra texto mostrado na tela (28/08/2026)."""
+    if not data_iso:
+        return "—"
+    try:
+        return date.fromisoformat(data_iso).strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return data_iso
+
+
 def _extrair_matricula(email: str) -> str:
     """Extrai a matrícula do e-mail de cadastro do profissional. Formato usado na rede:
     nome.MATRICULA@smevr.com.br — pega o último trecho separado por ponto, se for só
@@ -1484,7 +1496,7 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     horario_str = f' · Horário: {horario_inicio} às {horario_fim}' if horario_inicio and horario_fim else ""
     content = f"""
         <div class="page-header"><h1>✅ Justificativa enviada</h1></div>
-        <p>Tipo: <strong>{TIPOS_AFASTAMENTO[tipo]}</strong> · Período: {data_inicio} a {data_fim}{horario_str}</p>
+        <p>Tipo: <strong>{TIPOS_AFASTAMENTO[tipo]}</strong> · Período: {_fmt_data_br(data_inicio)} a {_fmt_data_br(data_fim)}{horario_str}</p>
         {aviso_html}
         <div class="page-actions" style="margin-top:16px;">
             <a href="/administrativo/afastamentos" class="btn btn-primary">Ver minhas Justificativas</a>
@@ -1520,7 +1532,7 @@ def listar_meus_afastamentos(request: Request):
             horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
             linhas += f"""<tr>
                 <td style="padding:8px;">{TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"])}</td>
-                <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px;">{_fmt_data_br(r["data_inicio"])} a {_fmt_data_br(r["data_fim"])}</td>
                 <td style="padding:8px; text-align:center;">{horario_col}</td>
                 <td style="padding:8px; text-align:center;">{dias}</td>
                 <td style="padding:8px;">{status_badge}{link_html}</td>
@@ -1585,7 +1597,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
                 <td style="padding:8px;">{r["prof_nome"]}</td>
                 <td style="padding:8px; text-align:center;">{matricula}</td>
                 <td style="padding:8px;">{TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"])}</td>
-                <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px;">{_fmt_data_br(r["data_inicio"])} a {_fmt_data_br(r["data_fim"])}</td>
                 <td style="padding:8px; text-align:center;">{horario_col}</td>
                 <td style="padding:8px; text-align:center;">{dias}</td>
                 <td style="padding:8px;">{link_html}</td>
@@ -1875,7 +1887,7 @@ async def criar_atestado_aluno(request: Request, aluno_id: int = Form(...), data
 
     content = f"""
         <div class="page-header"><h1>✅ Atestado registrado</h1></div>
-        <p>Aluno: <strong>{aluno["nome"]}</strong> · Período: {data_inicio} a {data_fim}</p>
+        <p>Aluno: <strong>{aluno["nome"]}</strong> · Período: {_fmt_data_br(data_inicio)} a {_fmt_data_br(data_fim)}</p>
         <div class="page-actions" style="margin-top:16px;">
             <a href="/administrativo/atestados-alunos" class="btn btn-primary">Ver atestados cadastrados</a>
             <a href="/administrativo/atestados-alunos/novo" class="btn">Novo atestado</a>
@@ -1926,7 +1938,7 @@ def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
             linhas += f"""<tr>
                 <td style="padding:8px;">{r["aluno_nome"]}</td>
                 <td style="padding:8px;">{r["turma_nome"]}</td>
-                <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
+                <td style="padding:8px;">{_fmt_data_br(r["data_inicio"])} a {_fmt_data_br(r["data_fim"])}</td>
                 <td style="padding:8px; text-align:center;">{dias}</td>
                 <td style="padding:8px; font-size:12px; color:var(--text-muted);">{r["observacao"] or "—"}</td>
                 {f'<td style="padding:8px; white-space:nowrap;">{acoes_html}</td>' if pode_editar else ""}
