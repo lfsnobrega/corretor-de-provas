@@ -1802,9 +1802,9 @@ def form_novo_atestado_aluno(request: Request, aluno_id: Optional[str] = None):
     content = f"""
         <div class="page-header">
             <h1>🩺 Novo Atestado Médico de Aluno</h1>
-            <p class="subtitle">Anexe o atestado — ele é enviado direto pro Drive da escola (pasta separada dos documentos de profissionais).</p>
+            <p class="subtitle">Registre o período do atestado — não é necessário anexar arquivo, só os dados.</p>
         </div>
-        <form action="/administrativo/atestados-alunos/novo" method="post" enctype="multipart/form-data">
+        <form action="/administrativo/atestados-alunos/novo" method="post">
             <div style="display:flex; flex-wrap:wrap; gap:14px;">
                 <label style="flex:1 1 220px; margin:0;">Turma
                     <select id="sel-turma-atestado" required onchange="_atualizarAlunosAtestado(this)">
@@ -1830,11 +1830,8 @@ def form_novo_atestado_aluno(request: Request, aluno_id: Optional[str] = None):
             <label>Observação (opcional)
                 <textarea name="observacao" rows="3" placeholder="Algum detalhe adicional, se necessário"></textarea>
             </label>
-            <label>Atestado (PDF, foto ou imagem)
-                <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png" required>
-            </label>
             <div class="page-actions">
-                <button type="submit" class="btn btn-primary">Enviar atestado</button>
+                <button type="submit" class="btn btn-primary">Registrar atestado</button>
                 <a href="/administrativo/atestados-alunos" class="btn">Ver atestados cadastrados</a>
             </div>
         </form>
@@ -1856,7 +1853,7 @@ def form_novo_atestado_aluno(request: Request, aluno_id: Optional[str] = None):
 
 @app.post("/administrativo/atestados-alunos/novo", response_class=HTMLResponse)
 async def criar_atestado_aluno(request: Request, aluno_id: int = Form(...), data_inicio: str = Form(...),
-                                data_fim: str = Form(...), observacao: str = Form(""), arquivo: UploadFile = File(...)):
+                                data_fim: str = Form(...), observacao: str = Form("")):
     prof = get_current_professor(request)
     if not _pode_ver_atestados_alunos(prof):
         return RedirectResponse("/", status_code=303)
@@ -1867,29 +1864,18 @@ async def criar_atestado_aluno(request: Request, aluno_id: int = Form(...), data
         conn.close()
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Aluno não encontrado.</p><a href="/administrativo/atestados-alunos/novo" class="btn">Voltar</a>', active="atestados-alunos-novo"))
 
-    conteudo = await arquivo.read()
-    ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
-    nome_no_drive = f"{aluno['nome']} - Atestado médico - {data_inicio}{ext}"
-    mime = arquivo.content_type or "application/octet-stream"
-
-    drive_id, drive_link, erro_drive = _drive_upload_arquivo(nome_no_drive, conteudo, mime, folder_id=GOOGLE_DRIVE_FOLDER_ID_ALUNOS)
-    status_upload = "enviado" if drive_id else "erro"
-
+    # Sem anexo — só os dados (28/08/2026, a pedido). Fica sem status_upload/arquivo,
+    # já que não há mais upload pro Drive nesse fluxo.
     conn.execute("""
-        INSERT INTO atestados_alunos (aluno_id, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, criado_por_professor_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (aluno_id, data_inicio, data_fim, observacao.strip() or None, arquivo.filename, drive_id, drive_link, status_upload, prof["id"]))
+        INSERT INTO atestados_alunos (aluno_id, data_inicio, data_fim, observacao, criado_por_professor_id)
+        VALUES (?, ?, ?, ?, ?)
+    """, (aluno_id, data_inicio, data_fim, observacao.strip() or None, prof["id"]))
     conn.commit()
     conn.close()
-
-    aviso_html = ""
-    if erro_drive:
-        aviso_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> o atestado foi registrado, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador.</div>'
 
     content = f"""
         <div class="page-header"><h1>✅ Atestado registrado</h1></div>
         <p>Aluno: <strong>{aluno["nome"]}</strong> · Período: {data_inicio} a {data_fim}</p>
-        {aviso_html}
         <div class="page-actions" style="margin-top:16px;">
             <a href="/administrativo/atestados-alunos" class="btn btn-primary">Ver atestados cadastrados</a>
             <a href="/administrativo/atestados-alunos/novo" class="btn">Novo atestado</a>
@@ -1925,21 +1911,16 @@ def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
     )
 
     if not registros:
-        linhas = f'<tr><td colspan="{7 if pode_editar else 6}" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum atestado registrado ainda.</td></tr>'
+        linhas = f'<tr><td colspan="{6 if pode_editar else 5}" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum atestado registrado ainda.</td></tr>'
     else:
         linhas = ""
         for r in registros:
             dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
-            status_badge = (
-                '<span style="color:var(--green);">✓ Anexado</span>' if r["status_upload"] == "enviado"
-                else '<span style="color:var(--orange);">⚠ Pendente de envio</span>'
-            )
-            link_html = f' · <a href="{r["arquivo_drive_link"]}" target="_blank">Ver</a>' if r["arquivo_drive_link"] else ""
             acoes_html = ""
             if pode_editar:
                 acoes_html = (
                     f'<a href="/administrativo/atestados-alunos/{r["id"]}/editar" class="btn" style="padding:3px 8px; font-size:11px;">✏️</a> '
-                    f'<form method="post" action="/administrativo/atestados-alunos/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir esse atestado? O documento no Drive não é apagado.\');">'
+                    f'<form method="post" action="/administrativo/atestados-alunos/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir esse atestado?\');">'
                     f'<button type="submit" class="btn" style="padding:3px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>'
                 )
             linhas += f"""<tr>
@@ -1947,7 +1928,6 @@ def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
                 <td style="padding:8px;">{r["turma_nome"]}</td>
                 <td style="padding:8px;">{r["data_inicio"]} a {r["data_fim"]}</td>
                 <td style="padding:8px; text-align:center;">{dias}</td>
-                <td style="padding:8px;">{status_badge}{link_html}</td>
                 <td style="padding:8px; font-size:12px; color:var(--text-muted);">{r["observacao"] or "—"}</td>
                 {f'<td style="padding:8px; white-space:nowrap;">{acoes_html}</td>' if pode_editar else ""}
             </tr>"""
@@ -1968,7 +1948,6 @@ def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
                 <th style="padding:8px; text-align:left;">Turma</th>
                 <th style="padding:8px; text-align:left;">Período</th>
                 <th style="padding:8px;">Dias</th>
-                <th style="padding:8px; text-align:left;">Documento</th>
                 <th style="padding:8px; text-align:left;">Observação</th>
                 {'<th style="padding:8px;">Ações</th>' if pode_editar else ""}
             </tr></thead>
