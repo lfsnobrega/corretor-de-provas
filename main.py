@@ -100,6 +100,22 @@ CAROMETRO_LINKS = {
 }
 
 
+# Tipos de ocorrência disciplinar (Orientação Educacional) — 28/08/2026. Lista fechada
+# pra estatística fazer sentido; ajustável depois se a escola usar outra categorização.
+TIPOS_OCORRENCIA = {
+    "indisciplina_sala": "Indisciplina em sala de aula",
+    "uso_celular": "Uso indevido de celular",
+    "desrespeito_colega": "Desrespeito a colega",
+    "desrespeito_funcionario": "Desrespeito a professor/funcionário",
+    "agressao_fisica": "Agressão física",
+    "agressao_verbal": "Agressão verbal",
+    "dano_patrimonio": "Dano ao patrimônio escolar",
+    "atraso_recorrente": "Atraso recorrente",
+    "evasao_sala": "Evasão/fuga da sala",
+    "outro": "Outro",
+}
+
+
 TIPOS_AFASTAMENTO = {
     "atestado_medico": "Atestado médico",
     "permissao_ausencia": "Permissão de ausência",
@@ -108,9 +124,12 @@ TIPOS_AFASTAMENTO = {
     "folga_tre": "Folga TRE",
     "abono_integral": "Abono Integral",
     "declaracao_comparecimento": "Declaração de comparecimento",
+    "hora_extra": "Hora extra",
+    "compensacao_horas": "Compensação de horas",
 }
-# Tipos que precisam de horário específico (não é o dia inteiro) — 26/08/2026
-TIPOS_COM_HORARIO = {"permissao_ausencia", "declaracao_comparecimento"}
+# Tipos que precisam de horário específico (não é o dia inteiro) — 26/08/2026, ampliado
+# em 02/09/2026 pra Hora extra e Compensação de horas (precisam do intervalo de horas).
+TIPOS_COM_HORARIO = {"permissao_ausencia", "declaracao_comparecimento", "hora_extra", "compensacao_horas"}
 
 
 def _fmt_data_br(data_iso: str) -> str:
@@ -755,22 +774,21 @@ def init_db():
         FOREIGN KEY (criado_por_professor_id) REFERENCES professores(id)
     )""")
 
-    # Atestado médico de ESTUDANTE — mesma estrutura do módulo de afastamentos de
-    # profissionais, mas associado a aluno_id em vez de professor_id (27/08/2026).
-    conn.execute("""CREATE TABLE IF NOT EXISTS atestados_alunos (
+    # Ocorrências disciplinares de alunos (Orientação Educacional) — texto livre da
+    # ocorrência, gera documento formatado com cabeçalho da escola sob demanda, sem
+    # depender de upload nem de IA externa (28/08/2026).
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocorrencias_alunos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         aluno_id INTEGER NOT NULL,
-        cadastrado_por_id INTEGER,
-        data_inicio TEXT NOT NULL,
-        data_fim TEXT NOT NULL,
-        observacao TEXT,
-        arquivo_nome TEXT,
-        arquivo_drive_id TEXT,
-        arquivo_drive_link TEXT,
-        status_upload TEXT NOT NULL DEFAULT 'pendente',
+        tipo TEXT NOT NULL,
+        data_ocorrencia TEXT NOT NULL,
+        descricao TEXT NOT NULL,
+        encaminhamento TEXT,
+        criado_por_professor_id INTEGER,
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP,
         FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
-        FOREIGN KEY (cadastrado_por_id) REFERENCES professores(id)
+        FOREIGN KEY (criado_por_professor_id) REFERENCES professores(id)
     )""")
 
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
@@ -1253,6 +1271,18 @@ async def auth_middleware(request: Request, call_next):
         }
         if path not in rotas_permitidas_apoio and path not in ONBOARDING_ISENTAS:
             return RedirectResponse("/administrativo/afastamentos/novo", status_code=303)
+    # Orientação Educacional só acessa suas próprias justificativas de ponto e o módulo
+    # de ocorrências disciplinares — nenhuma outra área (28/08/2026, a pedido). A rota de
+    # gerar documento tem um ID variável no meio (/orientacao/ocorrencias/{id}/documento),
+    # por isso o cheque por prefixo/sufixo além do conjunto fixo.
+    if prof.get("papel") == "orientacao" and not prof.get("is_admin") and not prof.get("is_gestor"):
+        rotas_permitidas_orientacao = {
+            "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos", "/trocar-senha",
+            "/orientacao/ocorrencias/novo", "/orientacao/ocorrencias",
+        }
+        eh_documento_ocorrencia = path.startswith("/orientacao/ocorrencias/") and path.endswith("/documento")
+        if path not in rotas_permitidas_orientacao and not eh_documento_ocorrencia and path not in ONBOARDING_ISENTAS:
+            return RedirectResponse("/orientacao/ocorrencias/novo", status_code=303)
     request.state.professor = prof
     token = _current_prof_ctx.set(prof)
     try:
@@ -1335,6 +1365,9 @@ def form_onboarding(request: Request):
                     <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
                         <input type="radio" name="papel" value="apoio" required style="width:auto;" onchange="document.getElementById('bloco-docente').style.display='none';"> <strong>Apoio Educacional</strong> — Cuidadores, Agentes Escolares, Biblioteca e Apoio
                     </label>
+                    <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
+                        <input type="radio" name="papel" value="orientacao" required style="width:auto;" onchange="document.getElementById('bloco-docente').style.display='none';"> <strong>Orientação Educacional</strong>
+                    </label>
                 </fieldset>
 
                 <div id="bloco-docente" style="display:none;">
@@ -1368,7 +1401,7 @@ async def salvar_onboarding(request: Request):
 
     form = await request.form()
     papel = form.get("papel")
-    if papel not in ("docente", "gestao", "apoio"):
+    if papel not in ("docente", "gestao", "apoio", "orientacao"):
         return RedirectResponse("/onboarding", status_code=303)
 
     conn = get_db()
@@ -1422,7 +1455,7 @@ def form_novo_afastamento(request: Request):
             </div>
             <p style="font-size:12px; color:var(--text-muted); margin-top:-8px;">Pra um único dia, use a mesma data nos dois campos.</p>
             <div id="bloco-horario-afastamento" style="display:none;">
-                <div class="tip" style="margin-bottom:10px;">Permissão de ausência: informe o horário de saída e de retorno nesse dia.</div>
+                <div class="tip" style="margin-bottom:10px;">Esse tipo de documento precisa do horário de início e término (não é o dia inteiro).</div>
                 <div style="display:flex; flex-wrap:wrap; gap:14px;">
                     <label style="flex:1 1 200px;">Horário de saída
                         <input type="time" name="horario_inicio" id="inp-horario-inicio">
@@ -2028,6 +2061,399 @@ def excluir_atestado_aluno(request: Request, atestado_id: int):
     return RedirectResponse("/administrativo/atestados-alunos", status_code=303)
 
 
+# ============ OCORRÊNCIAS DISCIPLINARES (ORIENTAÇÃO EDUCACIONAL) — 28/08/2026 ============
+# Registro de ocorrência disciplinar de aluno, com documento formatado (cabeçalho da
+# escola, igual boletim/prova) gerado sob demanda pra impressão/PDF — sem depender de
+# upload nem de IA externa (Gemini Workspace ≠ Gemini API, ver conversa). Só Orientação
+# Educacional, Gestão e Admin acessam.
+
+def _pode_ver_ocorrencias(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor") or prof.get("papel") in ("orientacao", "gestao")))
+
+
+def _pode_editar_ocorrencias(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor") or prof.get("papel") == "gestao"))
+
+
+@app.get("/orientacao/ocorrencias/novo", response_class=HTMLResponse)
+def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not _pode_ver_ocorrencias(prof):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    alunos_todos = conn.execute("SELECT id, turma_id, nome FROM alunos ORDER BY nome").fetchall()
+    conn.close()
+    opts_turmas = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+    opts_tipo = "".join(f'<option value="{k}">{v}</option>' for k, v in TIPOS_OCORRENCIA.items())
+
+    alunos_por_turma = {}
+    for a in alunos_todos:
+        alunos_por_turma.setdefault(a["turma_id"], []).append({"id": a["id"], "nome": a["nome"]})
+    alunos_por_turma_json = json.dumps(alunos_por_turma, ensure_ascii=False)
+
+    aluno_id_int = int(aluno_id) if aluno_id and aluno_id.strip().isdigit() else None
+    pre_selecao_js = ""
+    if aluno_id_int:
+        aluno_pre = next((a for a in alunos_todos if a["id"] == aluno_id_int), None)
+        if aluno_pre:
+            pre_selecao_js = f"""
+            document.getElementById('sel-turma-ocorrencia').value = '{aluno_pre["turma_id"]}';
+            _atualizarAlunosOcorrencia(document.getElementById('sel-turma-ocorrencia'), {aluno_id_int});
+            """
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Nova Ocorrência Disciplinar</h1>
+            <p class="subtitle">Registre o ocorrido — depois é possível gerar o documento formatado com o cabeçalho da escola pra impressão ou PDF.</p>
+        </div>
+        <form action="/orientacao/ocorrencias/novo" method="post">
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 220px; margin:0;">Turma
+                    <select id="sel-turma-ocorrencia" required onchange="_atualizarAlunosOcorrencia(this)">
+                        <option value="">— selecione —</option>
+                        {opts_turmas}
+                    </select>
+                </label>
+                <label style="flex:1 1 220px; margin:0;">Aluno
+                    <select name="aluno_id" id="sel-aluno-ocorrencia" required>
+                        <option value="">— selecione a turma primeiro —</option>
+                    </select>
+                </label>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 220px;">Tipo de ocorrência
+                    <select name="tipo" required>
+                        <option value="">— selecione —</option>
+                        {opts_tipo}
+                    </select>
+                </label>
+                <label style="flex:1 1 180px;">Data
+                    <input type="date" name="data_ocorrencia" required>
+                </label>
+            </div>
+            <label>Descrição da ocorrência
+                <textarea name="descricao" rows="6" required placeholder="Relato do ocorrido, com o máximo de detalhe possível — esse texto vai pro documento formatado."></textarea>
+            </label>
+            <label>Encaminhamento (opcional)
+                <textarea name="encaminhamento" rows="3" placeholder="Providências tomadas, conversa com responsáveis, etc."></textarea>
+            </label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Registrar ocorrência</button>
+                <a href="/orientacao/ocorrencias" class="btn">Ver ocorrências registradas</a>
+            </div>
+        </form>
+        <script>
+        const _alunosPorTurmaOcorrencia = {alunos_por_turma_json};
+        function _atualizarAlunosOcorrencia(selTurma, alunoIdPreSelecionado) {{
+            const selAluno = document.getElementById('sel-aluno-ocorrencia');
+            const lista = _alunosPorTurmaOcorrencia[selTurma.value] || [];
+            lista.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+            selAluno.innerHTML = '<option value="">— selecione —</option>' +
+                lista.map(a => `<option value="${{a.id}}">${{a.nome}}</option>`).join('');
+            if (alunoIdPreSelecionado) {{ selAluno.value = String(alunoIdPreSelecionado); }}
+        }}
+        {pre_selecao_js}
+        </script>
+    """
+    return HTMLResponse(render_page("Nova Ocorrência", content, active="ocorrencias-novo"))
+
+
+@app.post("/orientacao/ocorrencias/novo", response_class=HTMLResponse)
+async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: str = Form(...),
+                            data_ocorrencia: str = Form(...), descricao: str = Form(...),
+                            encaminhamento: str = Form("")):
+    prof = get_current_professor(request)
+    if not _pode_ver_ocorrencias(prof):
+        return RedirectResponse("/", status_code=303)
+    if tipo not in TIPOS_OCORRENCIA:
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Tipo de ocorrência inválido.</p><a href="/orientacao/ocorrencias/novo" class="btn">Voltar</a>', active="ocorrencias-novo"))
+
+    conn = get_db()
+    aluno = conn.execute("SELECT nome FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Aluno não encontrado.</p><a href="/orientacao/ocorrencias/novo" class="btn">Voltar</a>', active="ocorrencias-novo"))
+
+    cursor = conn.execute("""
+        INSERT INTO ocorrencias_alunos (aluno_id, tipo, data_ocorrencia, descricao, encaminhamento, criado_por_professor_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (aluno_id, tipo, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None, prof["id"]))
+    ocorrencia_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    content = f"""
+        <div class="page-header"><h1>✅ Ocorrência registrada</h1></div>
+        <p>Aluno: <strong>{aluno["nome"]}</strong> · Tipo: <strong>{TIPOS_OCORRENCIA[tipo]}</strong> · Data: {_fmt_data_br(data_ocorrencia)}</p>
+        <div class="page-actions" style="margin-top:16px;">
+            <a href="/orientacao/ocorrencias/{ocorrencia_id}/documento" class="btn btn-primary" target="_blank">🖨️ Gerar documento formatado</a>
+            <a href="/orientacao/ocorrencias" class="btn">Ver todas as ocorrências</a>
+            <a href="/orientacao/ocorrencias/novo" class="btn">Nova ocorrência</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Ocorrência registrada", content, active="ocorrencias-novo"))
+
+
+@app.get("/orientacao/ocorrencias", response_class=HTMLResponse)
+def listar_ocorrencias(request: Request, turma_id: Optional[str] = None, tipo: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not _pode_ver_ocorrencias(prof):
+        return RedirectResponse("/", status_code=303)
+    turma_id_int = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
+    tipo_filtro = tipo if tipo in TIPOS_OCORRENCIA else None
+    pode_editar = _pode_editar_ocorrencias(prof)
+
+    conn = get_db()
+    turmas = conn.execute("SELECT id, nome FROM turmas ORDER BY nome").fetchall()
+
+    where_extra = []
+    params = []
+    if turma_id_int:
+        where_extra.append("al.turma_id = ?")
+        params.append(turma_id_int)
+    if tipo_filtro:
+        where_extra.append("oc.tipo = ?")
+        params.append(tipo_filtro)
+    where_sql = ("AND " + " AND ".join(where_extra)) if where_extra else ""
+
+    registros = conn.execute(f"""
+        SELECT oc.*, al.nome AS aluno_nome, t.nome AS turma_nome
+        FROM ocorrencias_alunos oc
+        JOIN alunos al ON al.id = oc.aluno_id
+        JOIN turmas t ON t.id = al.turma_id
+        WHERE 1=1 {where_sql}
+        ORDER BY oc.data_ocorrencia DESC
+    """, params).fetchall()
+
+    # Estatística por tipo — respeitando os mesmos filtros de turma (mas não o de tipo,
+    # senão o gráfico sempre mostraria só uma barra) — 28/08/2026.
+    where_stats = "AND al.turma_id = ?" if turma_id_int else ""
+    params_stats = [turma_id_int] if turma_id_int else []
+    stats_rows = conn.execute(f"""
+        SELECT oc.tipo, COUNT(*) AS total
+        FROM ocorrencias_alunos oc
+        JOIN alunos al ON al.id = oc.aluno_id
+        WHERE 1=1 {where_stats}
+        GROUP BY oc.tipo
+    """, params_stats).fetchall()
+    conn.close()
+
+    stats_por_tipo = {r["tipo"]: r["total"] for r in stats_rows}
+    total_geral = sum(stats_por_tipo.values())
+    stats_html = ""
+    if total_geral == 0:
+        stats_html = '<p style="font-size:12px; color:var(--text-muted);">Nenhuma ocorrência pra gerar estatística ainda.</p>'
+    else:
+        for k, label in TIPOS_OCORRENCIA.items():
+            qtd = stats_por_tipo.get(k, 0)
+            if qtd == 0:
+                continue
+            pct = (qtd / total_geral) * 100
+            stats_html += f"""
+            <div style="margin-bottom:6px;">
+                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:2px;">
+                    <span>{label}</span><span style="color:var(--text-muted);">{qtd}</span>
+                </div>
+                <div style="background:#eee; border-radius:3px; height:8px;">
+                    <div style="width:{pct}%; background:var(--accent); height:100%; border-radius:3px;"></div>
+                </div>
+            </div>"""
+
+    opts_turmas = '<option value="">— todas as turmas —</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id_int == t["id"] else ""}>{t["nome"]}</option>' for t in turmas
+    )
+    opts_tipo_filtro = '<option value="">— todos os tipos —</option>' + "".join(
+        f'<option value="{k}"{" selected" if tipo_filtro == k else ""}>{v}</option>' for k, v in TIPOS_OCORRENCIA.items()
+    )
+    turma_nome_filtro = next((t["nome"] for t in turmas if t["id"] == turma_id_int), None)
+    titulo_stats_sufixo = f" — {turma_nome_filtro}" if turma_nome_filtro else ""
+
+    if not registros:
+        linhas = f'<tr><td colspan="{6 if pode_editar else 5}" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma ocorrência registrada ainda.</td></tr>'
+    else:
+        linhas = ""
+        for r in registros:
+            acoes_html = f'<a href="/orientacao/ocorrencias/{r["id"]}/documento" class="btn" style="padding:3px 8px; font-size:11px;" target="_blank">🖨️</a> '
+            if pode_editar:
+                acoes_html += (
+                    f'<a href="/orientacao/ocorrencias/{r["id"]}/editar" class="btn" style="padding:3px 8px; font-size:11px;">✏️</a> '
+                    f'<form method="post" action="/orientacao/ocorrencias/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir esse registro de ocorrência?\');">'
+                    f'<button type="submit" class="btn" style="padding:3px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>'
+                )
+            linhas += f"""<tr>
+                <td style="padding:8px;">{r["aluno_nome"]}</td>
+                <td style="padding:8px;">{r["turma_nome"]}</td>
+                <td style="padding:8px;">{TIPOS_OCORRENCIA.get(r["tipo"], r["tipo"])}</td>
+                <td style="padding:8px;">{_fmt_data_br(r["data_ocorrencia"])}</td>
+                <td style="padding:8px; font-size:12px; color:var(--text-muted); max-width:260px;">{(r["descricao"][:80] + "…") if len(r["descricao"]) > 80 else r["descricao"]}</td>
+                <td style="padding:8px; white-space:nowrap;">{acoes_html}</td>
+            </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📋 Ocorrências Disciplinares</h1>
+        </div>
+        <div style="display:grid; grid-template-columns: 2fr 1fr; gap:20px; align-items:start;">
+            <div>
+                <div style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
+                    <a href="/orientacao/ocorrencias/novo" class="btn btn-primary">+ Nova ocorrência</a>
+                    <form method="get" style="display:flex; gap:10px; margin:0;">
+                        <label style="margin:0;">Turma <select name="turma_id" onchange="this.form.submit();">{opts_turmas}</select></label>
+                        <label style="margin:0;">Tipo <select name="tipo" onchange="this.form.submit();">{opts_tipo_filtro}</select></label>
+                    </form>
+                </div>
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                    <thead><tr style="background:var(--bg-subtle);">
+                        <th style="padding:8px; text-align:left;">Aluno</th>
+                        <th style="padding:8px; text-align:left;">Turma</th>
+                        <th style="padding:8px; text-align:left;">Tipo</th>
+                        <th style="padding:8px; text-align:left;">Data</th>
+                        <th style="padding:8px; text-align:left;">Descrição</th>
+                        <th style="padding:8px;">Ações</th>
+                    </tr></thead>
+                    <tbody>{linhas}</tbody>
+                </table>
+            </div>
+            <div class="card" style="padding:16px;">
+                <h2 style="margin:0 0 12px 0; font-size:14px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted);">📊 Por tipo{titulo_stats_sufixo}</h2>
+                {stats_html}
+            </div>
+        </div>
+    """
+    return HTMLResponse(render_page("Ocorrências Disciplinares", content, active="ocorrencias"))
+
+
+@app.get("/orientacao/ocorrencias/{ocorrencia_id}/documento", response_class=HTMLResponse)
+def documento_ocorrencia(request: Request, ocorrencia_id: int):
+    prof = get_current_professor(request)
+    if not _pode_ver_ocorrencias(prof):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    r = conn.execute("""
+        SELECT oc.*, al.nome AS aluno_nome, t.nome AS turma_nome, p.nome AS registrado_por
+        FROM ocorrencias_alunos oc
+        JOIN alunos al ON al.id = oc.aluno_id
+        JOIN turmas t ON t.id = al.turma_id
+        LEFT JOIN professores p ON p.id = oc.criado_por_professor_id
+        WHERE oc.id = ?
+    """, (ocorrencia_id,)).fetchone()
+    conn.close()
+    if not r:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Ocorrência não encontrada.</div>', active=""))
+
+    encaminhamento_html = ""
+    if r["encaminhamento"]:
+        encaminhamento_html = f"""
+        <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:3px; margin:16px 0 6px 0;">Encaminhamento</h3>
+        <p style="white-space:pre-wrap; font-size:13px; line-height:1.6;">{html.escape(r["encaminhamento"])}</p>
+        """
+
+    html_completo = f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Ocorrência Disciplinar · {r["aluno_nome"]}</title>
+<style>
+    @media print {{ @page {{ size: A4; margin: 15mm; }} body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
+    body {{ margin:0; background:#fff; font-family: Helvetica, Arial, sans-serif; }}
+</style>
+</head><body>
+<div style="padding:14px 20px; max-width:760px; margin:0 auto; font-size:13px;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:6px;">
+        <img src="/static/imagens/logo_walmir.png" alt="" style="height:44px; width:auto;">
+        <div style="text-align:center;">
+            <div style="font-weight:700; font-size:15px;">E.M Walmir de Freitas Monteiro</div>
+            <div style="font-size:12px; color:#555;">Volta Redonda — RJ</div>
+        </div>
+    </div>
+    <h2 style="text-align:center; margin:14px 0 20px 0; font-size:17px;">REGISTRO DE OCORRÊNCIA DISCIPLINAR</h2>
+
+    <table style="width:100%; margin-bottom:14px; font-size:13px;">
+        <tr><td style="width:110px; color:#555; padding:3px 0;">Aluno</td><td style="font-weight:700;">{r["aluno_nome"]}</td></tr>
+        <tr><td style="color:#555; padding:3px 0;">Turma</td><td>{r["turma_nome"]}</td></tr>
+        <tr><td style="color:#555; padding:3px 0;">Data da ocorrência</td><td>{_fmt_data_br(r["data_ocorrencia"])}</td></tr>
+        <tr><td style="color:#555; padding:3px 0;">Tipo</td><td>{TIPOS_OCORRENCIA.get(r["tipo"], r["tipo"])}</td></tr>
+    </table>
+
+    <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:3px; margin:0 0 6px 0;">Descrição da ocorrência</h3>
+    <p style="white-space:pre-wrap; font-size:13px; line-height:1.6;">{html.escape(r["descricao"])}</p>
+    {encaminhamento_html}
+
+    <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px;">
+        <div style="border-top:1px solid #333; padding-top:4px; width:220px;">Orientação Educacional{(" — " + r["registrado_por"]) if r["registrado_por"] else ""}</div>
+        <div style="border-top:1px solid #333; padding-top:4px; width:220px;">Responsável pelo aluno</div>
+    </div>
+
+    <div style="font-size:9px; color:#888; border-top:1px solid #ddd; padding-top:5px; margin-top:30px; text-align:center;">
+        Gerado automaticamente — E.M Walmir de Freitas Monteiro · {datetime.now().strftime("%d de %B de %Y")}
+    </div>
+</div>
+<script>window.onload = () => window.print();</script>
+</body></html>"""
+    return HTMLResponse(html_completo)
+
+
+@app.get("/orientacao/ocorrencias/{ocorrencia_id}/editar", response_class=HTMLResponse)
+def form_editar_ocorrencia(request: Request, ocorrencia_id: int):
+    prof = get_current_professor(request)
+    if not _pode_editar_ocorrencias(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("""
+        SELECT oc.*, al.nome AS aluno_nome FROM ocorrencias_alunos oc
+        JOIN alunos al ON al.id = oc.aluno_id WHERE oc.id = ?
+    """, (ocorrencia_id,)).fetchone()
+    conn.close()
+    if not r:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Ocorrência não encontrada.</div>', active=""))
+
+    opts_tipo = "".join(f'<option value="{k}"{" selected" if r["tipo"]==k else ""}>{v}</option>' for k, v in TIPOS_OCORRENCIA.items())
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar Ocorrência — {r["aluno_nome"]}</h1></div>
+        <form action="/orientacao/ocorrencias/{ocorrencia_id}/editar" method="post">
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 220px;">Tipo<select name="tipo" required>{opts_tipo}</select></label>
+                <label style="flex:1 1 180px;">Data<input type="date" name="data_ocorrencia" value="{r["data_ocorrencia"]}" required></label>
+            </div>
+            <label>Descrição<textarea name="descricao" rows="6" required>{r["descricao"]}</textarea></label>
+            <label>Encaminhamento<textarea name="encaminhamento" rows="3">{r["encaminhamento"] or ""}</textarea></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar alterações</button>
+                <a href="/orientacao/ocorrencias" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Editar Ocorrência", content, active="ocorrencias"))
+
+
+@app.post("/orientacao/ocorrencias/{ocorrencia_id}/editar")
+async def salvar_edicao_ocorrencia(request: Request, ocorrencia_id: int, tipo: str = Form(...),
+                                    data_ocorrencia: str = Form(...), descricao: str = Form(...),
+                                    encaminhamento: str = Form("")):
+    prof = get_current_professor(request)
+    if not _pode_editar_ocorrencias(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    conn.execute("""UPDATE ocorrencias_alunos SET tipo=?, data_ocorrencia=?, descricao=?, encaminhamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                 (tipo, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None, ocorrencia_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/orientacao/ocorrencias", status_code=303)
+
+
+@app.post("/orientacao/ocorrencias/{ocorrencia_id}/excluir")
+def excluir_ocorrencia(request: Request, ocorrencia_id: int):
+    prof = get_current_professor(request)
+    if not _pode_editar_ocorrencias(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    conn.execute("DELETE FROM ocorrencias_alunos WHERE id = ?", (ocorrencia_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/orientacao/ocorrencias", status_code=303)
+
+
 @app.get("/login", response_class=HTMLResponse)
 def pagina_login(request: Request, next: str = "/", erro: str = ""):
     prof = get_current_professor(request)
@@ -2453,6 +2879,8 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     # Apoio Educacional (Cuidadores/Agentes/Biblioteca/Apoio) só vê Início + Administrativo
     # no menu — nenhuma outra área (25/08/2026, a pedido).
     eh_apoio_restrito = bool(professor and professor.get("papel") == "apoio" and not professor.get("is_admin") and not professor.get("is_gestor"))
+    # Orientação Educacional só vê Início + Justificativas próprias + Ocorrências (28/08/2026).
+    eh_orientacao_restrito = bool(professor and professor.get("papel") == "orientacao" and not professor.get("is_admin") and not professor.get("is_gestor"))
 
     if eh_apoio_restrito:
         nav_body = f"""
@@ -2463,6 +2891,16 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 <div class="sidebar-section">Atestados de Alunos</div>
                 {nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado")}
                 {nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")}
+        """
+    elif eh_orientacao_restrito:
+        nav_body = f"""
+                {nav_item("/", "home", "🏠", "Início")}
+                <div class="sidebar-section">Justificativas para o Ponto</div>
+                {nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa")}
+                {nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas")}
+                <div class="sidebar-section">Ocorrências Disciplinares</div>
+                {nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência")}
+                {nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")}
         """
     else:
         # "Gerar Boletim" fica visível pra qualquer profissional (como já era), mas agora
@@ -2500,6 +2938,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {secao_configuracoes}
                 {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {('<div class="sidebar-section">Atestados de Alunos</div>' + nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado") + nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")) if _pode_ver_atestados_alunos(professor) else ""}
+                {('<div class="sidebar-section">Ocorrências Disciplinares</div>' + nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência") + nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")) if _pode_ver_ocorrencias(professor) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
         """
 
@@ -2830,13 +3269,27 @@ def home(request: Request):
         ("📋", "Minhas Justificativas", "/administrativo/afastamentos", True),
         ("📊", "Relatório", "/administrativo/relatorio", is_admin or is_gestor),
     ])
+    grupo_atestados_alunos = ("Atestados de Alunos", "#0d9488", [
+        ("🩺", "Novo atestado", "/administrativo/atestados-alunos/novo", True),
+        ("📋", "Atestados cadastrados", "/administrativo/atestados-alunos", True),
+    ]) if _pode_ver_atestados_alunos(prof) else None
+    grupo_ocorrencias = ("Ocorrências Disciplinares", "#b45309", [
+        ("📋", "Nova ocorrência", "/orientacao/ocorrencias/novo", True),
+        ("📊", "Ocorrências registradas", "/orientacao/ocorrencias", True),
+    ]) if _pode_ver_ocorrencias(prof) else None
+    eh_orientacao_restrito = bool(prof and prof.get("papel") == "orientacao" and not is_admin and not is_gestor)
 
     if eh_apoio_restrito:
-        # Apoio Educacional só acessa a solicitação de afastamento — a tela inicial
-        # mostra só isso, sem os atalhos de áreas que ele não pode abrir (25/08/2026).
-        grupos_config = [grupo_administrativo]
+        # Apoio Educacional só acessa a solicitação de afastamento e atestados de alunos —
+        # a tela inicial mostra só isso, sem os atalhos de áreas que ele não pode abrir
+        # (25/08/2026, ampliado em 02/09/2026 pra incluir atestados).
+        grupos_config = [g for g in [grupo_administrativo, grupo_atestados_alunos] if g]
+    elif eh_orientacao_restrito:
+        # Orientação Educacional só acessa a solicitação de afastamento e ocorrências
+        # disciplinares (02/09/2026).
+        grupos_config = [g for g in [grupo_administrativo, grupo_ocorrencias] if g]
     else:
-        grupos_config = [
+        grupos_config = [g for g in [
             ("Ação rápida", "#2563eb", [
                 ("✏️", "Nova questão", "/questoes/nova", True),
                 ("📝", "Atividades", "/provas", True),
@@ -2854,11 +3307,13 @@ def home(request: Request):
                 ("👥", "Turmas", "/turmas", is_admin),
             ]),
             grupo_administrativo,
+            grupo_atestados_alunos,
+            grupo_ocorrencias,
             ("Gestão", "#7c3aed", [
                 ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
                 ("👤", "Usuários", "/admin/usuarios", is_admin),
             ]),
-        ]
+        ] if g]
     grupos_html = ""
     TILE_PX = 140   # largura-alvo de cada bloco, igual em todas as fileiras
     GAP_PX = 12
