@@ -115,6 +115,47 @@ TIPOS_OCORRENCIA = {
     "outro": "Outro",
 }
 
+# Tipos de ocorrência em que existe uma SEGUNDA pessoa (aluno) diretamente envolvida —
+# o formulário abre um campo extra pro nome dela (02/09/2026, a pedido).
+TIPOS_COM_OUTRO_ALUNO = {"agressao_fisica"}
+
+# Natureza do ato (Art. 74 do Regimento — "Do Regime Disciplinar Aplicado ao Corpo
+# Discente", documento anexado por Felipe em 02/09/2026) e as medidas educativas
+# disciplinares correspondentes (Art. 80), pra manter o registro alinhado ao regimento.
+NATUREZA_ATO = {
+    "leve": "Leve (Art. 75)",
+    "medio": "Médio (Art. 76)",
+    "grave": "Grave (Art. 77)",
+    "infracional": "Ato infracional (Art. 78/79)",
+}
+MEDIDAS_DISCIPLINARES = {
+    "leve": [
+        "Advertência verbal",
+        "Advertência por escrito",
+        "Repreensão, com encaminhamento à diretoria/coordenação",
+        "Suspensão das atividades recreativas",
+    ],
+    "medio": [
+        "Advertência por escrito",
+        "Repreensão, com encaminhamento à diretoria/coordenação",
+        "Suspensão temporária de participação em programas extracurriculares",
+        "Suspensão das aulas por 1 dia letivo (em domicílio, com atividades pedagógicas)",
+        "Mudança de turma",
+    ],
+    "grave": [
+        "Repreensão, com encaminhamento à diretoria/coordenação",
+        "Suspensão das aulas por 2 dias letivos (em domicílio, com atividades pedagógicas)",
+        "Mudança de turno",
+    ],
+    "infracional": [
+        "Encaminhamento ao Conselho Tutelar (até 12 anos incompletos)",
+        "Registro de Boletim de Ocorrência (12 a 17 anos, com comunicação ao Conselho Tutelar)",
+        "Registro de Boletim de Ocorrência (a partir de 18 anos)",
+        "Suspensão das aulas por 3 dias letivos (em domicílio, com atividades pedagógicas)",
+        "Transferência para outra unidade escolar (via Conselho de Classe extraordinário)",
+    ],
+}
+
 
 TIPOS_AFASTAMENTO = {
     "atestado_medico": "Atestado médico",
@@ -790,6 +831,19 @@ def init_db():
         FOREIGN KEY (aluno_id) REFERENCES alunos(id) ON DELETE CASCADE,
         FOREIGN KEY (criado_por_professor_id) REFERENCES professores(id)
     )""")
+    cols_ocorr = {row[1] for row in conn.execute("PRAGMA table_info(ocorrencias_alunos)").fetchall()}
+    if "natureza_registro" not in cols_ocorr:
+        # 'ocorrencia' (disciplinar) ou 'atendimento' (acolhimento/orientação geral,
+        # sem classificação disciplinar) — 02/09/2026.
+        conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN natureza_registro TEXT NOT NULL DEFAULT 'ocorrencia'")
+    if "outro_aluno_envolvido" not in cols_ocorr:
+        conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN outro_aluno_envolvido TEXT")
+    if "natureza_ato" not in cols_ocorr:
+        # leve/medio/grave/infracional — Art. 74 do regimento (documento anexado por Felipe)
+        conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN natureza_ato TEXT")
+    if "medida_disciplinar" not in cols_ocorr:
+        # Medida aplicada conforme Art. 80 do regimento — 02/09/2026.
+        conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN medida_disciplinar TEXT")
 
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
@@ -2085,13 +2139,17 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
     turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     alunos_todos = conn.execute("SELECT id, turma_id, nome FROM alunos ORDER BY nome").fetchall()
     conn.close()
-    opts_turmas = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
+    opts_turmas = "".join(f'<option value="{t["id"]}" data-nome="{t["nome"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
     opts_tipo = "".join(f'<option value="{k}">{v}</option>' for k, v in TIPOS_OCORRENCIA.items())
+    opts_natureza_ato = "".join(f'<option value="{k}">{v}</option>' for k, v in NATUREZA_ATO.items())
 
     alunos_por_turma = {}
     for a in alunos_todos:
         alunos_por_turma.setdefault(a["turma_id"], []).append({"id": a["id"], "nome": a["nome"]})
     alunos_por_turma_json = json.dumps(alunos_por_turma, ensure_ascii=False)
+    medidas_json = json.dumps(MEDIDAS_DISCIPLINARES, ensure_ascii=False)
+    tipos_com_outro_aluno_json = json.dumps(list(TIPOS_COM_OUTRO_ALUNO))
+    carometro_links_json = json.dumps(CAROMETRO_LINKS, ensure_ascii=False)
 
     aluno_id_int = int(aluno_id) if aluno_id and aluno_id.strip().isdigit() else None
     pre_selecao_js = ""
@@ -2101,17 +2159,28 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
             pre_selecao_js = f"""
             document.getElementById('sel-turma-ocorrencia').value = '{aluno_pre["turma_id"]}';
             _atualizarAlunosOcorrencia(document.getElementById('sel-turma-ocorrencia'), {aluno_id_int});
+            _atualizarCarometroOcorrencia(document.getElementById('sel-turma-ocorrencia'));
             """
 
     content = f"""
         <div class="page-header">
-            <h1>📋 Nova Ocorrência Disciplinar</h1>
-            <p class="subtitle">Registre o ocorrido — depois é possível gerar o documento formatado com o cabeçalho da escola pra impressão ou PDF.</p>
+            <h1>📋 Novo Registro — Orientação Educacional</h1>
+            <p class="subtitle">Registrado por: <strong>{prof["nome"]}</strong> · depois é possível gerar o documento formatado com o cabeçalho da escola pra impressão ou PDF.</p>
         </div>
         <form action="/orientacao/ocorrencias/novo" method="post">
-            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+            <fieldset>
+                <legend>Isso é uma ocorrência disciplinar ou um atendimento?</legend>
+                <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
+                    <input type="radio" name="natureza_registro" value="ocorrencia" checked style="width:auto;" onchange="_toggleNaturezaRegistro('ocorrencia')"> <strong>Ocorrência disciplinar</strong> — regida pelo regimento da escola
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; cursor:pointer;">
+                    <input type="radio" name="natureza_registro" value="atendimento" style="width:auto;" onchange="_toggleNaturezaRegistro('atendimento')"> <strong>Atendimento</strong> — acolhimento/orientação, sem classificação disciplinar
+                </label>
+            </fieldset>
+
+            <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
                 <label style="flex:1 1 220px; margin:0;">Turma
-                    <select id="sel-turma-ocorrencia" required onchange="_atualizarAlunosOcorrencia(this)">
+                    <select id="sel-turma-ocorrencia" required onchange="_atualizarAlunosOcorrencia(this); _atualizarCarometroOcorrencia(this);">
                         <option value="">— selecione —</option>
                         {opts_turmas}
                     </select>
@@ -2121,18 +2190,41 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
                         <option value="">— selecione a turma primeiro —</option>
                     </select>
                 </label>
+                <a id="btn-carometro-ocorrencia" href="/carometro" target="_blank" rel="noopener" class="btn" style="display:none;">🖼️ Carômetro</a>
             </div>
-            <div style="display:flex; flex-wrap:wrap; gap:14px;">
-                <label style="flex:1 1 220px;">Tipo de ocorrência
-                    <select name="tipo" required>
-                        <option value="">— selecione —</option>
-                        {opts_tipo}
-                    </select>
-                </label>
-                <label style="flex:1 1 180px;">Data
-                    <input type="date" name="data_ocorrencia" required>
-                </label>
+
+            <div id="bloco-campos-ocorrencia">
+                <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                    <label style="flex:1 1 220px;">Tipo de ocorrência
+                        <select name="tipo" id="sel-tipo-ocorrencia" onchange="_toggleOutroAlunoOcorrencia(this.value)">
+                            <option value="">— selecione —</option>
+                            {opts_tipo}
+                        </select>
+                    </label>
+                    <label style="flex:1 1 180px;">Data
+                        <input type="date" name="data_ocorrencia" required>
+                    </label>
+                </div>
+                <div id="bloco-outro-aluno" style="display:none;">
+                    <label>Nome do outro aluno envolvido
+                        <input type="text" name="outro_aluno_envolvido" placeholder="Nome completo do outro estudante envolvido">
+                    </label>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                    <label style="flex:1 1 220px;">Natureza do ato (Regimento)
+                        <select name="natureza_ato" id="sel-natureza-ato" onchange="_atualizarMedidasDisciplinares(this.value)">
+                            <option value="">— selecione —</option>
+                            {opts_natureza_ato}
+                        </select>
+                    </label>
+                    <label style="flex:1 1 300px;">Medida disciplinar aplicada
+                        <select name="medida_disciplinar" id="sel-medida-disciplinar">
+                            <option value="">— selecione a natureza do ato primeiro —</option>
+                        </select>
+                    </label>
+                </div>
             </div>
+
             <label>Descrição da ocorrência
                 <textarea name="descricao" rows="6" required placeholder="Relato do ocorrido, com o máximo de detalhe possível — esse texto vai pro documento formatado."></textarea>
             </label>
@@ -2140,12 +2232,16 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
                 <textarea name="encaminhamento" rows="3" placeholder="Providências tomadas, conversa com responsáveis, etc."></textarea>
             </label>
             <div class="page-actions">
-                <button type="submit" class="btn btn-primary">Registrar ocorrência</button>
-                <a href="/orientacao/ocorrencias" class="btn">Ver ocorrências registradas</a>
+                <button type="submit" class="btn btn-primary">Registrar</button>
+                <a href="/orientacao/ocorrencias" class="btn">Ver registros anteriores</a>
             </div>
         </form>
         <script>
         const _alunosPorTurmaOcorrencia = {alunos_por_turma_json};
+        const _medidasDisciplinaresPorNatureza = {medidas_json};
+        const _tiposComOutroAluno = {tipos_com_outro_aluno_json};
+        const _carometroLinksOcorrencia = {carometro_links_json};
+
         function _atualizarAlunosOcorrencia(selTurma, alunoIdPreSelecionado) {{
             const selAluno = document.getElementById('sel-aluno-ocorrencia');
             const lista = _alunosPorTurmaOcorrencia[selTurma.value] || [];
@@ -2154,6 +2250,38 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
                 lista.map(a => `<option value="${{a.id}}">${{a.nome}}</option>`).join('');
             if (alunoIdPreSelecionado) {{ selAluno.value = String(alunoIdPreSelecionado); }}
         }}
+
+        function _toggleNaturezaRegistro(natureza) {{
+            const bloco = document.getElementById('bloco-campos-ocorrencia');
+            const ehOcorrencia = natureza === 'ocorrencia';
+            bloco.style.display = ehOcorrencia ? 'block' : 'none';
+            document.getElementById('sel-tipo-ocorrencia').required = ehOcorrencia;
+        }}
+
+        function _toggleOutroAlunoOcorrencia(tipoSelecionado) {{
+            const bloco = document.getElementById('bloco-outro-aluno');
+            bloco.style.display = _tiposComOutroAluno.includes(tipoSelecionado) ? 'block' : 'none';
+        }}
+
+        function _atualizarMedidasDisciplinares(natureza) {{
+            const sel = document.getElementById('sel-medida-disciplinar');
+            const lista = _medidasDisciplinaresPorNatureza[natureza] || [];
+            sel.innerHTML = '<option value="">— selecione —</option>' +
+                lista.map(m => `<option value="${{m}}">${{m}}</option>`).join('');
+        }}
+
+        function _atualizarCarometroOcorrencia(selTurma) {{
+            const opt = selTurma.selectedOptions[0];
+            const btn = document.getElementById('btn-carometro-ocorrencia');
+            const nomeTurma = opt ? opt.dataset.nome : null;
+            const link = nomeTurma ? _carometroLinksOcorrencia[nomeTurma] : null;
+            if (link) {{
+                btn.href = link;
+                btn.style.display = 'inline-flex';
+            }} else {{
+                btn.style.display = 'none';
+            }}
+        }}
         {pre_selecao_js}
         </script>
     """
@@ -2161,14 +2289,23 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
 
 
 @app.post("/orientacao/ocorrencias/novo", response_class=HTMLResponse)
-async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: str = Form(...),
+async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: str = Form(""),
                             data_ocorrencia: str = Form(...), descricao: str = Form(...),
-                            encaminhamento: str = Form("")):
+                            encaminhamento: str = Form(""), natureza_registro: str = Form("ocorrencia"),
+                            outro_aluno_envolvido: str = Form(""), natureza_ato: str = Form(""),
+                            medida_disciplinar: str = Form("")):
     prof = get_current_professor(request)
     if not _pode_ver_ocorrencias(prof):
         return RedirectResponse("/", status_code=303)
-    if tipo not in TIPOS_OCORRENCIA:
+    if natureza_registro not in ("ocorrencia", "atendimento"):
+        natureza_registro = "ocorrencia"
+    # Tipo só é obrigatório quando é ocorrência disciplinar de verdade — um atendimento
+    # não precisa de classificação (02/09/2026).
+    if natureza_registro == "ocorrencia" and tipo not in TIPOS_OCORRENCIA:
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Tipo de ocorrência inválido.</p><a href="/orientacao/ocorrencias/novo" class="btn">Voltar</a>', active="ocorrencias-novo"))
+    # tipo é NOT NULL no banco (coluna antiga) — usa string vazia em vez de None quando é
+    # atendimento, pra não precisar recriar a tabela em produção (02/09/2026).
+    tipo = tipo if tipo in TIPOS_OCORRENCIA else ""
 
     conn = get_db()
     aluno = conn.execute("SELECT nome FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
@@ -2177,20 +2314,23 @@ async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: st
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Aluno não encontrado.</p><a href="/orientacao/ocorrencias/novo" class="btn">Voltar</a>', active="ocorrencias-novo"))
 
     cursor = conn.execute("""
-        INSERT INTO ocorrencias_alunos (aluno_id, tipo, data_ocorrencia, descricao, encaminhamento, criado_por_professor_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (aluno_id, tipo, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None, prof["id"]))
+        INSERT INTO ocorrencias_alunos (aluno_id, tipo, data_ocorrencia, descricao, encaminhamento, criado_por_professor_id, natureza_registro, outro_aluno_envolvido, natureza_ato, medida_disciplinar)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (aluno_id, tipo, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None, prof["id"],
+          natureza_registro, outro_aluno_envolvido.strip() or None, natureza_ato.strip() or None, medida_disciplinar.strip() or None))
     ocorrencia_id = cursor.lastrowid
     conn.commit()
     conn.close()
 
+    label_natureza = "Ocorrência" if natureza_registro == "ocorrencia" else "Atendimento"
+    tipo_str = f' · Tipo: <strong>{TIPOS_OCORRENCIA[tipo]}</strong>' if tipo else ""
     content = f"""
-        <div class="page-header"><h1>✅ Ocorrência registrada</h1></div>
-        <p>Aluno: <strong>{aluno["nome"]}</strong> · Tipo: <strong>{TIPOS_OCORRENCIA[tipo]}</strong> · Data: {_fmt_data_br(data_ocorrencia)}</p>
+        <div class="page-header"><h1>✅ {label_natureza} registrada(o)</h1></div>
+        <p>Aluno: <strong>{aluno["nome"]}</strong>{tipo_str} · Data: {_fmt_data_br(data_ocorrencia)}</p>
         <div class="page-actions" style="margin-top:16px;">
             <a href="/orientacao/ocorrencias/{ocorrencia_id}/documento" class="btn btn-primary" target="_blank">🖨️ Gerar documento formatado</a>
-            <a href="/orientacao/ocorrencias" class="btn">Ver todas as ocorrências</a>
-            <a href="/orientacao/ocorrencias/novo" class="btn">Nova ocorrência</a>
+            <a href="/orientacao/ocorrencias" class="btn">Ver todos os registros</a>
+            <a href="/orientacao/ocorrencias/novo" class="btn">Novo registro</a>
         </div>
     """
     return HTMLResponse(render_page("Ocorrência registrada", content, active="ocorrencias-novo"))
@@ -2351,9 +2491,27 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
         <p style="white-space:pre-wrap; font-size:13px; line-height:1.6;">{html.escape(r["encaminhamento"])}</p>
         """
 
+    natureza_registro = r["natureza_registro"] if "natureza_registro" in r.keys() else "ocorrencia"
+    titulo_doc = "REGISTRO DE OCORRÊNCIA DISCIPLINAR" if natureza_registro == "ocorrencia" else "REGISTRO DE ATENDIMENTO"
+
+    linhas_tabela = f"""
+        <tr><td style="width:150px; color:#555; padding:3px 0;">Aluno</td><td style="font-weight:700;">{r["aluno_nome"]}</td></tr>
+        <tr><td style="color:#555; padding:3px 0;">Turma</td><td>{r["turma_nome"]}</td></tr>
+        <tr><td style="color:#555; padding:3px 0;">Data</td><td>{_fmt_data_br(r["data_ocorrencia"])}</td></tr>
+        <tr><td style="color:#555; padding:3px 0;">Responsável pelo registro</td><td>{r["registrado_por"] or "—"}</td></tr>
+    """
+    if r["tipo"]:
+        linhas_tabela += f'<tr><td style="color:#555; padding:3px 0;">Tipo</td><td>{TIPOS_OCORRENCIA.get(r["tipo"], r["tipo"])}</td></tr>'
+    if "outro_aluno_envolvido" in r.keys() and r["outro_aluno_envolvido"]:
+        linhas_tabela += f'<tr><td style="color:#555; padding:3px 0;">Outro aluno envolvido</td><td>{r["outro_aluno_envolvido"]}</td></tr>'
+    if "natureza_ato" in r.keys() and r["natureza_ato"]:
+        linhas_tabela += f'<tr><td style="color:#555; padding:3px 0;">Natureza do ato</td><td>{NATUREZA_ATO.get(r["natureza_ato"], r["natureza_ato"])}</td></tr>'
+    if "medida_disciplinar" in r.keys() and r["medida_disciplinar"]:
+        linhas_tabela += f'<tr><td style="color:#555; padding:3px 0;">Medida disciplinar aplicada</td><td>{r["medida_disciplinar"]}</td></tr>'
+
     html_completo = f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
-<title>Ocorrência Disciplinar · {r["aluno_nome"]}</title>
+<title>{titulo_doc} · {r["aluno_nome"]}</title>
 <style>
     @media print {{ @page {{ size: A4; margin: 15mm; }} body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
     body {{ margin:0; background:#fff; font-family: Helvetica, Arial, sans-serif; }}
@@ -2367,22 +2525,20 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
             <div style="font-size:12px; color:#555;">Volta Redonda — RJ</div>
         </div>
     </div>
-    <h2 style="text-align:center; margin:14px 0 20px 0; font-size:17px;">REGISTRO DE OCORRÊNCIA DISCIPLINAR</h2>
+    <h2 style="text-align:center; margin:14px 0 20px 0; font-size:17px;">{titulo_doc}</h2>
 
     <table style="width:100%; margin-bottom:14px; font-size:13px;">
-        <tr><td style="width:110px; color:#555; padding:3px 0;">Aluno</td><td style="font-weight:700;">{r["aluno_nome"]}</td></tr>
-        <tr><td style="color:#555; padding:3px 0;">Turma</td><td>{r["turma_nome"]}</td></tr>
-        <tr><td style="color:#555; padding:3px 0;">Data da ocorrência</td><td>{_fmt_data_br(r["data_ocorrencia"])}</td></tr>
-        <tr><td style="color:#555; padding:3px 0;">Tipo</td><td>{TIPOS_OCORRENCIA.get(r["tipo"], r["tipo"])}</td></tr>
+        {linhas_tabela}
     </table>
 
-    <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:3px; margin:0 0 6px 0;">Descrição da ocorrência</h3>
+    <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:#555; border-bottom:1px solid #ddd; padding-bottom:3px; margin:0 0 6px 0;">Descrição</h3>
     <p style="white-space:pre-wrap; font-size:13px; line-height:1.6;">{html.escape(r["descricao"])}</p>
     {encaminhamento_html}
 
-    <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px;">
-        <div style="border-top:1px solid #333; padding-top:4px; width:220px;">Orientação Educacional{(" — " + r["registrado_por"]) if r["registrado_por"] else ""}</div>
-        <div style="border-top:1px solid #333; padding-top:4px; width:220px;">Responsável pelo aluno</div>
+    <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px; flex-wrap:wrap; gap:16px;">
+        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Orientação Educacional</div>
+        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Assinatura do Aluno</div>
+        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Responsável pelo aluno</div>
     </div>
 
     <div style="font-size:9px; color:#888; border-top:1px solid #ddd; padding-top:5px; margin-top:30px; text-align:center;">
@@ -2408,13 +2564,31 @@ def form_editar_ocorrencia(request: Request, ocorrencia_id: int):
     if not r:
         return HTMLResponse(render_page("Erro", '<div class="empty">Ocorrência não encontrada.</div>', active=""))
 
-    opts_tipo = "".join(f'<option value="{k}"{" selected" if r["tipo"]==k else ""}>{v}</option>' for k, v in TIPOS_OCORRENCIA.items())
+    opts_tipo = '<option value="">— nenhum —</option>' + "".join(f'<option value="{k}"{" selected" if r["tipo"]==k else ""}>{v}</option>' for k, v in TIPOS_OCORRENCIA.items())
+    opts_natureza_ato = '<option value="">— nenhuma —</option>' + "".join(f'<option value="{k}"{" selected" if r["natureza_ato"]==k else ""}>{v}</option>' for k, v in NATUREZA_ATO.items())
+    medida_atual = r["medida_disciplinar"] or ""
+    natureza_registro_atual = r["natureza_registro"] if "natureza_registro" in r.keys() else "ocorrencia"
     content = f"""
-        <div class="page-header"><h1>✏️ Editar Ocorrência — {r["aluno_nome"]}</h1></div>
+        <div class="page-header"><h1>✏️ Editar Registro — {r["aluno_nome"]}</h1></div>
         <form action="/orientacao/ocorrencias/{ocorrencia_id}/editar" method="post">
+            <label>Natureza do registro
+                <select name="natureza_registro">
+                    <option value="ocorrencia"{" selected" if natureza_registro_atual=="ocorrencia" else ""}>Ocorrência disciplinar</option>
+                    <option value="atendimento"{" selected" if natureza_registro_atual=="atendimento" else ""}>Atendimento</option>
+                </select>
+            </label>
             <div style="display:flex; flex-wrap:wrap; gap:14px;">
-                <label style="flex:1 1 220px;">Tipo<select name="tipo" required>{opts_tipo}</select></label>
+                <label style="flex:1 1 220px;">Tipo<select name="tipo">{opts_tipo}</select></label>
                 <label style="flex:1 1 180px;">Data<input type="date" name="data_ocorrencia" value="{r["data_ocorrencia"]}" required></label>
+            </div>
+            <label>Nome do outro aluno envolvido (se houver)
+                <input type="text" name="outro_aluno_envolvido" value="{r["outro_aluno_envolvido"] or ""}">
+            </label>
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 220px;">Natureza do ato (Regimento)<select name="natureza_ato">{opts_natureza_ato}</select></label>
+                <label style="flex:1 1 300px;">Medida disciplinar aplicada
+                    <input type="text" name="medida_disciplinar" value="{medida_atual}">
+                </label>
             </div>
             <label>Descrição<textarea name="descricao" rows="6" required>{r["descricao"]}</textarea></label>
             <label>Encaminhamento<textarea name="encaminhamento" rows="3">{r["encaminhamento"] or ""}</textarea></label>
@@ -2428,15 +2602,25 @@ def form_editar_ocorrencia(request: Request, ocorrencia_id: int):
 
 
 @app.post("/orientacao/ocorrencias/{ocorrencia_id}/editar")
-async def salvar_edicao_ocorrencia(request: Request, ocorrencia_id: int, tipo: str = Form(...),
+async def salvar_edicao_ocorrencia(request: Request, ocorrencia_id: int, tipo: str = Form(""),
                                     data_ocorrencia: str = Form(...), descricao: str = Form(...),
-                                    encaminhamento: str = Form("")):
+                                    encaminhamento: str = Form(""), natureza_registro: str = Form("ocorrencia"),
+                                    outro_aluno_envolvido: str = Form(""), natureza_ato: str = Form(""),
+                                    medida_disciplinar: str = Form("")):
     prof = get_current_professor(request)
     if not _pode_editar_ocorrencias(prof):
         return RedirectResponse("/", status_code=303)
+    if natureza_registro not in ("ocorrencia", "atendimento"):
+        natureza_registro = "ocorrencia"
+    tipo_final = tipo if tipo in TIPOS_OCORRENCIA else ""
+    natureza_ato_final = natureza_ato if natureza_ato in NATUREZA_ATO else None
     conn = get_db()
-    conn.execute("""UPDATE ocorrencias_alunos SET tipo=?, data_ocorrencia=?, descricao=?, encaminhamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
-                 (tipo, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None, ocorrencia_id))
+    conn.execute("""UPDATE ocorrencias_alunos SET tipo=?, data_ocorrencia=?, descricao=?, encaminhamento=?,
+                     natureza_registro=?, outro_aluno_envolvido=?, natureza_ato=?, medida_disciplinar=?,
+                     atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                 (tipo_final, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None,
+                  natureza_registro, outro_aluno_envolvido.strip() or None, natureza_ato_final,
+                  medida_disciplinar.strip() or None, ocorrencia_id))
     conn.commit()
     conn.close()
     return RedirectResponse("/orientacao/ocorrencias", status_code=303)
@@ -8029,10 +8213,16 @@ def boletim_analise_form(request: Request, trimestre: Optional[int] = None, ano:
             <td style="padding:6px;"><input type="text" name="obs_{a["id"]}" value="{(obs_atual or "").replace(chr(34), "&quot;")}" style="width:100%; margin:0;" placeholder="Observação (opcional)"></td>
         </tr>"""
 
+    carometro_link_analise = CAROMETRO_LINKS.get(turma["nome"])
+    carometro_btn_analise = f'<a href="{carometro_link_analise}" class="btn" target="_blank" rel="noopener">🖼️ Carômetro — {turma["nome"]}</a>' if carometro_link_analise else ""
+
     content = f"""
-        <div class="page-header">
-            <h1>📝 Análise — Conselho de Classe</h1>
-            <p class="subtitle">Turma {turma['nome']} · {disciplina['nome']} · {trimestre}º Trimestre {ano}</p>
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h1>📝 Análise — Conselho de Classe</h1>
+                <p class="subtitle">Turma {turma['nome']} · {disciplina['nome']} · {trimestre}º Trimestre {ano}</p>
+            </div>
+            {carometro_btn_analise}
         </div>
         <form method="get" action="/boletim/analise" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
             <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
