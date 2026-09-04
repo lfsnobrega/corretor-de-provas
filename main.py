@@ -1522,8 +1522,8 @@ def form_novo_afastamento(request: Request):
             <label>Observação (opcional)
                 <textarea name="observacao" rows="3" placeholder="Algum detalhe adicional, se necessário"></textarea>
             </label>
-            <label>Documento (PDF, foto ou imagem do atestado/permissão)
-                <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png" required>
+            <label>Documento (PDF, foto ou imagem do atestado/permissão) — opcional
+                <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png">
             </label>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Enviar solicitação</button>
@@ -1546,7 +1546,7 @@ def form_novo_afastamento(request: Request):
 
 @app.post("/administrativo/afastamentos/novo", response_class=HTMLResponse)
 async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio: str = Form(...),
-                             data_fim: str = Form(...), observacao: str = Form(""), arquivo: UploadFile = File(...),
+                             data_fim: str = Form(...), observacao: str = Form(""), arquivo: Optional[UploadFile] = File(None),
                              horario_inicio: str = Form(""), horario_fim: str = Form("")):
     prof = get_current_professor(request)
     if not prof:
@@ -1560,19 +1560,25 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     if tipo in TIPOS_COM_HORARIO and (not horario_inicio or not horario_fim):
         return HTMLResponse(render_page("Erro", f'<div class="page-header"><h1>Erro</h1></div><p>Pra "{TIPOS_AFASTAMENTO[tipo]}" é preciso informar o horário de saída e retorno.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
 
-    conteudo = await arquivo.read()
-    ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
-    nome_no_drive = f"{prof['nome']} - {TIPOS_AFASTAMENTO[tipo]} - {data_inicio}{ext}"
-    mime = arquivo.content_type or "application/octet-stream"
-
-    drive_id, drive_link, erro_drive = _drive_upload_arquivo(nome_no_drive, conteudo, mime)
-    status_upload = "enviado" if drive_id else "erro"
+    # Documento é opcional (02/09/2026, a pedido) — só sobe pro Drive se a pessoa
+    # realmente anexou algo; senão fica sem arquivo, sem erro nenhum.
+    nome_arquivo_salvo = None
+    drive_id = drive_link = erro_drive = None
+    status_upload = "sem_documento"
+    if arquivo is not None and arquivo.filename:
+        conteudo = await arquivo.read()
+        ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
+        nome_no_drive = f"{prof['nome']} - {TIPOS_AFASTAMENTO[tipo]} - {data_inicio}{ext}"
+        mime = arquivo.content_type or "application/octet-stream"
+        drive_id, drive_link, erro_drive = _drive_upload_arquivo(nome_no_drive, conteudo, mime)
+        status_upload = "enviado" if drive_id else "erro"
+        nome_arquivo_salvo = arquivo.filename
 
     conn = get_db()
     conn.execute("""
         INSERT INTO afastamentos (professor_id, tipo, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, horario_inicio, horario_fim)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (prof["id"], tipo, data_inicio, data_fim, observacao.strip() or None, arquivo.filename, drive_id, drive_link, status_upload, horario_inicio, horario_fim))
+    """, (prof["id"], tipo, data_inicio, data_fim, observacao.strip() or None, nome_arquivo_salvo, drive_id, drive_link, status_upload, horario_inicio, horario_fim))
     conn.commit()
     conn.close()
 
@@ -1611,10 +1617,12 @@ def listar_meus_afastamentos(request: Request):
         linhas = ""
         for r in registros:
             dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
-            status_badge = (
-                '<span style="color:var(--green);">✓ Anexado</span>' if r["status_upload"] == "enviado"
-                else '<span style="color:var(--orange);">⚠ Pendente de envio</span>'
-            )
+            if r["status_upload"] == "enviado":
+                status_badge = '<span style="color:var(--green);">✓ Anexado</span>'
+            elif r["status_upload"] == "sem_documento":
+                status_badge = '<span style="color:var(--text-muted);">— Sem documento</span>'
+            else:
+                status_badge = '<span style="color:var(--orange);">⚠ Pendente de envio</span>'
             link_html = f' · <a href="{r["arquivo_drive_link"]}" target="_blank">Ver documento</a>' if r["arquivo_drive_link"] else ""
             horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
             linhas += f"""<tr>
