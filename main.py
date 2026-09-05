@@ -228,6 +228,1067 @@ def _gerar_senha_temporaria(tamanho: int = 8) -> str:
     return "".join(secrets.choice(alfabeto) for _ in range(tamanho))
 
 
+# Referencial Curricular de Arte — extraído do documento oficial enviado por Felipe em
+# 04/09/2026 (RF_Arte.pdf). Cada bloco: ano + trimestre + unidade temática + objetos de
+# conhecimento (texto livre, um item por linha) + códigos de habilidades BNCC (ligados à
+# tabela habilidades_bncc que já existe no sistema).
+REFERENCIAL_CURRICULAR_ARTE = [
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Arte", "objetos":
+        "O que é Arte?\nElementos das Artes Visuais: Ponto; Linha; Cores e suas Classificações em primárias e secundárias, quentes, frias e neutras\nFigurativo e Abstrato\nArte da Pré-História\nArte Indígena",
+        "habilidades": ["EF69AR01", "EF69AR02", "EF69AR04", "EF69AR05", "EF69AR06", "EF69AR08", "EF69AR33"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Dança e Música", "objetos":
+        "Dança e sua origem\nDança de origem Indígena\nMovimento da Dança: Espaço – Fluência; Peso – Tempo\nMúsica Popular e Música Erudita\nElementos Musicais: Intensidade; Melodia; Harmonia; Ritmo\nSurgimento da MPB – Chorinho",
+        "habilidades": ["EF69AR10", "EF69AR11", "EF69AR13", "EF69AR14", "EF69AR16", "EF69AR17", "EF69AR18", "EF69AR19", "EF69AR20", "EF69AR31", "EF69AR34"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Teatro", "objetos":
+        "Teatro e sua origem\nHistória do Teatro no Brasil\nElementos do Teatro: Plateia; Personagens (Protagonista, Antagonista, Coadjuvante); Figurino - Maquiagem - Cenário",
+        "habilidades": ["EF69AR24", "EF69AR25", "EF69AR26", "EF69AR34"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Arte", "objetos":
+        "O que é Arte?\nElementos de Linguagem das Artes Visuais\nCultura afro e sua influência\nArte Popular e Arte Erudita\nMovimentos Artísticos: Arte Bizantina, Arte Românica, Arte Gótica",
+        "habilidades": ["EF69AR01", "EF69AR02", "EF69AR03", "EF69AR04", "EF69AR06", "EF69AR07", "EF69AR08", "EF69AR31", "EF69AR34"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Dança e Música", "objetos":
+        "Dança e sua origem\nDança Clássica e Dança Moderna\nMúsica Popular e Música Erudita\nElementos Musicais: Intensidade – Melodia – Harmonia – Ritmo\nSagrado no Canto e Surgimento das Notas Musicais\nMPB – Músicas Regionais",
+        "habilidades": ["EF69AR09", "EF69AR10", "EF69AR13", "EF69AR15", "EF69AR16", "EF69AR17", "EF69AR18", "EF69AR19", "EF69AR20", "EF69AR21", "EF69AR22", "EF69AR31", "EF69AR34"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Artes Visuais, Teatro e Artes Integradas", "objetos":
+        "Movimento Artístico – Renascimento\nArtistas Renascentistas\nTeatro e sua origem\nHistória do Teatro no Brasil\nElementos do Teatro: Plateia, Personagem (Protagonista, Antagonista, Coadjuvante), Figurino, Maquiagem, Cenário\nAs Máscaras no teatro Grego e Romano\nTeatro Renascentista: A Commedia dell'Arte e as Máscaras\nPersonagens",
+        "habilidades": ["EF69AR01", "EF69AR02", "EF69AR24", "EF69AR25", "EF69AR26", "EF69AR30", "EF69AR32", "EF69AR33"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Arte", "objetos":
+        "Movimentos Artísticos: Arte Barroca, Barroco no Brasil, Neoclássico, Missão Artística Francesa\nElementos de Linguagens Visuais: Ponto/Linha; Suporte/Volume; Espaço/Movimento; Simetria/Assimetria; Luz/Sombra\nMonocromia e Policromia",
+        "habilidades": ["EF69AR01", "EF69AR02", "EF69AR04", "EF69AR05", "EF69AR06", "EF69AR07", "EF69AR31"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Dança e Música", "objetos":
+        "Dança Contemporânea\nGrupos de Dança Nacionais e Internacionais\nDança - Flash Mobs\nInfluência Afro na MPB\nInstrumentos musicais de origem afro\nMúsica – Samba\nPersonalidades Negras de destaque na cultura brasileira",
+        "habilidades": ["EF69AR09", "EF69AR10", "EF69AR12", "EF69AR13", "EF69AR14", "EF69AR15", "EF69AR17", "EF69AR18", "EF69AR19", "EF69AR21", "EF69AR31", "EF69AR34", "EF69AR35"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Teatro e Artes Integradas", "objetos":
+        "Surgimento do Teatro (Grécia/Roma)\nTeatro Moderno\nTeatro Contemporâneo\nTeatro no Brasil na Atualidade\nA diversidade das técnicas formadas: Formas animadas\nComo e por que se faz teatro\nPara quem e onde se faz teatro\nTexto Teatral",
+        "habilidades": ["EF69AR24", "EF69AR25", "EF69AR27", "EF69AR28", "EF69AR30", "EF69AR33", "EF69AR34"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Arte", "objetos":
+        "Movimentos Artísticos: Impressionismo, Expressionismo, Cubismo, Surrealismo, Pop Arte\nArte Moderna no Brasil (Semana de Arte Moderna)\nArtistas Modernistas Brasileiros\nArte Pós-Moderna\nArtes digitais",
+        "habilidades": ["EF69AR01", "EF69AR02", "EF69AR03", "EF69AR05", "EF69AR06", "EF69AR07", "EF69AR08"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Dança e Música", "objetos":
+        "Dança Clássica, Moderna e Contemporânea\nDança de Rua (Street Dance)\nRock e Rock Nacional\nMúsica Popular Brasileira: Bossa Nova\nHip Hop - Cultura de Rua - Rap - Funk",
+        "habilidades": ["EF69AR09", "EF69AR10", "EF69AR12", "EF69AR13", "EF69AR14", "EF69AR15", "EF69AR16", "EF69AR17", "EF69AR18", "EF69AR19", "EF69AR23", "EF69AR31", "EF69AR32", "EF69AR34"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Teatro e Artes Integradas", "objetos":
+        "Gêneros Teatrais: Comédia, Tragédia, Tragicomédia (Sátira)\nTeatro Contemporâneo\nTeatro Musical",
+        "habilidades": ["EF69AR24", "EF69AR25", "EF69AR26", "EF69AR27", "EF69AR28", "EF69AR29", "EF69AR35"]},
+]
+
+# Referencial Curricular de Educação Física — extraído de RF_Educação_Física.pdf
+# (enviado por Felipe em 04/09/2026). Quando duas unidades "Esporte" apareciam no mesmo
+# trimestre com objetos diferentes (ex: Invasão + Técnico Combinatório), foram unificadas
+# numa linha só, já que compartilhavam exatamente as mesmas habilidades BNCC.
+REFERENCIAL_CURRICULAR_EDUCACAO_FISICA = [
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Esporte", "objetos":
+        "Esporte de Marca: Atletismo (corridas de velocidade, revezamento, saltos)",
+        "habilidades": ["EF67EF03", "EF67EF04"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Brincadeiras e Jogos", "objetos":
+        "Jogos Eletrônicos: Games, brincadeiras e jogos eletrônicos adaptados",
+        "habilidades": ["EF67EF01"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Ginástica", "objetos":
+        "Ginástica de Condicionamento Físico: Valências físicas e Funcional",
+        "habilidades": ["EF67EF08", "EF67EF10"]},
+
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Esporte", "objetos":
+        "Esporte de Invasão: Futsal e Handebol\nEsporte Técnico Combinatório: Artística, rítmica, acrobática e circense",
+        "habilidades": ["EF67EF03", "EF67EF04"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Danças", "objetos":
+        "Danças Urbanas: Funk",
+        "habilidades": ["EF67EF11"]},
+
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Práticas Corporais de Aventura", "objetos":
+        "PCA Urbanas: Skate, Parkour e Slackline",
+        "habilidades": ["EF67EF18", "EF67EF19"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Lutas", "objetos":
+        "Lutas do Brasil: Capoeira e Huka Huka",
+        "habilidades": ["EF67EF14", "EF67EF16"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Esporte de Precisão", "objetos":
+        "Esporte de Precisão: Boliche, zarabatana, elástico de dedo",
+        "habilidades": ["EF67EF03", "EF67EF04"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Esporte", "objetos":
+        "Esporte de Marca (Revisão do ano anterior, corridas de resistência, arremesso e lançamentos): Corrida de rua",
+        "habilidades": ["EF67EF03", "EF67EF05", "EF67EF06", "EF67EF07"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Brincadeiras e Jogos", "objetos":
+        "Jogos Eletrônicos: Games",
+        "habilidades": ["EF67EF01", "EF67EF02"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Ginástica", "objetos":
+        "Ginástica de Condicionamento Físico: Funcional",
+        "habilidades": ["EF67EF08", "EF67EF09", "EF67EF10"]},
+
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Esporte", "objetos":
+        "Esporte de Invasão: Futsal e Handebol\nEsporte Técnico Combinatório: Artística, rítmica, acrobática e circense",
+        "habilidades": ["EF67EF05", "EF67EF06", "EF67EF07"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Danças", "objetos":
+        "Danças Urbanas: Funk, break, vogue, popping, house dance",
+        "habilidades": ["EF67EF11", "EF67EF12", "EF67EF13"]},
+
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Práticas Corporais de Aventura", "objetos":
+        "PCA Urbanas: Skate, Parkour e Slackline",
+        "habilidades": ["EF67EF20", "EF67EF21"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Lutas", "objetos":
+        "Lutas do Brasil: Capoeira, Marajoara, Jiu Jitsu brasileiro",
+        "habilidades": ["EF67EF14", "EF67EF15", "EF67EF17"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Esporte de Precisão", "objetos":
+        "Esporte de Precisão: Dardo e Golfe",
+        "habilidades": ["EF67EF05", "EF67EF06", "EF67EF07"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Esporte", "objetos":
+        "Esporte de Rede e Parede: Voleibol e Badminton",
+        "habilidades": ["EF89EF02", "EF89EF04", "EF89EF06"]},
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Ginástica", "objetos":
+        "Ginástica de Condicionamento Físico: Localizada e crossfit\nGinástica de Consciência Corporal: Yoga e alongamento",
+        "habilidades": ["EF89EF07", "EF89EF10"]},
+
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Esporte", "objetos":
+        "Esporte Taco ou Campo: Softbol e taco",
+        "habilidades": ["EF89EF02", "EF89EF04", "EF89EF06"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Práticas Corporais de Aventura", "objetos":
+        "PCA de Natureza: Slackline, escalada horizontal e vertical",
+        "habilidades": ["EF89EF19", "EF89EF20", "EF89EF21"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Dança", "objetos":
+        "Dança de Salão: Forró",
+        "habilidades": ["EF89EF12", "EF89EF13"]},
+
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Esporte", "objetos":
+        "Esporte de Invasão: Basquete e Futsal\nEsporte de Combate: Esgrima, Boxe",
+        "habilidades": ["EF89EF02", "EF89EF04", "EF89EF06"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Lutas", "objetos":
+        "Lutas do Mundo: Karatê e taekwondo",
+        "habilidades": ["EF89EF16", "EF89EF18"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Esporte", "objetos":
+        "Esporte de Rede e Parede: Voleibol, Tênis de quadra, Futvolei",
+        "habilidades": ["EF89EF01", "EF89EF02", "EF89EF03", "EF89EF05"]},
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Ginástica", "objetos":
+        "Ginástica de Condicionamento Físico: Crossfit e musculação\nGinástica de Consciência Corporal: Yoga, Pilates, Mindfulness",
+        "habilidades": ["EF89EF08", "EF89EF09", "EF89EF10"]},
+
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Esporte", "objetos":
+        "Esporte Taco ou Campo: Beisebol, taco, críquete",
+        "habilidades": ["EF89EF01", "EF89EF03", "EF89EF05", "EF89EF06"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Práticas Corporais de Aventura", "objetos":
+        "PCA de Natureza: Slackline, trekking e campismo",
+        "habilidades": ["EF89EF19", "EF89EF20", "EF89EF21"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Dança", "objetos":
+        "Dança de Salão: Forró, valsa, bolero, tango, samba de gafieira",
+        "habilidades": ["EF89EF12", "EF89EF13", "EF89EF14", "EF89EF15"]},
+
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Esporte", "objetos":
+        "Esporte de Invasão: Basquete, Futsal e/ou futebol de campo\nEsporte de Combate: Boxe e judô",
+        "habilidades": ["EF89EF01", "EF89EF02", "EF89EF03", "EF89EF05"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Lutas", "objetos":
+        "Lutas do Mundo: Taekwondo, Muay Thay e Jiu Jitsu",
+        "habilidades": ["EF89EF16", "EF89EF17", "EF89EF18"]},
+]
+
+# Referencial Curricular de Ciências — extraído de RF_Ciências.pdf (04/09/2026). Alguns
+# trimestres do PDF combinavam 2 unidades temáticas no mesmo bloco (ex: 6º 1º tri tinha
+# "Matéria e Energia" e "Vida e evolução" juntos) — foram separados em linhas distintas,
+# uma por unidade, seguindo o mesmo padrão das outras disciplinas.
+REFERENCIAL_CURRICULAR_CIENCIAS = [
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Matéria e Energia", "objetos":
+        "Misturas homogêneas e heterogêneas\nTransformações químicas\nSeparação de materiais\nMateriais sintéticos",
+        "habilidades": ["EF06CI01", "EF06CI02", "EF06CI03", "EF06CI04"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Vida e Evolução", "objetos":
+        "Célula como unidade da vida",
+        "habilidades": ["EF06CI05"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Vida e Evolução", "objetos":
+        "Célula como unidade da vida\nInteração entre os sistemas locomotor e nervoso\nLentes corretivas",
+        "habilidades": ["EF06CI06", "EF06CI07", "EF06CI08", "EF06CI09", "EF06CI10"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Terra e Universo", "objetos":
+        "Forma, estrutura e movimentos da Terra",
+        "habilidades": ["EF06CI11", "EF06CI12", "EF06CI13", "EF06CI14"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Terra e Universo", "objetos":
+        "Composição do ar\nEfeito estufa\nCamada de ozônio\nFenômenos naturais (vulcões, terremotos e tsunamis)\nPlacas tectônicas e deriva continental",
+        "habilidades": ["EF07CI12", "EF07CI13", "EF07CI14", "EF07CI15", "EF07CI16"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Vida e Evolução", "objetos":
+        "Diversidade de ecossistemas\nFenômenos naturais e impactos ambientais\nProgramas e indicadores de saúde pública",
+        "habilidades": ["EF07CI07", "EF07CI08", "EF07CI09", "EF07CI10"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Matéria e Energia", "objetos":
+        "Máquinas simples\nFormas de propagação do calor\nEquilíbrio termodinâmico e vida na Terra\nHistória dos combustíveis e das máquinas térmicas",
+        "habilidades": ["EF07CI01", "EF07CI02", "EF07CI03", "EF07CI04", "EF07CI05", "EF07CI06"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Matéria e Energia", "objetos":
+        "Fontes e tipos de energia\nTransformação de energia\nCálculo de consumo de energia elétrica\nCircuitos elétricos\nUso consciente de energia elétrica",
+        "habilidades": ["EF08CI01", "EF08CI02", "EF08CI03", "EF08CI04", "EF08CI05", "EF08CI06"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Vida e Evolução", "objetos":
+        "Mecanismos reprodutivos\nSexualidade",
+        "habilidades": ["EF08CI07", "EF08CI08", "EF08CI09", "EF08CI10", "EF08CI11"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Terra e Universo", "objetos":
+        "Sistema Sol, Terra e Lua\nClima",
+        "habilidades": ["EF08CI12", "EF08CI13", "EF08CI14", "EF08CI15", "EF08CI16"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Vida e Evolução", "objetos":
+        "Hereditariedade\nIdeias evolucionistas\nPreservação da biodiversidade",
+        "habilidades": ["EF09CI08", "EF09CI09", "EF09CI10", "EF09CI11", "EF09CI12", "EF09CI13"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Matéria e Energia", "objetos":
+        "Aspectos quantitativos das transformações químicas\nEstrutura da matéria\nRadiações e suas aplicações na saúde",
+        "habilidades": ["EF09CI01", "EF09CI03", "EF09CI01VR", "EF09CI02", "EF09CI06", "EF09CI07", "EF09CI08VR", "EF09CI04", "EF09CI05"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Matéria e Energia", "objetos":
+        "Dinâmica\nCinemática",
+        "habilidades": ["EF09CI03VR", "EF09CI04VR", "EF09CI05VR", "EF09CI06VR", "EF09CI07VR"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Terra e Universo", "objetos":
+        "Composição, estrutura e localização do Sistema Solar no Universo\nAstronomia e cultura\nVida humana fora da Terra\nOrdem de grandeza astronômica\nEvolução estelar",
+        "habilidades": ["EF09CI14", "EF09CI15", "EF09CI16", "EF09CI17"]},
+]
+
+# Referencial Curricular de História — extraído de RF_História.pdf (04/09/2026). O
+# documento original usa "Eixo Temático" em vez de "Unidade Temática" — mapeado no mesmo
+# campo unidade_tematica. Vários trimestres tinham eixos entrelaçados/repetidos na mesma
+# página; consolidados em blocos por eixo, preservando todas as habilidades citadas.
+REFERENCIAL_CURRICULAR_HISTORIA = [
+    {"ano": "6º ano", "trimestre": 1, "unidade": "História: tempo, espaço e formas de registros", "objetos":
+        "A questão do tempo, sincronias e diacronias: reflexões sobre o sentido das cronologias\nFormas de registro da história e da produção do conhecimento histórico\nAs origens da humanidade, seus deslocamentos e os processos de sedentarização",
+        "habilidades": ["EF06HI01", "EF06HI02", "EF06HI03", "EF06HI04", "EF06HI05", "EF06HI06"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "A invenção do mundo clássico e o contraponto com outras sociedades", "objetos":
+        "Povos da Antiguidade na África (egípcios), no Oriente Médio (mesopotâmicos) e nas Américas (pré-colombianos)\nOs povos indígenas originários do atual território brasileiro e seus hábitos culturais e sociais\nO Ocidente Clássico: aspectos da cultura na Grécia e em Roma",
+        "habilidades": ["EF06HI07", "EF06HI08", "EF06HI09"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Lógicas de organização política", "objetos":
+        "As noções de cidadania e política na Grécia e em Roma",
+        "habilidades": ["EF06HI10"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Lógicas de organização política", "objetos":
+        "As noções de cidadania e política na Grécia e em Roma\nDomínios e expansão das culturas grega e romana\nSignificados do conceito de 'império' e as lógicas de conquista, conflito e negociação\nAs diferentes formas de organização política na África: reinos, impérios, cidades-estados e sociedades linhageiras ou aldeias\nA passagem do mundo antigo para o mundo medieval\nA fragmentação do poder político na Idade Média\nO Mediterrâneo como espaço de interação entre as sociedades da Europa, da África e do Oriente Médio",
+        "habilidades": ["EF06HI11", "EF06HI12", "EF06HI13", "EF06HI14", "EF06HI15"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Trabalho e formas de organização social e cultural", "objetos":
+        "Senhores medievais e servos no mundo antigo e no mundo medieval\nEscravidão e trabalho livre em diferentes temporalidades e espaços (Roma Antiga, Europa medieval e África)\nLógicas comerciais na Antiguidade romana e no mundo medieval\nO papel da religião cristã, dos mosteiros e da cultura na Idade Média",
+        "habilidades": ["EF06HI16", "EF06HI17", "EF06HI18"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "O mundo moderno e a conexão entre sociedades africanas, americanas e europeias", "objetos":
+        "Saberes dos povos africanos e pré-colombianos expressos na cultura material e imaterial\nA construção da ideia de modernidade e seus impactos na concepção de História\nA ideia de 'Novo Mundo' ante o Mundo Antigo: permanências e rupturas de saberes e práticas na emergência do mundo moderno",
+        "habilidades": ["EF07HI01", "EF07HI02", "EF07HI03"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "A organização do poder e as dinâmicas do mundo colonial americano", "objetos":
+        "A formação e o funcionamento das monarquias europeias: a lógica da centralização política e os conflitos na Europa",
+        "habilidades": ["EF07HI07"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Lógicas comerciais e mercantis da modernidade", "objetos":
+        "As lógicas mercantis e o domínio europeu sobre os mares e o contraponto oriental",
+        "habilidades": ["EF07HI13"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Humanismos, Renascimentos e o Novo Mundo", "objetos":
+        "Humanismos: uma nova visão de ser humano e de mundo\nRenascimentos artísticos e culturais",
+        "habilidades": ["EF07HI04"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Humanismos, Renascimentos e o Novo Mundo", "objetos":
+        "As Reformas religiosas: a cristandade fragmentada\nAs descobertas científicas e a expansão marítima",
+        "habilidades": ["EF07HI05", "EF07HI06"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "A organização do poder e as dinâmicas do mundo colonial americano", "objetos":
+        "A conquista da América e as formas de organização política dos indígenas e europeus: conflitos, dominação e conciliação\nA estruturação dos vice-reinos nas Américas\nResistências indígenas, invasões e expansão na América portuguesa",
+        "habilidades": ["EF07HI08", "EF07HI09", "EF07HI01-VR1", "EF07HI10"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "A organização do poder e as dinâmicas do mundo colonial americano", "objetos":
+        "A estruturação dos vice-reinos nas Américas\nResistências indígenas, invasões e expansão na América portuguesa",
+        "habilidades": ["EF07HI11", "EF07HI12"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Lógicas comerciais e mercantis da modernidade", "objetos":
+        "As lógicas internas das sociedades africanas\nAs formas de organização das sociedades ameríndias\nA escravidão moderna e o tráfico de escravizados\nA emergência do capitalismo",
+        "habilidades": ["EF07HI14", "EF07HI15", "EF07HI16", "EF07HI17"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "O mundo contemporâneo: o Antigo Regime em crise", "objetos":
+        "As revoluções inglesas e os princípios do liberalismo\nA questão do iluminismo e da ilustração\nRevolução Industrial e seus impactos na produção e circulação de povos, produtos e culturas\nRevolução Francesa e seus desdobramentos\nRebeliões na América portuguesa: as conjurações mineira e baiana",
+        "habilidades": ["EF08HI01", "EF08HI02", "EF08HI03", "EF08HI04", "EF08HI05"]},
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Os processos de independência nas Américas", "objetos":
+        "A revolução dos escravizados em São Domingo e seus múltiplos significados: o caso do Haiti\nIndependência dos Estados Unidos da América\nIndependências na América espanhola\nOs caminhos até a independência do Brasil",
+        "habilidades": ["EF08HI06", "EF08HI07", "EF08HI09", "EF08HI10", "EF08HI11"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Os processos de independência nas Américas", "objetos":
+        "Independência dos Estados Unidos da América\nIndependências na América espanhola\nOs caminhos até a independência do Brasil\nA tutela da população indígena, a escravidão dos negros e a tutela dos egressos da escravidão",
+        "habilidades": ["EF08HI08", "EF08HI12", "EF08HI13", "EF08HI14"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "O Brasil no século XIX", "objetos":
+        "Brasil: Primeiro Reinado\nO Período Regencial e as contestações ao poder central\nO Brasil do Segundo Reinado: política e economia\nA Lei de Terras e seus desdobramentos na política do Segundo Reinado\nTerritórios e fronteiras: a Guerra do Paraguai\nO escravismo no Brasil do século XIX: plantations, revoltas de escravizados, abolicionismo e políticas migratórias no Brasil Imperial",
+        "habilidades": ["EF08HI15", "EF08HI16", "EF08HI17", "EF08HI18", "EF08HI-VR1", "EF08HI19"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "O Brasil no século XIX", "objetos":
+        "O escravismo no Brasil do século XIX: consequências da escravidão nas Américas\nPolíticas de extermínio do indígena durante o Império\nA produção do imaginário nacional brasileiro: cultura popular, representações visuais, letras e o Romantismo no Brasil",
+        "habilidades": ["EF08HI20", "EF08HI-VR2", "EF08HI21", "EF08HI22"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Configurações do mundo no século XIX", "objetos":
+        "Nacionalismo, revoluções e as novas nações europeias\nUma nova ordem econômica: as demandas do capitalismo industrial e o lugar das economias africanas e asiáticas nas dinâmicas globais\nOs Estados Unidos da América e a América Latina no século XIX\nO imperialismo europeu e a partilha da África e da Ásia\nPensamento e cultura no século XIX: darwinismo e racismo\nO discurso civilizatório nas Américas e a resistência dos povos indígenas",
+        "habilidades": ["EF08HI23", "EF08HI24", "EF08HI25", "EF08HI26", "EF08HI27"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "O nascimento da República no Brasil e os processos históricos até a metade do século XX", "objetos":
+        "Experiências republicanas e práticas autoritárias\nA Proclamação da República e seus primeiros desdobramentos\nA questão da inserção dos negros no período republicano pós-abolição\nOs movimentos sociais e a imprensa negra\nA cultura afro-brasileira como elemento de resistência e superação das discriminações\nPrimeira República e suas características\nContestações e dinâmicas da vida cultural no Brasil entre 1900 e 1930\nO período varguista e suas contradições\nA emergência da vida urbana e a segregação espacial\nO trabalhismo e seu protagonismo político\nAnarquismo e protagonismo feminino",
+        "habilidades": ["EF09HI01", "EF09HI02", "EF09HI03", "EF09HI04", "EF09HI05", "EF09HI06", "EF09HI08", "EF09HI09"]},
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Totalitarismos e conflitos mundiais", "objetos":
+        "O colonialismo na África\nAs guerras mundiais, a crise do colonialismo e o advento dos nacionalismos africanos e asiáticos\nO mundo em conflito: a Primeira Guerra Mundial\nA questão da Palestina\nA Revolução Russa\nA crise capitalista de 1929\nA emergência do fascismo e do nazismo\nA Segunda Guerra Mundial\nJudeus e outras vítimas do holocausto\nA Organização das Nações Unidas (ONU) e a questão dos Direitos Humanos",
+        "habilidades": ["EF09HI14", "EF09HI10", "EF09HI13", "EF09HI15"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Totalitarismos e conflitos mundiais", "objetos":
+        "A Organização das Nações Unidas (ONU) e a questão dos Direitos Humanos\nA Guerra Fria: confrontos de dois modelos políticos\nA Revolução Chinesa e as tensões entre China e Rússia\nA Revolução Cubana e as tensões entre Estados Unidos da América e Cuba",
+        "habilidades": ["EF09HI16", "EF09HI28"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Modernização, ditadura civil-militar e redemocratização: o Brasil após 1946", "objetos":
+        "O Brasil da era JK e o ideal de uma nação moderna: a urbanização e seus desdobramentos\nOs anos 1960: revolução cultural?\nA ditadura civil-militar e os processos de resistência\nAs questões indígena e negra e a ditadura",
+        "habilidades": ["EF09HI17", "EF09HI18", "EF09HI19", "EF09HI20", "EF09HI21"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "O nascimento da República no Brasil e os processos históricos até a metade do século XX", "objetos":
+        "A questão indígena durante a República (até 1964)",
+        "habilidades": ["EF09HI07"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "A história recente", "objetos":
+        "As experiências ditatoriais na América Latina\nO processo de redemocratização\nA Constituição de 1988 e a emancipação das cidadanias (analfabetos, indígenas, negros, jovens etc.)",
+        "habilidades": ["EF09HI29", "EF09HI30", "EF09HI22", "EF09HI23"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "A história recente", "objetos":
+        "A história recente do Brasil: transformações políticas, econômicas, sociais e culturais de 1989 aos dias atuais\nOs protagonismos da sociedade civil\nA questão da violência contra populações marginalizadas\nO Brasil e suas relações internacionais na era da globalização\nOs processos de descolonização na África e na Ásia\nO fim da Guerra Fria e o processo de globalização\nPolíticas econômicas na América Latina\nOs conflitos do século XXI e a questão do terrorismo\nPluralidades e diversidades identitárias na atualidade\nAs pautas dos povos indígenas no século XXI",
+        "habilidades": ["EF09HI24", "EF09HI25", "EF09HI26", "EF09HI27", "EF09HI-VR1", "EF09HI31", "EF09HI32", "EF09HI33", "EF09HI34", "EF09HI35", "EF09HI36"]},
+]
+
+# Referencial Curricular de Geografia — extraído de RF_Geografia.pdf (04/09/2026).
+# NORMALIZAÇÃO: o PDF original tinha alguns códigos com erro de digitação (ex:
+# "EF06GEO2", "EF06GEO8", "EF06GEO9", "EF06GEO11") — corrigidos pro padrão oficial BNCC
+# (EF06GE02, EF06GE08, EF06GE09, EF06GE11), inclusive confirmado por descrição idêntica
+# repetida no próprio documento (EF06GEO11 e EF06GE11 tinham exatamente o mesmo texto).
+REFERENCIAL_CURRICULAR_GEOGRAFIA = [
+    {"ano": "6º ano", "trimestre": 1, "unidade": "O sujeito e seu lugar no mundo", "objetos":
+        "Conceitos geográficos: Lugar, Paisagem, Espaço geográfico, Território, Região",
+        "habilidades": ["EF06GE01", "EF06GE02"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Natureza, ambientes e qualidade de vida", "objetos":
+        "Localização e orientação no espaço: pontos cardeais, coordenadas geográficas (paralelos/latitude, meridianos/longitude), movimentos da Terra (fusos horários)\nInterações das sociedades com a natureza e a biodiversidade",
+        "habilidades": ["EF06GE11"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Conexões e escalas", "objetos":
+        "Os movimentos do planeta e a circulação atmosférica\nA Terra: placas tectônicas, formação do relevo, agentes internos e externos, ação humana sobre o relevo",
+        "habilidades": ["EF06GE03", "EF06GE05"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Formas de representação e pensamento espacial", "objetos":
+        "Alfabetização Cartográfica: importância dos mapas, escalas, legendas, convenções cartográficas, análise de mapas, técnicas modernas",
+        "habilidades": ["EF06GE08", "EF06GE09"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Conexões e escalas", "objetos":
+        "Hidrosfera: Oceanos e Mares (salinidade, marés, correntes marítimas, tipos de mares); Águas Continentais (rios, bacias hidrográficas, aproveitamento econômico)\nAtmosfera: Clima e Tempo (previsão, fatores climáticos, zonas climáticas)",
+        "habilidades": ["EF06GE04", "EF06GE03"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Natureza, ambientes e qualidade de vida", "objetos":
+        "Consumo de recursos hídricos e uso das bacias hidrográficas no Brasil e no mundo\nA interferência humana na atmosfera: potencialização do efeito estufa e aquecimento global",
+        "habilidades": ["EF06GE12", "EF06GE13"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Conexões e escalas", "objetos":
+        "Biomas terrestres",
+        "habilidades": ["EF06GE05"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Natureza, ambientes e qualidade de vida", "objetos":
+        "A degradação ambiental resultante das atividades econômicas (queimadas, desmatamentos etc.)",
+        "habilidades": ["EF06GE10", "EF06GE11"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Mundo do trabalho", "objetos":
+        "Formas de apropriação e organização do espaço: extrativismo, agricultura, pecuária, indústria, comércio, turismo\nO trabalho humano transformando a natureza e o espaço",
+        "habilidades": ["EF06GE06", "EF06GE07"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Conexões e escalas", "objetos":
+        "O Brasil e o Mundo: Localização, Extensão, Fusos Horários, formação do território brasileiro",
+        "habilidades": ["EF07GE02", "EF07GE03"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Formas de representação e pensamento espacial", "objetos":
+        "O Brasil e suas paisagens: regiões brasileiras (IBGE), diferenças entre regiões, regiões geoeconômicas, desigualdades socioespaciais e fluxos migratórios regionais e extrarregionais",
+        "habilidades": ["EF07GE10", "EF07GE0VR"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Mundo do trabalho", "objetos":
+        "A População brasileira: formação, indicadores populacionais, crescimento, diversidade étnico-cultural, distribuição e fluxos migratórios",
+        "habilidades": ["EF07GE04", "EF07GE02"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Natureza, ambientes e qualidade de vida", "objetos":
+        "Aspectos físicos do Brasil: relevo geral, climas do Brasil (áreas de predomínio, características, influência), vegetação (primitiva e atual)",
+        "habilidades": ["EF07GE11", "EF07GE12"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Conexões e escalas", "objetos":
+        "Hidrografia: potencial hídrico do país, principais bacias, degradação dos recursos hídricos, importância para populações ribeirinhas (Rio Paraíba do Sul e problemas socioambientais)",
+        "habilidades": ["EF06GE04", "EF07GE0VR"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Conexões e escalas", "objetos":
+        "A urbanização do espaço brasileiro: transformações nas paisagens das cidades, problemas urbanos (moradia, transporte, emprego, escolas)",
+        "habilidades": ["EF07GE02"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Mundo do trabalho", "objetos":
+        "A Geografia no Campo: atividades agropecuárias, degradação dos ecossistemas (desmatamento, queimadas), remanescentes quilombolas, reforma agrária, reservas indígenas\nA dinâmica da economia brasileira: atividades industriais, comércio, transportes e comunicações",
+        "habilidades": ["EF06GE06", "EF06GE10", "EF07GE07", "EF07GE08"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Conexões e escalas", "objetos":
+        "Geopolítica e relações internacionais: Estado, Nação, Território, País, organizações internacionais (FMI, ONU, Banco Mundial); Guerra Fria\nDiferentes formas de regionalização: Primeiro/Segundo/Terceiro Mundo, desenvolvidos/subdesenvolvidos/em desenvolvimento, os BRICS",
+        "habilidades": ["EF08GE05", "EF08GE06", "EF08GE09"]},
+    {"ano": "8º ano", "trimestre": 1, "unidade": "O sujeito e seu lugar no mundo", "objetos":
+        "População Mundial\nMigrações",
+        "habilidades": ["EF08GE03", "EF08GE01", "EF08GE0VR"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Natureza, ambientes e qualidade de vida", "objetos":
+        "Continente americano: divisões (América do Norte/Central/Sul, América Latina e Anglo-Saxônica)\nAspectos humanos do continente americano: povos nativos, herança cultural dos nativos e africanos, dominação europeia e formas de resistência",
+        "habilidades": ["EF08GE23", "EF08GE20"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Mundo do trabalho", "objetos":
+        "Aspectos físicos do continente americano: relevo, clima, hidrografia, vegetação",
+        "habilidades": ["EF08GE15"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Conexões e escalas", "objetos":
+        "Os processos de colonização\nAspectos econômicos do continente americano (extrativismo, atividades agropecuárias, indústria, comércio, comunicações)\nO domínio dos EUA na América Latina (político, econômico, tecnológico, cultural)\nConflito comercial entre EUA e China\nA integração regional no continente americano e o papel do Brasil",
+        "habilidades": ["EF08GE08", "EF08GE07"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Natureza, ambientes e qualidade de vida", "objetos":
+        "África: aspectos físicos (relevo, clima, hidrografia, vegetação)\nA descolonização e suas consequências: guerras civis, o Apartheid na África do Sul, aspectos econômicos e a questão ambiental",
+        "habilidades": ["EF08GEVR", "EF08GE20"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Conexões e escalas", "objetos":
+        "A África Pré-Colonial\nA colonização da África no século XIX: a partilha e a desestruturação das sociedades africanas",
+        "habilidades": ["EF08GE05"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Conexões e escalas", "objetos":
+        "Socialismo e Capitalismo e suas características\nA Nova Ordem Mundial: fim da Guerra Fria, crise da URSS, mundo multipolar, revolução técnico-científica-informacional, globalização e a nova DIT",
+        "habilidades": ["EF09GE06", "EF09GE05"]},
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Formas de representação e pensamento espacial", "objetos":
+        "A Nova Ordem Mundial: principais fluxos da globalização, diferentes níveis de integração econômica",
+        "habilidades": ["EF09GE14"]},
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Mundo do trabalho", "objetos":
+        "Impactos do processo de industrialização na produção e circulação de produtos e culturas na Europa, Ásia e Oceania\nMudanças técnicas e científicas decorrentes da industrialização e as transformações no trabalho",
+        "habilidades": ["EF09GE10", "EF09GE11"]},
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Natureza, ambientes e qualidade de vida", "objetos":
+        "Europa: aspectos físicos (relevo, clima, hidrografia, vegetação) e determinantes histórico-geográficos da divisão Europa/Ásia",
+        "habilidades": ["EF09GE07", "EF09GE16", "EF09GE17"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "O sujeito e seu lugar no mundo", "objetos":
+        "Conflitos étnicos\nAspectos econômicos: formação e ampliação dos blocos econômicos, características da União Europeia, desenvolvimento econômico e degradação ambiental\nO Leste Europeu\nRússia",
+        "habilidades": ["EF09GE01"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Conexões e escalas", "objetos":
+        "Transformações territoriais na Europa, Ásia e Oceania: fronteiras, tensões, conflitos e múltiplas regionalidades\nCaracterísticas de países europeus, asiáticos e da Oceania\nÁsia: aspectos físicos e econômicos",
+        "habilidades": ["EF09GE08", "EF09GE09", "EF09GE07"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Conexões e escalas", "objetos":
+        "Países e regiões de destaque por peculiaridades socioeconômicas e políticas: China, Oriente Médio, Japão, Tigres Asiáticos, Índia",
+        "habilidades": ["EF09GE08", "EF09GE09"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "O sujeito e seu lugar no mundo", "objetos":
+        "Oceania: diferenças de paisagens e modos de viver de diferentes povos na Europa, Ásia e Oceania",
+        "habilidades": ["EF09GE04", "EF09GE10"]},
+]
+
+
+
+# Referencial Curricular de Matemática — extraído de RF__Matematica.pdf (enviado por
+# Felipe em 04/09/2026). O PDF trata as unidades temáticas de Matemática (Números,
+# Álgebra, Geometria, Grandezas e medidas, Probabilidade e Estatística) em dois blocos
+# separados por ano (Álgebra e Geometria), então quando a mesma unidade temática se
+# repetia no mesmo ano/trimestre com objetos de conhecimento diferentes, os objetos
+# foram unificados numa única linha (um por parágrafo), somando as habilidades BNCC
+# de todos eles — mesmo padrão já usado nas outras disciplinas.
+REFERENCIAL_CURRICULAR_MATEMATICA = [
+    # ---------- 6º ANO ----------
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Números", "objetos":
+        "Sistema de numeração decimal; características, leitura, escrita e comparação de números naturais e de números racionais representados na forma decimal.\n"
+        "Operações (adição, subtração, multiplicação, divisão e potenciação) com números naturais. Raiz quadrada de números naturais. Divisão euclidiana.\n"
+        "Aproximação de números para múltiplos de potências de 10.\n"
+        "Fluxograma para determinar a paridade de um número natural. Múltiplos e divisores de um número natural. Números primos e compostos.\n"
+        "Frações: significados (parte/todo, quociente), equivalência, comparação, adição e subtração; cálculo da fração de um número natural.",
+        "habilidades": ["EF06MA01", "EF06MA02", "EF06MA03", "EF06MA12", "EF06MA04", "EF06MA05", "EF06MA06",
+                        "EF06MA07", "EF06MA08", "EF06MA09", "EF06MA10"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Grandezas e medidas", "objetos":
+        "Ângulos: noção, usos e medida",
+        "habilidades": ["EF06MA25", "EF06MA26", "EF06MA27"]},
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Geometria", "objetos":
+        "Polígonos: classificações quanto ao número de vértices, às medidas de lados e ângulos e ao paralelismo e perpendicularismo dos lados\n"
+        "Construção de retas paralelas e perpendiculares, fazendo uso de réguas, esquadros e softwares",
+        "habilidades": ["EF06MA18", "EF06MA19", "EF06MA20", "EF06MA22", "EF06MA23"]},
+
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Números", "objetos":
+        "Operações (adição, subtração, multiplicação, divisão e potenciação) com números racionais. Raiz quadrada de números racionais positivos.\n"
+        "Cálculo de porcentagens por meio de estratégias diversas, sem fazer uso da \"regra de três\"",
+        "habilidades": ["EF06MA11", "EF06MA13"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Probabilidade e Estatística", "objetos":
+        "Cálculo de probabilidade como a razão entre o número de resultados favoráveis e o total de resultados possíveis em um espaço amostral equiprovável\n"
+        "Cálculo de probabilidade por meio de muitas repetições de um experimento (frequências de ocorrências e probabilidade frequentista)",
+        "habilidades": ["EF06MA30"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Álgebra", "objetos":
+        "Problemas que tratam da partição de um todo em duas partes desiguais, envolvendo razões entre as partes e entre uma das partes e o todo",
+        "habilidades": ["EF06MA15"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Geometria", "objetos":
+        "Plano cartesiano: associação dos vértices de um polígono a pares ordenados\n"
+        "Construção de figuras semelhantes: ampliação e redução de figuras planas em malhas quadriculadas",
+        "habilidades": ["EF06MA16", "EF06MA21"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Grandezas e medidas", "objetos":
+        "Perímetro de um quadrado como grandeza proporcional à medida do lado\n"
+        "Plantas baixas e vistas aéreas",
+        "habilidades": ["EF06MA29", "EF06MA28"]},
+
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Álgebra", "objetos":
+        "Propriedades da Igualdade",
+        "habilidades": ["EF06MA14"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Probabilidade e Estatística", "objetos":
+        "Leitura e interpretação de tabelas e gráficos (de colunas ou barras simples ou múltiplas) referentes a variáveis categóricas e variáveis numéricas\n"
+        "Coleta de dados, organização e registro. Construção de diferentes tipos de gráficos para representá-los e interpretação das informações\n"
+        "Diferentes tipos de representação de informações: gráficos e fluxogramas",
+        "habilidades": ["EF06MA31", "EF06MA32", "EF06MA33", "EF06MA34"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Grandezas e medidas", "objetos":
+        "Problemas sobre medidas envolvendo grandezas como comprimento, massa, tempo, temperatura, área, capacidade e volume.",
+        "habilidades": ["EF06MA24"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Geometria", "objetos":
+        "Prismas e pirâmides: planificações e relações entre seus elementos (vértices, faces e arestas)",
+        "habilidades": ["EF06MA17"]},
+
+    # ---------- 7º ANO ----------
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Números", "objetos":
+        "Múltiplos e divisores de um número natural\n"
+        "Números inteiros: usos, história, ordenação, associação com pontos da reta numérica e operações\n"
+        "Fração e seus significados: como parte de inteiros, resultado da divisão, razão e operador.\n"
+        "Números racionais na representação fracionária e na decimal: usos, ordenação e associação com pontos da reta numérica e operações.\n"
+        "Cálculo de porcentagens e de acréscimos e decréscimos simples",
+        "habilidades": ["EF07MA01", "EF07MA03", "EF07MA04", "EF07MA05", "EF07MA06", "EF07MA07", "EF07MA08",
+                        "EF07MA09", "EF07MA10", "EF07MA11", "EF07MA12", "EF07MA02"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Geometria", "objetos":
+        "Transformações geométricas de polígonos no plano cartesiano: multiplicação das coordenadas por um número inteiro e obtenção de simétricos em relação aos eixos e à origem\n"
+        "Simetrias de translação, rotação e reflexão\n"
+        "Relações entre os ângulos formados por retas paralelas intersectadas por uma transversal",
+        "habilidades": ["EF07MA19", "EF07MA20", "EF07MA21", "EF07MA23"]},
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Grandezas e medidas", "objetos":
+        "A circunferência como lugar geométrico",
+        "habilidades": ["EF07MA22"]},
+
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Álgebra", "objetos":
+        "Linguagem algébrica: variável e incógnita\n"
+        "Equivalência de expressões algébricas: identificação da regularidade de uma sequência numérica\n"
+        "Equações polinomiais do 1o grau\n"
+        "Problemas envolvendo grandezas diretamente proporcionais e grandezas inversamente proporcionais",
+        "habilidades": ["EF07MA13", "EF07MA14", "EF07MA15", "EF07MA16", "EF07MA18", "EF07MA17"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Geometria", "objetos":
+        "Triângulos: construção, condição de existência e soma das medidas dos ângulos internos.\n"
+        "Polígonos regulares: quadrado e triângulo equilátero",
+        "habilidades": ["EF07MA24", "EF07MA25", "EF07MA26", "EF07MA27", "EF07MA28"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Grandezas e medidas", "objetos":
+        "Problemas envolvendo medições\n"
+        "Cálculo de volume de blocos retangulares, utilizando unidades de medida convencionais mais usuais",
+        "habilidades": ["EF07MA29", "EF07MA30"]},
+
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Probabilidade e estatística", "objetos":
+        "Experimentos aleatórios: espaço amostral e estimativa de probabilidade por meio de frequência de ocorrências\n"
+        "Estatística: média aritmética simples, média aritmética ponderada e amplitude de um conjunto de dados.\n"
+        "Pesquisa amostral e pesquisa censitária. Planejamento de pesquisa, coleta e organização dos dados, construção de tabelas e gráficos e interpretação das informações\n"
+        "Gráficos de setores: interpretação, pertinência e construção para representar conjunto de dados.",
+        "habilidades": ["EF07MA34", "EF07MA35", "EF07MA36", "EF07MA37"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Grandezas e medidas", "objetos":
+        "Equivalência de área de figuras planas: cálculo de áreas de figuras que podem ser decompostas por outras áreas, cujas áreas podem ser facilmente determinadas como triângulos e quadriláteros.\n"
+        "Medida do comprimento da circunferência",
+        "habilidades": ["EF07MA31", "EF07MA32", "EF07MA33"]},
+
+    # ---------- 8º ANO ----------
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Números", "objetos":
+        "Potenciação e radiciação\n"
+        "Notação Científica\n"
+        "Dízimas periódicas: fração geratriz\n"
+        "Variação de grandezas: diretamente proporcionais, inversamente proporcionais ou não proporcionais\n"
+        "Porcentagens",
+        "habilidades": ["EF08MA02", "EF08MA01", "EF08MA05", "EF08MA12", "EF08MA13", "EF08MA04"]},
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Geometria", "objetos":
+        "Congruência de triângulos e demonstrações de propriedades de quadriláteros\n"
+        "Construções geométricas: ângulos de 90º, 60º, 45º e 30º e polígonos regulares\n"
+        "Mediatriz e bissetriz como lugares geométricos: construção e problemas",
+        "habilidades": ["EF08MA14", "EF08MA15", "EF08MA16", "EF08MA17"]},
+
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Álgebra", "objetos":
+        "Sequências recursivas e não recursivas\n"
+        "Valor numérico de expressões algébricas\n"
+        "Sistema de equações polinomiais de 1º grau: resolução algébrica e representação no plano cartesiano\n"
+        "Associação de uma equação linear de 1º grau a uma reta no plano cartesiano\n"
+        "Equação polinomial de 2º grau do tipo ax2 = b",
+        "habilidades": ["EF08MA10", "EF08MA11", "EF08MA06", "EF08MA08", "EF08MA07", "EF08MA09"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Geometria", "objetos":
+        "Transformações geométricas: simetrias de translação, reflexão e rotação\n"
+        "Área de figuras planas. Área do círculo e comprimento de sua circunferência",
+        "habilidades": ["EF08MA18", "EF08MA19"]},
+
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Probabilidade e estatística", "objetos":
+        "O princípio multiplicativo da contagem\n"
+        "Soma das probabilidades de todos os elementos de um espaço amostral\n"
+        "Gráficos de barras, colunas, linhas ou setores e seus elementos constitutivos e adequação para determinado conjunto de dados\n"
+        "Organização dos dados de uma variável contínua em classes\n"
+        "Medidas de tendência central e de dispersão\n"
+        "Pesquisas censitária ou amostral. Planejamento e execução de pesquisa amostral",
+        "habilidades": ["EF08MA03", "EF08MA22", "EF08MA23", "EF08MA24", "EF08MA25", "EF08MA26", "EF08MA27"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Grandezas e medidas", "objetos":
+        "Volume do cubo, do paralelepípedo e do cilindro reto. Medidas de capacidade",
+        "habilidades": ["EF08MA20", "EF08MA21"]},
+
+    # ---------- 9º ANO ----------
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Números", "objetos":
+        "Necessidade dos números reais para medir qualquer segmento de reta. Números irracionais: reconhecimento e localização de alguns na reta numérica\n"
+        "Potências com expoentes negativos e fracionários\n"
+        "Números reais: notação científica e problemas\n"
+        "Porcentagens: problemas que envolvem cálculo de percentuais sucessivos",
+        "habilidades": ["EF09MA01", "EF09MA02", "EF09MA03", "EF09MA04", "EF09MA05"]},
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Geometria", "objetos":
+        "Retas paralelas cortadas por transversais: teoremas de proporcionalidade e verificações experimentais\n"
+        "Semelhança de triângulos\n"
+        "Teorema de Pitágoras: verificações experimentais e demonstração. Relações métricas no triângulo retângulo",
+        "habilidades": ["EF09MA14", "EF09MA12", "EF09MA13"]},
+
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Álgebra", "objetos":
+        "Razão entre grandezas de espécies diferentes. Expressões algébricas: fatoração e produtos notáveis\n"
+        "Grandezas diretamente proporcionais e grandezas inversamente proporcionais\n"
+        "Resolução de equações polinomiais do 2o grau por meio de fatorações e por meio da fórmula resolutiva de Bhaskara.\n"
+        "Funções: representações numérica, algébrica e gráfica",
+        "habilidades": ["EF09MA07", "EF09MA08", "EF09MA09", "EF09MA06"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Geometria", "objetos":
+        "Distância entre pontos no plano cartesiano\n"
+        "Demonstrações de relações entre os ângulos formados por retas paralelas intersectadas por uma transversal\n"
+        "Vistas ortogonais de figuras espaciais",
+        "habilidades": ["EF09MA16", "EF09MA10", "EF09MA17"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Grandezas e medidas", "objetos":
+        "Volume de prismas e cilindros",
+        "habilidades": ["EF09MA19"]},
+
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Probabilidade e estatística", "objetos":
+        "Análise de probabilidade de eventos aleatórios: eventos dependentes e independentes\n"
+        "Análise de gráficos divulgados pela mídia: elementos que podem induzir a erros de leitura ou de interpretação\n"
+        "Leitura, interpretação e representação de dados de pesquisa expressos em tabelas de dupla entrada, gráficos de colunas simples e agrupadas, gráficos de barras e de setores e gráficos pictóricos\n"
+        "Planejamento e execução de pesquisa amostral e apresentação de relatório.",
+        "habilidades": ["EF09MA20", "EF09MA21", "EF09MA22", "EF09MA23"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Geometria", "objetos":
+        "Unidades de medida para medir distâncias muito grandes e muito pequenas. Unidades de medida utilizadas na informática\n"
+        "Relações entre arcos e ângulos na circunferência de um círculo\n"
+        "Polígonos regulares",
+        "habilidades": ["EF09MA18", "EF09MA11", "EF09MA15"]},
+]
+
+
+# Referencial Curricular de Língua Inglesa — extraído de RF__Língua_Inglesa.pdf (enviado
+# por Felipe em 04/09/2026). Diferente das outras disciplinas, o PDF organiza a maior
+# parte do conteúdo por EIXO (Oralidade, Leitura, Escrita, Dimensão Intercultural) e
+# marca essas seções como valendo para "1º, 2º e 3º Trimestres" ao mesmo tempo — só o
+# eixo "Conhecimentos Específicos" (léxico/gramática) é dividido por trimestre. Para
+# manter o mesmo modelo de banco usado nas outras disciplinas (uma linha por
+# ano+trimestre+unidade), essas seções dos 4 primeiros eixos foram DUPLICADAS nos 3
+# trimestres (o conteúdo é idêntico nos três) — assim elas aparecem como sugestão do
+# Referencial Curricular independente do trimestre que o professor estiver planejando.
+# Já o eixo "Estudo do léxico/Gramática" tem um bloco diferente por trimestre, como no
+# PDF original. Usa o nome de disciplina "Inglês" para bater com o já usado no resto do
+# sistema (boletim, e-cidade etc.), embora o PDF chame a disciplina de "Língua Inglesa".
+
+_ING_ORALIDADE_INTERACAO = {
+    "6º ano": ("Construção de laços afetivos e convívio social\n"
+               "Funções e usos da língua inglesa em sala de aula (Classroom language)",
+               ["EF06LI01", "EF06LI02", "EF06LI03"]),
+    "7º ano": ("Funções e usos da língua inglesa: convivência e colaboração em sala de aula\n"
+               "Práticas investigativas",
+               ["EF07LI01", "EF07LI02"]),
+    "8º ano": ("Negociação de sentidos (mal-entendidos no uso da língua inglesa e conflito de opiniões)\n"
+               "Usos de recursos linguísticos e paralinguísticos no intercâmbio oral",
+               ["EF08LI01", "EF08LI02"]),
+    "9º ano": ("Funções e usos da língua inglesa: persuasão",
+               ["EF09LI01"]),
+}
+_ING_ORALIDADE_COMPREENSAO = {
+    "6º ano": ("Estratégias de compreensão de textos orais: palavras cognatas e pistas do contexto discursivo",
+               ["EF06LI04"]),
+    "7º ano": ("Estratégias de compreensão de textos orais: conhecimentos prévios\n"
+               "Compreensão de textos orais de cunho descritivo ou narrativo",
+               ["EF07LI03", "EF07LI04"]),
+    "8º ano": ("Estratégias de compreensão de textos orais: conhecimentos prévios",
+               ["EF08LI03"]),
+    "9º ano": ("Compreensão de textos orais, multimodais, de cunho argumentativo",
+               ["EF09LI02", "EF09LI03"]),
+}
+_ING_ORALIDADE_PRODUCAO = {
+    "6º ano": ("Produção de textos orais, com a mediação do professor",
+               ["EF06LI01", "EF06LI02"]),
+    "7º ano": ("Produção de textos orais, com mediação do professor",
+               ["EF07LI05"]),
+    "8º ano": ("Produção de textos orais com autonomia",
+               ["EF08LI04"]),
+    "9º ano": ("Produção de textos orais com autonomia",
+               ["EF09LI04"]),
+}
+_ING_LEITURA_ESTRATEGIAS = {
+    "6º ano": ("Hipóteses sobre a finalidade de um texto\n"
+               "Compreensão geral e específica: leitura rápida (skimming, scanning)",
+               ["EF06LI07", "EF06LI08", "EF06LI09"]),
+    "7º ano": ("Compreensão geral e específica: leitura rápida (skimming, scanning)\n"
+               "Construção do sentido global do texto",
+               ["EF07LI06", "EF07LI07", "EF07LI08"]),
+    "8º ano": ("Construção de sentidos por meio de inferências e reconhecimento de implícitos",
+               ["EF08LI05"]),
+    "9º ano": ("Recursos de persuasão\n"
+               "Recursos de argumentação",
+               ["EF09LI05", "EF09LI06", "EF09LI07"]),
+}
+_ING_LEITURA_PRATICAS = {
+    "6º ano": ("Práticas de leitura e construção de repertório lexical", "Construção de repertório lexical e autonomia leitora",
+               ["EF06LI10", "EF06LI11"]),
+    "7º ano": ("Práticas de leitura e construção de repertório lexical", "Objetivos de leitura\nLeitura de textos digitais para estudo",
+               ["EF07LI09", "EF07LI10"]),
+    "8º ano": ("Práticas de leitura e fruição", "Leitura de textos de cunho artístico/literário",
+               ["EF08LI06", "EF08LI07"]),
+    "9º ano": ("Práticas de leitura e novas tecnologias", "Informações em ambientes virtuais",
+               ["EF09LI08"]),
+}
+_ING_LEITURA_ATITUDES = {
+    "6º ano": ("Atitudes e disposições favoráveis do leitor", "Partilha de leitura, com mediação do professor",
+               ["EF06LI12"]),
+    "7º ano": ("Atitudes e disposições favoráveis do leitor", "Partilha de leitura",
+               ["EF07LI11"]),
+    "8º ano": ("Avaliação dos textos lidos", "Reflexão pós-leitura",
+               ["EF08LI08"]),
+    "9º ano": ("Avaliação dos textos lidos", "Reflexão pós-leitura",
+               ["EF09LI09"]),
+}
+_ING_ESCRITA_PRE = {
+    "6º ano": ("Estratégias de escrita: pré-escrita", "Planejamento do texto: brainstorming\nPlanejamento do texto: organização de ideias",
+               ["EF06LI13", "EF06LI14"]),
+    "7º ano": ("Estratégias de escrita: pré-escrita", "Pré-escrita: planejamento de produção escrita, com mediação do professor\n"
+               "Escrita: organização em parágrafos ou tópicos, com mediação do professor",
+               ["EF07LI12", "EF07LI13"]),
+    "8º ano": ("Estratégias de escrita: escrita e pós-escrita", "Revisão de textos com a mediação do professor",
+               ["EF08LI09", "EF08LI10"]),
+    "9º ano": ("Estratégias de escrita", "Escrita: construção da argumentação\nEscrita: construção da persuasão",
+               ["EF09LI10", "EF09LI11"]),
+}
+_ING_ESCRITA_PRATICAS = {
+    "6º ano": ("Produção de textos escritos, em formatos diversos, com a mediação do professor",
+               ["EF06LI15"]),
+    "7º ano": ("Produção de textos escritos, em formatos diversos, com mediação do professor",
+               ["EF07LI14"]),
+    "8º ano": ("Produção de textos escritos com mediação do professor/colegas",
+               ["EF08LI11"]),
+    "9º ano": ("Produção de textos escritos, com mediação do professor/colegas",
+               ["EF09LI12"]),
+}
+_ING_INTERCULTURAL_1 = {
+    "6º ano": ("A língua inglesa no mundo", "Países que têm a língua inglesa como língua materna e/ou oficial",
+               ["EF06LI24"]),
+    "7º ano": ("A língua inglesa no mundo", "A língua inglesa como língua global na sociedade contemporânea",
+               ["EF07LI21"]),
+    "8º ano": ("Manifestações culturais", "Construção de repertório artístico-cultural",
+               ["EF08LI18"]),
+    "9º ano": ("A língua inglesa no mundo", "Expansão da língua inglesa: contexto histórico\n"
+               "A língua inglesa e seu papel no intercâmbio científico, econômico e político",
+               ["EF09LI17", "EF09LI18"]),
+}
+_ING_INTERCULTURAL_2 = {
+    "6º ano": ("A língua inglesa no cotidiano da sociedade brasileira/comunidade", "Presença da língua inglesa no cotidiano",
+               ["EF06LI25", "EF06LI26"]),
+    "7º ano": ("Comunicação intercultural", "Variação linguística",
+               ["EF07LI22", "EF07LI23"]),
+    "8º ano": ("Comunicação intercultural", "Impacto de aspectos culturais na comunicação",
+               ["EF08LI19", "EF08LI20"]),
+    "9º ano": ("Comunicação intercultural", "Construção de identidades no mundo globalizado",
+               ["EF09LI19"]),
+}
+_ING_LEXICO_GRAMATICA = {
+    "6º ano": {
+        1: ("Cognates; Family Members; Greetings, Leave Takings, and Introductions; Countries, Nationalities, and "
+            "Languages; Cardinal Numbers (1-100); Telling the Time; Interrogatives – WH Questions; Subject Pronouns; "
+            "Forms of Address; Verb To Be – Present Tense (Affirmative Form)",
+            ["EF06LI16", "EF06LI17", "EF06LI18"]),
+        2: ("School Objects and School Subjects; People at School; Days of the Week; Verb To Be – Present Tense "
+            "(Interrogative and Negative Forms); Possessive Adjectives; Imperative; Possessive Case",
+            ["EF06LI17", "EF06LI18", "EF06LI19", "EF06LI21", "EF06LI22", "EF06LI23"]),
+        3: ("Physical Activities; Sports and Free-Time Activities; Animals; Colors; Daily Routine; Simple Present "
+            "Tense (Routine); Present Continuous Tense (Affirmative, Interrogative, and Negative Forms); Adverbs of "
+            "Frequency; Definite and Indefinite Articles; Plural Forms of Nouns",
+            ["EF06LI16", "EF06LI17", "EF06LI19", "EF06LI20"]),
+    },
+    "7º ano": {
+        1: ("Means of Transportation; Giving Directions; Age-Appropriate Activities (Leisure Activities); Cardinal "
+            "Numbers (1–100); Telling the Time; Ordinal Numbers (1st–31st); Prepositions (in, on, at, next to, "
+            "under, between, behind, in front of); Demonstrative Pronouns (This/That – These/Those); Interrogatives "
+            "– WH Questions; Adjectives; Modal Verbs: Can/Could (Abilities and Possibilities)",
+            ["EF06LI17", "EF07LI15", "EF07LI20"]),
+        2: ("Parts of the Body; Clothes; Movie Genres; Adjectives to Describe Movies and Characters; Same Words, "
+            "Different Meanings (polissemia); Verb To Be – Present Tense (Review); Present Continuous Tense "
+            "(Affirmative, Negative, and Interrogative Forms); Verb To Be – Past Tense; There To Be – Present and "
+            "Past Tenses; Object Pronouns; Linking Words",
+            ["EF06LI17", "EF07LI15", "EF07LI17", "EF07LI18", "EF07LI19"]),
+        3: ("Personality Adjectives; Dates (Months of the Year); Parts of the House; House Items; Describing Houses "
+            "and Rooms (Using Adjectives); Pets; Past Continuous Tense; Simple Past Tense (Regular and Irregular "
+            "Verbs); Prepositions of Time and Place: in, on, at; Simple Past and Past Continuous (Review and "
+            "Contrast); Subject Pronouns vs. Object Pronouns",
+            ["EF06LI17", "EF07LI15", "EF07LI18"]),
+    },
+    "8º ano": {
+        1: ("Healthy food; Cooking Techniques and Measurements; Countable and Uncountable Nouns; Quantifiers; Some, "
+            "Any, Much, Many, A Lot Of",
+            ["EF06LI17", "EF08LI18", "EF08LI16"]),
+        2: ("Physical Appearance; Adjectives Describing Personality and Character; Adjectives Describing Places; "
+            "The World of Music; Pronouns; Adjectives and Their Order; Comparatives and Superlatives; Relative "
+            "Pronouns; Prefixes and Suffixes",
+            ["EF06LI17", "EF08LI18", "EF08LI08", "EF08LI15", "EF08LI17", "EF08LI13"]),
+        3: ("The Environment; Natural Hazards; Travel Vocabulary; Expressions of Time and Probability; Verbs in the "
+            "Future: Will / Going to; Adverbs of time, Frequency, and Place in the Future and Simple Past",
+            ["EF06LI17", "EF08LI18", "EF08LI12", "EF08LI14", "EF08LI04"]),
+    },
+    "9º ano": {
+        1: ("Internet Language; Use of Internet Slang; Health Issues; Interrogatives – WH Questions (Review); "
+            "Phrasal Verbs; Modal Verbs (Should, Must, Have To, May, Might); Adjectives (Review)",
+            ["EF06LI17", "EF09LI12", "EF09LI13", "EF09LI16"]),
+        2: ("Environmental Problems; Environmentally Friendly Attitudes; Traffic and Transportation; Review of "
+            "Simple Present, Simple Past, and Future Tenses; First and Second Conditionals",
+            ["EF06LI17", "EF09LI02", "EF09LI03", "EF09LI12", "EF09LI15"]),
+        3: ("Occupations; Food and Services; Modal and Phrasal Verbs (Review); Question Tags; Linking Words; "
+            "Connectors",
+            ["EF06LI17", "EF09LI05", "EF09LI16", "EF09LI14"]),
+    },
+}
+
+
+def _montar_referencial_ingles():
+    """Monta a lista final combinando os eixos (duplicados nos 3 trimestres) com o eixo
+    Conhecimentos Específicos (um bloco distinto por trimestre)."""
+    blocos = []
+    for ano in ["6º ano", "7º ano", "8º ano", "9º ano"]:
+        for trimestre in (1, 2, 3):
+            obj, hab = _ING_ORALIDADE_INTERACAO[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": "Interação discursiva",
+                            "objetos": obj, "habilidades": hab})
+            obj, hab = _ING_ORALIDADE_COMPREENSAO[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": "Compreensão oral",
+                            "objetos": obj, "habilidades": hab})
+            obj, hab = _ING_ORALIDADE_PRODUCAO[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": "Produção oral",
+                            "objetos": obj, "habilidades": hab})
+            obj, hab = _ING_LEITURA_ESTRATEGIAS[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": "Estratégias de leitura",
+                            "objetos": obj, "habilidades": hab})
+            unidade, obj, hab = _ING_LEITURA_PRATICAS[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": unidade,
+                            "objetos": obj, "habilidades": hab})
+            unidade, obj, hab = _ING_LEITURA_ATITUDES[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": unidade,
+                            "objetos": obj, "habilidades": hab})
+            unidade, obj, hab = _ING_ESCRITA_PRE[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": unidade,
+                            "objetos": obj, "habilidades": hab})
+            obj, hab = _ING_ESCRITA_PRATICAS[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": "Práticas de escrita",
+                            "objetos": obj, "habilidades": hab})
+            unidade, obj, hab = _ING_INTERCULTURAL_1[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": unidade,
+                            "objetos": obj, "habilidades": hab})
+            unidade, obj, hab = _ING_INTERCULTURAL_2[ano]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": unidade,
+                            "objetos": obj, "habilidades": hab})
+            obj, hab = _ING_LEXICO_GRAMATICA[ano][trimestre]
+            blocos.append({"ano": ano, "trimestre": trimestre, "unidade": "Estudo do léxico / Gramática",
+                            "objetos": obj, "habilidades": hab})
+    return blocos
+
+
+REFERENCIAL_CURRICULAR_INGLES = _montar_referencial_ingles()
+
+
+
+# Referencial Curricular de Língua Portuguesa — extraído de RF_Língua_Portuguesa.pdf
+# (enviado por Felipe em 04/09/2026). Diferente das outras disciplinas, este PDF organiza
+# o conteúdo em 3 grandes eixos (Gramática/Análise Linguística, Leitura, Produção de
+# Texto), cada um cruzando os 4 campos de atuação da BNCC de Língua Portuguesa
+# (Artístico-Literário, Jornalístico-Midiático, Atuação na Vida Pública, Práticas de
+# Estudo e Pesquisa) dentro do mesmo bloco de trimestre — o PDF não separa por campo,
+# então os 3 eixos foram usados como "unidade_tematica" (uma linha por ano+trimestre+
+# eixo). O campo "objetos_conhecimento" reúne os gêneros/tópicos listados com marcador
+# "•" no PDF (ortografia, gêneros textuais, tópicos gramaticais etc.); as habilidades
+# BNCC são as citadas em cada bloco (muitas compartilhadas entre os 4 campos, como
+# EF69LP55/EF69LP56, que valem para qualquer campo de atuação).
+REFERENCIAL_CURRICULAR_PORTUGUES = [
+    # =================== GRAMÁTICA (Análise Linguística/Semiótica) ===================
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Comunicação e linguagem.\nLinguagem verbal, não verbal e mista.\nElementos da comunicação.\n"
+        "Fonética e fonologia (fonema x letra, encontros consonantais e vocálicos, dígrafos).\nVariação linguística.\n"
+        "Sinonímia e antonímia.\nSemântica (Hiperonímia e Hiponímia – como mecanismo de coesão).\n"
+        "Ortografia (Mas/ Mais/Más).\nTipos de frase / pontuação.",
+        "habilidades": ["EF69LP56", "EF69LP55", "EF06LP03", "EF67LP34", "EF06LP12", "EF67LP32", "EF67LP33", "EF67LP38"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Substantivo (classificação, gênero, número e grau).\nArtigo (Identificação e valor semântico).\n"
+        "Adjetivo (gênero, número e grau; alteração de sentido – Ordem dos substantivos e dos adjetivos).\n"
+        "Numeral (emprego e valor semântico).\nOrtografia mal/mau, há/a.\nInterjeição.\n"
+        "Regras de acentuação gráfica (regras gerais).\nUso do hífen.",
+        "habilidades": ["EF06LP04", "EF06LP06", "EF67LP32", "EF69LP56", "EF67LP35"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Verbo: Formação dos tempos verbais.\nModos: Indicativo, Subjuntivo e Imperativo.\nFormas Nominais.\n"
+        "Pronomes (pessoais, demonstrativos, possessivos, indefinidos e interrogativos – identificação e valor "
+        "semântico – pronominalização: retos e oblíquos – mecanismo de coesão).\n"
+        "Ortografia (uso dos porquês e uso do G e J).",
+        "habilidades": ["EF06LP04", "EF06LP05", "EF06LP06", "EF06LP08", "EF06LP09", "EF06LP10", "EF06LP11",
+                        "EF69LP56", "EF67LP32"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Revisão das classes gramaticais (substantivo, adjetivo, artigo, numeral e pronome).\nAdjunto adnominal.\n"
+        "Revisão de verbo (Modos Imperativo, Subjuntivo, Indicativo).\n"
+        "Verbo e sua estrutura (conjugação, verbos regulares e irregulares, flexão, grafia de verbos irregulares – "
+        "tem/têm etc.).\nAdvérbio.\nPreposição (essenciais e acidentais – valor semântico).\n"
+        "Conjunções (valor semântico).\nOrtografia (uso do X e do CH).",
+        "habilidades": ["EF07LP06", "EF07LP08", "EF07LP12", "EF07LP13", "EF69LP54", "EF07LP04", "EF07LP05",
+                        "EF07LP10", "EF69LP17", "EF69LP28", "EF07LP09", "EF69LP56", "EF07LP11", "EF67LP36",
+                        "EF69LP18", "EF67LP32"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Tipos de predicados.\nVerbos de ação e de ligação (foco no predicado nominal e verbo de ligação).\n"
+        "Predicativo do sujeito.\nTransitividade verbal (retomar preposições).\nComplementos verbais.\n"
+        "Ortografia (uso do C, Ç, S, SS, SC, SÇ, XC).",
+        "habilidades": ["EF07LP07", "EF69LP55", "EF07LP08", "EF67LP26", "EF67LP32"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Estrutura e processo de formação das palavras.\nFrase, oração e período / pontuação.\n"
+        "Sujeito (tipos de sujeito).\nOrtografia (uso do S, Z, X).",
+        "habilidades": ["EF07LP03", "EF67LP34", "EF67LP35", "EF07LP04", "EF07LP10", "EF67LP33", "EF07LP07", "EF67LP32"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Revisão das funções sintáticas (termos essenciais e integrantes da oração).\nRevisão (tipos de predicado).\n"
+        "Aposto e vocativo.\nPredicativo do sujeito e do objeto.\nAdjunto adnominal do objeto.\n"
+        "Complemento nominal (apresentar a diferença entre complemento nominal x objeto indireto x adjunto "
+        "adnominal).\nOrtografia (uso do S e Z nas terminações ES / ESA, EZ / EZA).\n"
+        "Pontuação do período simples e composto.",
+        "habilidades": ["EF08LP07", "EF08LP06", "EF69LP55", "EF08LP09", "EF69LP56", "EF08LP04"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Adjunto adverbial.\nSemântica (polissemia, ambiguidade, sinonímia, antonímia, hiponímia, hiperonímia, "
+        "paronímia e homonímia).\nVozes verbais / Agente da passiva.\nGrafia dos verbos abundantes.",
+        "habilidades": ["EF08LP10", "EF08LP16", "EF69LP17", "EF69LP56", "EF08LP08", "EF08LP14", "EF89LP16"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Conotação e Denotação.\nFiguras de linguagem.\n"
+        "Conjunções coordenativas (uso e valor semântico)/Período composto por coordenação/Orações coordenadas.\n"
+        "Concordância verbal e nominal (noções).\nOrtografia (uso dos porquês).",
+        "habilidades": ["EF69LP55", "EF08LP14", "EF08LP15", "EF69LP18", "EF08LP13", "EF08LP11", "EF08LP04", "EF89LP29"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Revisão dos termos da oração.\nRevisão das orações coordenadas.\nOrações subordinadas substantivas.\n"
+        "Pronome relativo (função sintática).\nOrações subordinadas adjetivas (valor semântico da vírgula).\n"
+        "Ortografia (uso de este, esse, aquele e variações).",
+        "habilidades": ["EF09LP04", "EF09LP05", "EF09LP06", "EF09LP08", "EF09LP11", "EF09LP09", "EF69LP55", "EF69LP56"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Concordância nominal (casos relevantes).\nOrações subordinadas adverbiais.\nOrações reduzidas.\n"
+        "Colocação pronominal.\nOrtografia (uso de Onde/Aonde; Se não/Senão; Eu/Mim; Trás/Traz).",
+        "habilidades": ["EF09LP04", "EF09LP08", "EF09LP11", "EF09LP10", "EF69LP56"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Análise Linguística/Semiótica (Gramática)", "objetos":
+        "Concordância verbal (casos relevantes).\n"
+        "Ortografia (A fim/Afim; Ao invés de/Em vez de; A par/Ao par; Ao encontro de/De encontro a).\n"
+        "Regência verbal e nominal.\nCrase.\nFormação de palavras (revisão).\nFonética e Fonologia (revisão).\n"
+        "Figuras de sintaxe (elipse / zeugma / silepse / hipérbato ou inversão / pleonasmo / assíndeto / "
+        "polissíndeto / anáfora / anacoluto).",
+        "habilidades": ["EF09LP04", "EF09LP07", "EF09LP12", "EF69LP40", "EF69LP56", "EF89LP30", "EF89LP37"]},
+
+    # =================== LEITURA ===================
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Leitura", "objetos":
+        "Lenda x Mito (trabalhar a figura de linguagem Personificação).\n"
+        "Contos populares (contos de fadas e/ou contos maravilhosos observando: tipos de discurso e elementos "
+        "da narrativa).\nNarrativa de aventura (paradidático).\nRomance / Novela / Antologia de crônicas ou contos.\n"
+        "Provérbios e ditos populares.",
+        "habilidades": ["EF67LP27", "EF67LP28", "EF69LP44", "EF69LP46", "EF69LP47", "EF69LP48", "EF69LP53", "EF69LP54"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Leitura", "objetos":
+        "Relato pessoal.\nAutobiografia.\nDiário.\nReportagem.\nCampanha publicitária (propaganda - slogan - "
+        "anúncio).\nBlog.",
+        "habilidades": ["EF06LP01", "EF06LP02", "EF67LP03", "EF67LP04", "EF67LP06", "EF69LP03", "EF67LP02", "EF69LP02", "EF69LP04"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Leitura", "objetos":
+        "Carta do leitor.\nCarta pessoal.\nE-mail.\nArtigo de divulgação científica.\n"
+        "Verbete (dicionário e enciclopédico).\nResenha.",
+        "habilidades": ["EF67LP05", "EF67LP16", "EF67LP18", "EF69LP31", "EF67LP20", "EF67LP26", "EF69LP29",
+                        "EF69LP32", "EF69LP34", "EF69LP45"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Leitura", "objetos":
+        "Cordel x poesia trovadoresca (noções de versificação).\n"
+        "Figuras de linguagem (metáfora, ironia, assonância, aliteração, sinestesia).\n"
+        "Conto / Crônica de humor (leitura dramatizada / tipos de discurso e elementos da narrativa).\n"
+        "Romance / Novela / Antologia de crônicas ou contos.",
+        "habilidades": ["EF67LP27", "EF67LP38", "EF69LP48", "EF69LP54", "EF69LP47", "EF69LP53", "EF67LP28", "EF69LP44", "EF69LP49", "EF69LP46"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Leitura", "objetos":
+        "Notícia (fake news).\nCartum x Charge.\nCrônica jornalística.\nResenha crítica x comentário.\n"
+        "Carta denúncia.\nArtigo de opinião.",
+        "habilidades": ["EF07LP01", "EF07LP02", "EF67LP03", "EF67LP04", "EF69LP05", "EF67LP08", "EF69LP01",
+                        "EF69LP03", "EF67LP07", "EF69LP34", "EF67LP17", "EF67LP18", "EF67LP20", "EF67LP16",
+                        "EF67LP26", "EF69LP16", "EF69LP30", "EF69LP42"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Leitura", "objetos":
+        "Textos instrucionais (manual de instrução / regras de jogo / receita...).\nEstatutos.\nDepoimento.\n"
+        "Artigo de divulgação científica.",
+        "habilidades": ["EF67LP15", "EF69LP20", "EF69LP21", "EF69LP24", "EF69LP29", "EF69LP40"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Leitura", "objetos":
+        "Conto de suspense (tipos de discurso e elementos da narrativa).\nAntologia de crônicas ou contos.\n"
+        "Novela ou Romance [de ficção científica / suspense] (paradidático).\nPoema verbal e visual.",
+        "habilidades": ["EF69LP44", "EF69LP46", "EF69LP47", "EF69LP49", "EF69LP53", "EF69LP54", "EF89LP32", "EF89LP33", "EF89LP37", "EF69LP48"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Leitura", "objetos":
+        "Anúncio / Campanha publicitária.\nCharge x Cartum.\nCarta do leitor / Carta denúncia.",
+        "habilidades": ["EF08LP01", "EF08LP02", "EF69LP02", "EF69LP04", "EF89LP01", "EF89LP05", "EF89LP07",
+                        "EF69LP05", "EF89LP02", "EF69LP13", "EF89LP03", "EF89LP04", "EF89LP06"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Leitura", "objetos":
+        "Documentos legais e normativos (declaração dos direitos humanos / petição / legislações).\nRelatório.\n"
+        "Carta argumentativa.\nDissertação acadêmica.",
+        "habilidades": ["EF69LP20", "EF69LP27", "EF69LP28", "EF89LP17", "EF69LP32", "EF89LP23", "EF89LP24", "EF69LP21", "EF69LP29"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Leitura", "objetos":
+        "Roteiro de TV/Cinema.\nRomance (paradidático).\nRomance/Novela/Antologia de crônicas ou contos.\n"
+        "Conto Social e Psicológico (tipos de discurso e elementos da narrativa).",
+        "habilidades": ["EF89LP32", "EF89LP34", "EF69LP46", "EF89LP33", "EF69LP49", "EF69LP44", "EF69LP47", "EF69LP53", "EF69LP48", "EF69LP54", "EF89LP37"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Leitura", "objetos":
+        "Texto informativo (reportagem / textos didáticos / anúncios / comunicados...).\n"
+        "Crônica jornalística (esportiva).\nEditorial.\nCarta Aberta/Manifesto.",
+        "habilidades": ["EF69LP03", "EF69LP04", "EF09LP01", "EF09LP02", "EF89LP01", "EF89LP16", "EF89LP03",
+                        "EF89LP05", "EF89LP06", "EF89LP04", "EF89LP18", "EF89LP19", "EF89LP20", "EF69LP21"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Leitura", "objetos":
+        "Artigo científico.\nResenha crítica.\nArtigo de Opinião / Artigo de Lei.\nBiografia (foco no ambiente acadêmico).",
+        "habilidades": ["EF69LP29", "EF89LP17", "EF89LP24", "EF69LP30", "EF89LP28", "EF69LP34", "EF69LP32", "EF69LP20", "EF69LP27", "EF69LP28", "EF69LP42"]},
+
+    # =================== PRODUÇÃO DE TEXTO ===================
+    {"ano": "6º ano", "trimestre": 1, "unidade": "Produção de Texto", "objetos":
+        "História em quadrinhos (trabalhar a figura de linguagem onomatopeia).\n"
+        "Transformar conto em HQ (sequência dos gêneros trabalhados na frente de leitura).\n"
+        "Poema / Classificado poético.\nPontuação e ortografia.",
+        "habilidades": ["EF67LP30", "EF67LP31", "EF69LP51"]},
+    {"ano": "6º ano", "trimestre": 2, "unidade": "Produção de Texto", "objetos":
+        "Notícia/Entrevista (Jornal falado).\nCampanha publicitária (valorização do ambiente escolar).\n"
+        "Foto denúncia (sobre o ambiente escolar).\nPontuação e Ortografia.",
+        "habilidades": ["EF67LP09", "EF67LP10", "EF67LP14", "EF69LP09", "EF67LP13", "EF69LP06", "EF67LP19", "EF69LP07", "EF67LP32", "EF69LP10"]},
+    {"ano": "6º ano", "trimestre": 3, "unidade": "Produção de Texto", "objetos":
+        "Resumo / Relato.\nNormas de conduta no ambiente escolar (organização, disciplina, cronograma de "
+        "estudo, ambiente escolar...) - (Retomada do trabalho do SOE).\n"
+        "Carta de reclamação (de acordo com as normas de conduta propostas).\n"
+        "Debate (sobre as normas de conduta no ambiente escolar).\nParáfrase.\n"
+        "Biografia (hiperlink – hipertexto para conhecimento).",
+        "habilidades": ["EF67LP22", "EF69LP20", "EF69LP23", "EF69LP22", "EF67LP24", "EF69LP25", "EF69LP26", "EF67LP25", "EF69LP35"]},
+
+    {"ano": "7º ano", "trimestre": 1, "unidade": "Produção de Texto", "objetos":
+        "Texto teatral (oral) / esquete.\nPoema narrativo.\nCordel e poesia (sarau).\nMemórias literárias (oficinas OLP).",
+        "habilidades": ["EF67LP29", "EF69LP52", "EF67LP31", "EF69LP50"]},
+    {"ano": "7º ano", "trimestre": 2, "unidade": "Produção de Texto", "objetos":
+        "Entrevista / Reportagem (Telerreportagem oral – escrita).\nPontuação e Ortografia.\n"
+        "Infográfico (criar infográfico para compor uma reportagem).\nPropaganda (cartaz/ folheto).",
+        "habilidades": ["EF67LP14", "EF69LP10", "EF69LP08", "EF67LP13", "EF69LP06", "EF69LP07", "EF69LP09"]},
+    {"ano": "7º ano", "trimestre": 3, "unidade": "Produção de Texto", "objetos":
+        "Carta de reclamação x Carta de solicitação (argumentação).\nRegimentos (assembleia - oralidade).\n"
+        "Roteiro de Podcast científico (gênero oral).\nRelatório (visita, aula, etc...).\n"
+        "Fichamento (obra literária do bimestre).",
+        "habilidades": ["EF67LP17", "EF67LP18", "EF67LP19", "EF69LP22", "EF67LP23", "EF69LP24", "EF69LP26", "EF67LP21", "EF69LP35", "EF69LP37", "EF69LP36"]},
+
+    {"ano": "8º ano", "trimestre": 1, "unidade": "Produção de Texto", "objetos":
+        "Canção / paródia / paráfrase (intertextualidade).\nPontuação e Ortografia.\n"
+        "Criação de texto dramático a partir de crônicas literárias.",
+        "habilidades": ["EF69LP51", "EF89LP36", "EF69LP50", "EF69LP52"]},
+    {"ano": "8º ano", "trimestre": 2, "unidade": "Produção de Texto", "objetos":
+        "Memes.\nNotícia (vídeo minuto).\nEditorial.",
+        "habilidades": ["EF69LP05", "EF69LP06", "EF69LP07", "EF69LP08", "EF69LP17", "EF69LP18"]},
+    {"ano": "8º ano", "trimestre": 3, "unidade": "Produção de Texto", "objetos":
+        "Artigo de opinião.\nResenha crítica.\nDissertação escolar.\nRegras de debate.\nSeminário.",
+        "habilidades": ["EF08LP03", "EF89LP10", "EF69LP08", "EF69LP43", "EF69LP13", "EF69LP15", "EF89LP12", "EF69LP07", "EF89LP26"]},
+
+    {"ano": "9º ano", "trimestre": 1, "unidade": "Produção de Texto", "objetos":
+        "Conto (terror, humor, social...).\nCrônica de ficção científica.\nPontuação e ortografia.",
+        "habilidades": ["EF89LP35", "EF69LP51", "EF69LP53"]},
+    {"ano": "9º ano", "trimestre": 2, "unidade": "Produção de Texto", "objetos":
+        "Infográfico.\nProdução de reportagem impressa e digital.\nEntrevista oral e escrita.",
+        "habilidades": ["EF69LP06", "EF69LP07", "EF69LP08", "EF89LP08", "EF89LP09", "EF69LP12", "EF89LP13", "EF69LP10"]},
+    {"ano": "9º ano", "trimestre": 3, "unidade": "Produção de Texto", "objetos":
+        "Debate / mesa redonda (oral).\nSeminário (oral – foco no mundo do trabalho) ou júri simulado.\n"
+        "Enquete/Pesquisa de opinião (foco no ambiente acadêmico).\n"
+        "Pesquisa de opinião (foco na inserção do jovem no mercado de trabalho).\nCurrículo.\n"
+        "Entrevista de emprego (oral).",
+        "habilidades": ["EF89LP12", "EF89LP14", "EF89LP15", "EF69LP25", "EF69LP26", "EF69LP38", "EF69LP41",
+                        "EF89LP21", "EF69LP22", "EF89LP22", "EF89LP25", "EF69LP36", "EF69LP37", "EF69LP39", "EF69LP43"]},
+]
+
+
+def _seed_referencial_curricular(conn):
+    """Popula o Referencial Curricular a partir das listas REFERENCIAL_CURRICULAR_*
+    (uma por disciplina). Idempotente — só insere o que ainda não existe, então pode
+    rodar em todo startup sem duplicar nem sobrescrever edições feitas pela tela depois.
+    Habilidades BNCC que já existem em habilidades_bncc não são alteradas; só cria a
+    linha se o código realmente não existir ainda (04/09/2026)."""
+    for disciplina_nome, blocos in [
+        ("Arte", REFERENCIAL_CURRICULAR_ARTE),
+        ("Educação Física", REFERENCIAL_CURRICULAR_EDUCACAO_FISICA),
+        ("Ciências", REFERENCIAL_CURRICULAR_CIENCIAS),
+        ("História", REFERENCIAL_CURRICULAR_HISTORIA),
+        ("Geografia", REFERENCIAL_CURRICULAR_GEOGRAFIA),
+        ("Matemática", REFERENCIAL_CURRICULAR_MATEMATICA),
+        ("Inglês", REFERENCIAL_CURRICULAR_INGLES),
+        ("Português", REFERENCIAL_CURRICULAR_PORTUGUES),
+    ]:
+        disc = conn.execute("SELECT id FROM disciplinas WHERE nome = ?", (disciplina_nome,)).fetchone()
+        if not disc:
+            cur = conn.execute("INSERT INTO disciplinas (nome) VALUES (?)", (disciplina_nome,))
+            disciplina_id = cur.lastrowid
+        else:
+            disciplina_id = disc["id"]
+
+        for bloco in blocos:
+            existe = conn.execute(
+                "SELECT id FROM referencial_curricular WHERE disciplina_id=? AND ano_escolaridade=? AND trimestre=? AND unidade_tematica=?",
+                (disciplina_id, bloco["ano"], bloco["trimestre"], bloco["unidade"])
+            ).fetchone()
+            if existe:
+                continue
+            cur = conn.execute(
+                "INSERT INTO referencial_curricular (disciplina_id, ano_escolaridade, trimestre, unidade_tematica, objetos_conhecimento, ordem) VALUES (?, ?, ?, ?, ?, ?)",
+                (disciplina_id, bloco["ano"], bloco["trimestre"], bloco["unidade"], bloco["objetos"], bloco["trimestre"])
+            )
+            referencial_id = cur.lastrowid
+            for codigo in bloco["habilidades"]:
+                hab = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+                if not hab:
+                    cur2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, None))
+                    habilidade_id = cur2.lastrowid
+                else:
+                    habilidade_id = hab["id"]
+                conn.execute(
+                    "INSERT INTO referencial_curricular_habilidades (referencial_id, habilidade_id) VALUES (?, ?)",
+                    (referencial_id, habilidade_id)
+                )
+
+
 def _gerar_username(nome_completo: str, conn) -> str:
     """Gera um username único a partir do nome (primeiro.ultimo, minúsculo, sem acento),
     adicionando um número se já existir — 27/08/2026."""
@@ -844,6 +1905,94 @@ def init_db():
     if "medida_disciplinar" not in cols_ocorr:
         # Medida aplicada conforme Art. 80 do regimento — 02/09/2026.
         conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN medida_disciplinar TEXT")
+
+    # ============ DOCUMENTO NORTEADOR (planejamento bimestral/trimestral) — 04/09/2026 ============
+    # Referencial Curricular: disciplina → ano → trimestre → unidade temática, com objetos
+    # de conhecimento (texto) e habilidades BNCC ligadas à tabela habilidades_bncc que já existe.
+    conn.execute("""CREATE TABLE IF NOT EXISTS referencial_curricular (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        disciplina_id INTEGER NOT NULL,
+        ano_escolaridade TEXT NOT NULL,
+        trimestre INTEGER NOT NULL,
+        unidade_tematica TEXT NOT NULL,
+        objetos_conhecimento TEXT NOT NULL,
+        ordem INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS referencial_curricular_habilidades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        referencial_id INTEGER NOT NULL,
+        habilidade_id INTEGER NOT NULL,
+        FOREIGN KEY (referencial_id) REFERENCES referencial_curricular(id) ON DELETE CASCADE,
+        FOREIGN KEY (habilidade_id) REFERENCES habilidades_bncc(id)
+    )""")
+
+    # Calendário do trimestre — compartilhado entre TODAS as disciplinas (confirmado por
+    # Felipe). "Semanas" são as linhas normais da tabela; "alertas" são os avisos de
+    # largura total que aparecem entre semanas (feriados, provas, prazos etc.).
+    conn.execute("""CREATE TABLE IF NOT EXISTS calendario_semanas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trimestre INTEGER NOT NULL,
+        ano_letivo INTEGER NOT NULL,
+        ordem INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        nota TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS calendario_alertas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trimestre INTEGER NOT NULL,
+        ano_letivo INTEGER NOT NULL,
+        ordem_apos_semana_id INTEGER,
+        texto TEXT NOT NULL,
+        FOREIGN KEY (ordem_apos_semana_id) REFERENCES calendario_semanas(id) ON DELETE CASCADE
+    )""")
+
+    # Documento Norteador em si — um por disciplina+trimestre+ano_letivo.
+    conn.execute("""CREATE TABLE IF NOT EXISTS documentos_norteadores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        disciplina_id INTEGER NOT NULL,
+        trimestre INTEGER NOT NULL,
+        ano_letivo INTEGER NOT NULL,
+        aulas_semanais INTEGER,
+        planejamento_nota TEXT,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP,
+        UNIQUE(disciplina_id, trimestre, ano_letivo),
+        FOREIGN KEY (disciplina_id) REFERENCES disciplinas(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS documento_norteador_docentes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        documento_id INTEGER NOT NULL,
+        ano_escolaridade TEXT NOT NULL,
+        professor_id INTEGER,
+        nome_livre TEXT,
+        FOREIGN KEY (documento_id) REFERENCES documentos_norteadores(id) ON DELETE CASCADE,
+        FOREIGN KEY (professor_id) REFERENCES professores(id)
+    )""")
+    # Planejamento único por área/ano (confirmado por Felipe) — uma linha por semana do
+    # calendário, compartilhada entre todos os docentes daquele ano+disciplina.
+    conn.execute("""CREATE TABLE IF NOT EXISTS documento_norteador_semanas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        documento_id INTEGER NOT NULL,
+        ano_escolaridade TEXT NOT NULL,
+        calendario_semana_id INTEGER NOT NULL,
+        objeto_conhecimento TEXT,
+        objetivo_aprendizagem TEXT,
+        atividade TEXT,
+        atualizado_por_professor_id INTEGER,
+        atualizado_em TIMESTAMP,
+        UNIQUE(documento_id, ano_escolaridade, calendario_semana_id),
+        FOREIGN KEY (documento_id) REFERENCES documentos_norteadores(id) ON DELETE CASCADE,
+        FOREIGN KEY (calendario_semana_id) REFERENCES calendario_semanas(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS documento_norteador_semana_habilidades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        semana_id INTEGER NOT NULL,
+        habilidade_id INTEGER NOT NULL,
+        FOREIGN KEY (semana_id) REFERENCES documento_norteador_semanas(id) ON DELETE CASCADE,
+        FOREIGN KEY (habilidade_id) REFERENCES habilidades_bncc(id)
+    )""")
+    _seed_referencial_curricular(conn)
 
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
     if "ano" not in cols_q:
@@ -2646,6 +3795,1013 @@ def excluir_ocorrencia(request: Request, ocorrencia_id: int):
     return RedirectResponse("/orientacao/ocorrencias", status_code=303)
 
 
+# ============ CALENDÁRIO DO TRIMESTRE (base do Documento Norteador) — 04/09/2026 ============
+# Compartilhado entre TODAS as disciplinas dentro de um trimestre/ano (confirmado por
+# Felipe) — cadastrado uma vez pelo admin/gestão, reaproveitado por cada Documento
+# Norteador automaticamente.
+
+@app.get("/norteador/calendario", response_class=HTMLResponse)
+def calendario_trimestre(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    hoje = date.today()
+    trimestre = trimestre or 1
+    ano = ano or hoje.year
+
+    conn = get_db()
+    semanas = conn.execute(
+        "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem", (trimestre, ano)
+    ).fetchall()
+    alertas = conn.execute(
+        "SELECT * FROM calendario_alertas WHERE trimestre=? AND ano_letivo=? ORDER BY id", (trimestre, ano)
+    ).fetchall()
+    conn.close()
+    alertas_por_semana = {}
+    for al in alertas:
+        alertas_por_semana.setdefault(al["ordem_apos_semana_id"], []).append(al)
+
+    linhas = ""
+    for al in alertas_por_semana.get(None, []):
+        linhas += f"""<tr style="background:var(--orange-bg);"><td colspan="4" style="padding:6px 10px; font-size:12px;">⚠ {al["texto"]}
+            <form method="post" action="/norteador/calendario/alerta/{al["id"]}/excluir" style="display:inline;"><button type="submit" class="btn" style="padding:1px 6px; font-size:10px; margin-left:8px;">excluir</button></form></td></tr>"""
+    for s in semanas:
+        linhas += f"""<tr>
+            <td style="padding:6px 10px; font-weight:600;">{s["label"]}</td>
+            <td style="padding:6px 10px; font-size:12px; color:var(--text-muted);">{s["nota"] or "—"}</td>
+            <td style="padding:6px 10px; text-align:center;">{s["ordem"]}</td>
+            <td style="padding:6px 10px;">
+                <form method="post" action="/norteador/calendario/semana/{s["id"]}/excluir" style="display:inline;" onsubmit="return confirm('Excluir essa semana? Isso também apaga o planejamento já preenchido nela em todas as disciplinas.');"><button type="submit" class="btn" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>
+            </td>
+        </tr>"""
+        for al in alertas_por_semana.get(s["id"], []):
+            linhas += f"""<tr style="background:var(--orange-bg);"><td colspan="4" style="padding:6px 10px; font-size:12px;">⚠ {al["texto"]}
+                <form method="post" action="/norteador/calendario/alerta/{al["id"]}/excluir" style="display:inline;"><button type="submit" class="btn" style="padding:1px 6px; font-size:10px; margin-left:8px;">excluir</button></form></td></tr>"""
+
+    opts_semana_alerta = '<option value="">— no início do trimestre —</option>' + "".join(
+        f'<option value="{s["id"]}">Depois de "{s["label"]}"</option>' for s in semanas
+    )
+
+    content = f"""
+        <div class="page-header">
+            <h1>📅 Calendário do Trimestre</h1>
+            <p class="subtitle">Compartilhado entre todas as disciplinas — cadastre aqui uma vez só. {trimestre}º Trimestre {ano}.</p>
+        </div>
+        <form method="get" style="display:flex; gap:12px; margin-bottom:18px;">
+            <label style="margin:0;">Trimestre <select name="trimestre" onchange="this.form.submit();">
+                <option value="1"{' selected' if trimestre==1 else ''}>1º</option>
+                <option value="2"{' selected' if trimestre==2 else ''}>2º</option>
+                <option value="3"{' selected' if trimestre==3 else ''}>3º</option>
+            </select></label>
+            <label style="margin:0;">Ano <input type="number" name="ano" value="{ano}" onchange="this.form.submit();"></label>
+        </form>
+
+        <table style="width:100%; border-collapse:collapse; font-size:13px; margin-bottom:24px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:6px 10px; text-align:left;">Semana</th>
+                <th style="padding:6px 10px; text-align:left;">Nota</th>
+                <th style="padding:6px 10px;">Ordem</th>
+                <th style="padding:6px 10px;"></th>
+            </tr></thead>
+            <tbody>{linhas if linhas else '<tr><td colspan="4" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma semana cadastrada ainda.</td></tr>'}</tbody>
+        </table>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+            <div class="card" style="padding:16px;">
+                <h3 style="margin-top:0; font-size:14px;">+ Adicionar semana</h3>
+                <form action="/norteador/calendario/semana/nova" method="post">
+                    <input type="hidden" name="trimestre" value="{trimestre}">
+                    <input type="hidden" name="ano" value="{ano}">
+                    <label>Rótulo da semana<input type="text" name="label" required placeholder='Ex: "18 a 22/5"'></label>
+                    <label>Nota (opcional)<input type="text" name="nota" placeholder="Ex: 19/5 Discussão Pedagógica sem aula"></label>
+                    <label>Ordem<input type="number" name="ordem" required value="{len(semanas)+1}"></label>
+                    <button type="submit" class="btn btn-primary">Adicionar semana</button>
+                </form>
+            </div>
+            <div class="card" style="padding:16px;">
+                <h3 style="margin-top:0; font-size:14px;">+ Adicionar alerta (aviso de largura total)</h3>
+                <form action="/norteador/calendario/alerta/novo" method="post">
+                    <input type="hidden" name="trimestre" value="{trimestre}">
+                    <input type="hidden" name="ano" value="{ano}">
+                    <label>Aparece depois de
+                        <select name="ordem_apos_semana_id">{opts_semana_alerta}</select>
+                    </label>
+                    <label>Texto do alerta<textarea name="texto" rows="2" required placeholder='Ex: "ALERTA - ENTREGA DAS PROVAS DO 3º TRIMESTRE - 30/10"'></textarea></label>
+                    <button type="submit" class="btn btn-primary">Adicionar alerta</button>
+                </form>
+            </div>
+        </div>
+    """
+    return HTMLResponse(render_page("Calendário do Trimestre", content, active="norteador-calendario"))
+
+
+@app.post("/norteador/calendario/semana/nova")
+def criar_semana_calendario(request: Request, trimestre: int = Form(...), ano: int = Form(...),
+                             label: str = Form(...), nota: str = Form(""), ordem: int = Form(...)):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    conn.execute("INSERT INTO calendario_semanas (trimestre, ano_letivo, ordem, label, nota) VALUES (?, ?, ?, ?, ?)",
+                 (trimestre, ano, ordem, label.strip(), nota.strip() or None))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/calendario?trimestre={trimestre}&ano={ano}", status_code=303)
+
+
+@app.post("/norteador/calendario/semana/{semana_id}/excluir")
+def excluir_semana_calendario(request: Request, semana_id: int):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    s = conn.execute("SELECT trimestre, ano_letivo FROM calendario_semanas WHERE id=?", (semana_id,)).fetchone()
+    conn.execute("DELETE FROM calendario_semanas WHERE id = ?", (semana_id,))
+    conn.commit()
+    conn.close()
+    if s:
+        return RedirectResponse(f"/norteador/calendario?trimestre={s['trimestre']}&ano={s['ano_letivo']}", status_code=303)
+    return RedirectResponse("/norteador/calendario", status_code=303)
+
+
+@app.post("/norteador/calendario/alerta/novo")
+def criar_alerta_calendario(request: Request, trimestre: int = Form(...), ano: int = Form(...),
+                             ordem_apos_semana_id: str = Form(""), texto: str = Form(...)):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    semana_ref = int(ordem_apos_semana_id) if ordem_apos_semana_id.strip().isdigit() else None
+    conn = get_db()
+    conn.execute("INSERT INTO calendario_alertas (trimestre, ano_letivo, ordem_apos_semana_id, texto) VALUES (?, ?, ?, ?)",
+                 (trimestre, ano, semana_ref, texto.strip()))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/calendario?trimestre={trimestre}&ano={ano}", status_code=303)
+
+
+@app.post("/norteador/calendario/alerta/{alerta_id}/excluir")
+def excluir_alerta_calendario(request: Request, alerta_id: int):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    al = conn.execute("SELECT trimestre, ano_letivo FROM calendario_alertas WHERE id=?", (alerta_id,)).fetchone()
+    conn.execute("DELETE FROM calendario_alertas WHERE id = ?", (alerta_id,))
+    conn.commit()
+    conn.close()
+    if al:
+        return RedirectResponse(f"/norteador/calendario?trimestre={al['trimestre']}&ano={al['ano_letivo']}", status_code=303)
+    return RedirectResponse("/norteador/calendario", status_code=303)
+
+
+# ============ REFERENCIAL CURRICULAR — CRUD manual — 04/09/2026 ============
+# Além do seed automático (_seed_referencial_curricular, a partir de PDFs oficiais da
+# rede), Felipe pode cadastrar/editar blocos manualmente aqui — necessário pra
+# disciplinas como Educação Física, cujo Referencial oficial é organizado por BIMESTRE
+# e precisa ser redistribuído em TRIMESTRE (cobertura hoje incompleta). Mesma dinâmica
+# de busca de habilidades BNCC usada no cadastro de questões (widget bncc-container):
+# ele digita/busca a habilidade e pode usar o botão "Preencher com a descrição BNCC"
+# pra puxar um texto-base pro objeto de conhecimento — mas o campo continua 100%
+# editável/redigitável, assim como unidade temática, ano e trimestre.
+
+_BNCC_WIDGET_JS = '\n    <script>\n    (function() {\n        var container = document.getElementById(\'bncc-container\');\n        var hiddenInput = document.getElementById(\'bncc-hidden\');\n        var searchInput = document.getElementById(\'bncc-search\');\n        var chipsDiv = document.getElementById(\'bncc-chips\');\n        var resultsDiv = document.getElementById(\'bncc-results\');\n        var discSel = document.querySelector(\'select[name="disciplina_id"]\');\n        if (!container || !hiddenInput || !searchInput) return;\n        var selecionados = [];\n        function renderChips() {\n            chipsDiv.innerHTML = \'\';\n            selecionados.forEach(function(cod) {\n                var chip = document.createElement(\'span\');\n                chip.style.cssText = \'display:inline-flex;align-items:center;gap:4px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;\';\n                chip.innerHTML = cod + \' <button type="button" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:14px;padding:0;line-height:1;" title="Remover">\\xd7</button>\';\n                chip.querySelector(\'button\').addEventListener(\'click\', function() {\n                    selecionados = selecionados.filter(function(c){return c!==cod;});\n                    renderChips();\n                });\n                chipsDiv.appendChild(chip);\n            });\n            hiddenInput.value = selecionados.join(\', \');\n        }\n        function adicionar(cod) {\n            cod = cod.trim().toUpperCase();\n            if (!cod || selecionados.indexOf(cod) >= 0) return;\n            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = \'\'; searchInput.value = \'\';\n        }\n        function buscar() {\n            var q = searchInput.value.trim();\n            if (q.length < 2) { resultsDiv.innerHTML = \'\'; return; }\n            var disc = discSel ? discSel.value : \'\';\n            var pareceCode = /^[A-Za-z]{2}\\d{2}[A-Za-z]{2}\\d{2}/.test(q);\n            var url = pareceCode ? \'/habilidades/buscar?codigos=\' + encodeURIComponent(q.toUpperCase())\n                : \'/habilidades/buscar?q=\' + encodeURIComponent(q) + (disc ? \'&disciplina_id=\' + disc : \'\');\n            fetch(url).then(function(r){return r.json();}).then(function(data) {\n                var results = [];\n                if (pareceCode) { Object.keys(data).forEach(function(k){if(k!==\'results\') results.push({codigo:k,descricao:data[k]});}); }\n                else { results = data.results || []; }\n                if (results.length === 0) {\n                    if (pareceCode) {\n                        resultsDiv.innerHTML = \'<div style="padding:6px 8px;font-size:12px;color:var(--text-muted);">Código não encontrado. <button type="button" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0;text-decoration:underline;">Adicionar mesmo assim</button></div>\';\n                        resultsDiv.querySelector(\'button\').addEventListener(\'click\', function(){adicionar(q);});\n                    } else {\n                        resultsDiv.innerHTML = \'<div style="padding:6px 8px;font-size:12px;color:var(--text-muted);">Nenhum resultado.</div>\';\n                    }\n                    return;\n                }\n                var html = \'<div style="color:var(--text-muted);font-size:11px;padding:4px 2px;">\' + results.length + \' habilidade(s) \\u2014 clique para adicionar:</div>\';\n                results.forEach(function(r) {\n                    html += \'<div data-cod="\' + r.codigo + \'" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;margin-bottom:3px;cursor:pointer;background:var(--card);font-size:12px;" onmouseover="this.style.background=\\\'var(--accent-bg)\\\'" onmouseout="this.style.background=\\\'var(--card)\\\'"><strong style="color:var(--accent);">\' + r.codigo + \'</strong> \\xb7 \' + (r.descricao||\'\').replace(/</g,\'&lt;\') + \'</div>\';\n                });\n                resultsDiv.innerHTML = html;\n            }).catch(function(){resultsDiv.innerHTML=\'\';});\n        }\n        var _t;\n        searchInput.addEventListener(\'input\', function(){clearTimeout(_t); _t=setTimeout(buscar,350);});\n        searchInput.addEventListener(\'keydown\', function(e){if(e.key===\'Enter\'){e.preventDefault();buscar();}});\n        if (discSel) discSel.addEventListener(\'change\', buscar);\n        resultsDiv.addEventListener(\'click\', function(e){\n            var item = e.target.closest(\'[data-cod]\');\n            if (item) adicionar(item.dataset.cod);\n        });\n        var init = hiddenInput.value.trim();\n        if (init) {\n            init.split(/[,\\n]/).map(function(x){return x.trim().toUpperCase();}).filter(Boolean).forEach(function(c){\n                if(selecionados.indexOf(c)<0) selecionados.push(c);\n            });\n            renderChips();\n        }\n\n        // Botão "Preencher com a descrição BNCC" — busca a descrição oficial de cada\n        // habilidade selecionada e acrescenta como linha nova no textarea de objetos de\n        // conhecimento (não sobrescreve o que já foi digitado; só ignora descrições\n        // que já estão lá pra não duplicar em cliques repetidos).\n        var btnPreencher = document.getElementById(\'bncc-preencher-objetos\');\n        var objetosArea = document.getElementById(\'objetos-conhecimento-textarea\');\n        if (btnPreencher && objetosArea) {\n            btnPreencher.addEventListener(\'click\', function() {\n                if (selecionados.length === 0) { alert(\'Selecione ao menos uma habilidade BNCC primeiro.\'); return; }\n                fetch(\'/habilidades/buscar?codigos=\' + encodeURIComponent(selecionados.join(\',\'))).then(function(r){return r.json();}).then(function(data) {\n                    var atual = objetosArea.value;\n                    var linhasAtuais = atual.split(\'\\n\');\n                    selecionados.forEach(function(cod) {\n                        var desc = data[cod];\n                        if (desc && linhasAtuais.indexOf(desc) < 0) {\n                            atual = atual ? (atual + \'\\n\' + desc) : desc;\n                            linhasAtuais.push(desc);\n                        }\n                    });\n                    objetosArea.value = atual;\n                });\n            });\n        }\n    })();\n    </script>\n'
+
+
+def _referencial_form_html(disciplinas, referencial=None, habs_iniciais_codigos="", action="/norteador/referencial-curricular/novo"):
+    """Monta o formulário de criar/editar bloco do Referencial Curricular. `referencial`
+    (sqlite3.Row) preenche os campos quando é edição; None quando é criação."""
+    disc_opts = "".join(
+        f'<option value="{d["id"]}"{" selected" if referencial and referencial["disciplina_id"]==d["id"] else ""}>{d["nome"]}</option>'
+        for d in disciplinas
+    )
+    ano_atual = referencial["ano_escolaridade"] if referencial else ""
+    ano_opts = '<option value="">— selecione —</option>' + "".join(
+        f'<option value="{a}"{" selected" if ano_atual==a else ""}>{a}</option>' for a in ANOS
+    )
+    tri_atual = referencial["trimestre"] if referencial else None
+    tri_opts = "".join(
+        f'<option value="{t}"{" selected" if tri_atual==t else ""}>{t}º Trimestre</option>' for t in (1, 2, 3)
+    )
+    unidade_val = (referencial["unidade_tematica"] if referencial else "").replace('"', "&quot;")
+    objetos_val = referencial["objetos_conhecimento"] if referencial else ""
+
+    return f"""
+        <form method="post" action="{action}">
+            <div style="display:grid; grid-template-columns: 2fr 1fr 1fr; gap:12px;">
+                <label>Disciplina<select name="disciplina_id" required>{disc_opts}</select></label>
+                <label>Ano de escolaridade<select name="ano_escolaridade" required>{ano_opts}</select></label>
+                <label>Trimestre<select name="trimestre" required>{tri_opts}</select></label>
+            </div>
+            <label>Unidade temática<input type="text" name="unidade_tematica" required value="{unidade_val}"
+                placeholder="Ex: Esporte, Leitura, Álgebra..."></label>
+            <div id="bncc-container" style="margin:10px 0;">
+                <label style="margin-bottom:6px;">Habilidades BNCC <span style="font-weight:400; color:var(--red); font-size:12px;">* obrigatório</span></label>
+                <input type="hidden" name="habilidades_codigos" id="bncc-hidden" value="{habs_iniciais_codigos}">
+                <div id="bncc-chips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:24px; margin-bottom:8px;"></div>
+                <input type="search" id="bncc-search" placeholder="Digite o código (EF67EF03) ou palavra-chave (esporte, leitura...)" style="margin:0;">
+                <div id="bncc-results" style="margin-top:6px;"></div>
+            </div>
+            <label>Objetos de conhecimento
+                <button type="button" id="bncc-preencher-objetos" class="btn" style="padding:2px 8px; font-size:11px; margin-left:8px;">↓ Preencher com a descrição BNCC</button>
+                <textarea id="objetos-conhecimento-textarea" name="objetos_conhecimento" rows="6" required
+                    placeholder="Um tópico por linha — o que os alunos vão estudar nesse trimestre">{objetos_val}</textarea>
+            </label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary" onclick="var h=document.getElementById(&quot;bncc-hidden&quot;); if(!h||!h.value.trim()){{alert(&quot;Selecione pelo menos uma Habilidade BNCC.&quot;);return false;}}">Salvar</button>
+                <a href="/norteador/referencial-curricular" class="btn">Cancelar</a>
+            </div>
+        </form>
+        {_BNCC_WIDGET_JS}
+    """
+
+
+@app.get("/norteador/referencial-curricular", response_class=HTMLResponse)
+def listar_referencial_curricular(request: Request, disciplina_id: Optional[int] = None, ano_escolaridade: str = "", trimestre: Optional[int] = None):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+
+    sql = """SELECT rc.*, d.nome AS disciplina_nome FROM referencial_curricular rc
+              JOIN disciplinas d ON d.id = rc.disciplina_id WHERE 1=1"""
+    params = []
+    if disciplina_id:
+        sql += " AND rc.disciplina_id = ?"
+        params.append(disciplina_id)
+    if ano_escolaridade:
+        sql += " AND rc.ano_escolaridade = ?"
+        params.append(ano_escolaridade)
+    if trimestre:
+        sql += " AND rc.trimestre = ?"
+        params.append(trimestre)
+    sql += " ORDER BY d.nome, rc.ano_escolaridade, rc.trimestre, rc.unidade_tematica"
+    blocos = conn.execute(sql, params).fetchall()
+
+    linhas = ""
+    for b in blocos:
+        habs = conn.execute("""
+            SELECT h.codigo FROM referencial_curricular_habilidades rch
+            JOIN habilidades_bncc h ON h.id = rch.habilidade_id WHERE rch.referencial_id = ?
+            ORDER BY h.codigo
+        """, (b["id"],)).fetchall()
+        habs_str = ", ".join(h["codigo"] for h in habs) or "—"
+        objetos_preview = b["objetos_conhecimento"].replace("\n", " · ")
+        if len(objetos_preview) > 120:
+            objetos_preview = objetos_preview[:120] + "…"
+        linhas += f"""<tr>
+            <td style="padding:8px;">{b["disciplina_nome"]}</td>
+            <td style="padding:8px; text-align:center;">{b["ano_escolaridade"]}</td>
+            <td style="padding:8px; text-align:center;">{b["trimestre"]}º</td>
+            <td style="padding:8px;">{b["unidade_tematica"]}</td>
+            <td style="padding:8px; font-size:12px; color:var(--text-muted);">{objetos_preview}</td>
+            <td style="padding:8px; font-size:11px; color:var(--accent); font-weight:600;">{habs_str}</td>
+            <td style="padding:8px; white-space:nowrap;">
+                <a href="/norteador/referencial-curricular/{b["id"]}/editar" class="btn" style="padding:2px 8px; font-size:11px;">✏️</a>
+                <form method="post" action="/norteador/referencial-curricular/{b["id"]}/excluir" style="display:inline;" onsubmit="return confirm('Excluir esse bloco do Referencial Curricular?');">
+                    <button type="submit" class="btn" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button>
+                </form>
+            </td>
+        </tr>"""
+    conn.close()
+
+    disc_filtro_opts = '<option value="">Todas</option>' + "".join(
+        f'<option value="{d["id"]}"{" selected" if disciplina_id==d["id"] else ""}>{d["nome"]}</option>' for d in disciplinas
+    )
+    ano_filtro_opts = '<option value="">Todos</option>' + "".join(
+        f'<option value="{a}"{" selected" if ano_escolaridade==a else ""}>{a}</option>' for a in ANOS
+    )
+    tri_filtro_opts = '<option value="">Todos</option>' + "".join(
+        f'<option value="{t}"{" selected" if trimestre==t else ""}>{t}º</option>' for t in (1, 2, 3)
+    )
+
+    content = f"""
+        <div class="page-header">
+            <h1>📚 Referencial Curricular</h1>
+            <p class="subtitle">Base de sugestões usada no preenchimento do Documento Norteador. {len(blocos)} bloco(s) encontrados.</p>
+        </div>
+        <div class="page-actions" style="margin-bottom:14px;">
+            <a href="/norteador/referencial-curricular/novo" class="btn btn-primary">+ Novo bloco</a>
+        </div>
+        <form method="get" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; background:var(--bg-subtle); padding:12px 14px; border-radius:8px; margin-bottom:16px;">
+            <label style="margin:0; flex:1 1 160px;">Disciplina<select name="disciplina_id" onchange="this.form.submit();">{disc_filtro_opts}</select></label>
+            <label style="margin:0; flex:1 1 120px;">Ano<select name="ano_escolaridade" onchange="this.form.submit();">{ano_filtro_opts}</select></label>
+            <label style="margin:0; flex:1 1 100px;">Trimestre<select name="trimestre" onchange="this.form.submit();">{tri_filtro_opts}</select></label>
+            <a href="/norteador/referencial-curricular" class="btn" style="margin:0;">Limpar</a>
+        </form>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left;">Disciplina</th>
+                <th style="padding:8px;">Ano</th>
+                <th style="padding:8px;">Trim.</th>
+                <th style="padding:8px; text-align:left;">Unidade temática</th>
+                <th style="padding:8px; text-align:left;">Objetos de conhecimento</th>
+                <th style="padding:8px; text-align:left;">Habilidades</th>
+                <th style="padding:8px;"></th>
+            </tr></thead>
+            <tbody>{linhas if linhas else '<tr><td colspan="7" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum bloco encontrado com os filtros selecionados.</td></tr>'}</tbody>
+        </table>
+    """
+    return HTMLResponse(render_page("Referencial Curricular", content, active="norteador-referencial"))
+
+
+@app.get("/norteador/referencial-curricular/novo", response_class=HTMLResponse)
+def form_novo_referencial_curricular(request: Request):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    conn.close()
+    content = f"""
+        <div class="page-header">
+            <h1>+ Novo bloco do Referencial Curricular</h1>
+            <p class="subtitle">Digite/busque a habilidade BNCC e preencha os campos — tudo pode ser reescrito depois.</p>
+        </div>
+        {_referencial_form_html(disciplinas)}
+    """
+    return HTMLResponse(render_page("Novo bloco · Referencial Curricular", content, active="norteador-referencial"))
+
+
+@app.post("/norteador/referencial-curricular/novo")
+def criar_referencial_curricular(
+    request: Request,
+    disciplina_id: int = Form(...),
+    ano_escolaridade: str = Form(...),
+    trimestre: int = Form(...),
+    unidade_tematica: str = Form(...),
+    objetos_conhecimento: str = Form(...),
+    habilidades_codigos: str = Form(""),
+):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    codigos = [c.strip().upper() for c in habilidades_codigos.replace("\n", ",").split(",") if c.strip()]
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO referencial_curricular (disciplina_id, ano_escolaridade, trimestre, unidade_tematica, objetos_conhecimento, ordem) VALUES (?, ?, ?, ?, ?, ?)",
+        (disciplina_id, ano_escolaridade, trimestre, unidade_tematica.strip(), objetos_conhecimento.strip(), trimestre)
+    )
+    referencial_id = cur.lastrowid
+    for codigo in codigos:
+        hab = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+        if not hab:
+            cur2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, None))
+            habilidade_id = cur2.lastrowid
+        else:
+            habilidade_id = hab["id"]
+        conn.execute(
+            "INSERT INTO referencial_curricular_habilidades (referencial_id, habilidade_id) VALUES (?, ?)",
+            (referencial_id, habilidade_id)
+        )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/referencial-curricular?disciplina_id={disciplina_id}&ano_escolaridade={ano_escolaridade}&trimestre={trimestre}", status_code=303)
+
+
+@app.get("/norteador/referencial-curricular/{referencial_id}/editar", response_class=HTMLResponse)
+def form_editar_referencial_curricular(request: Request, referencial_id: int):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    referencial = conn.execute("SELECT * FROM referencial_curricular WHERE id = ?", (referencial_id,)).fetchone()
+    if not referencial:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Bloco não encontrado.</div>', active="norteador-referencial"))
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    habs = conn.execute("""
+        SELECT h.codigo FROM referencial_curricular_habilidades rch
+        JOIN habilidades_bncc h ON h.id = rch.habilidade_id WHERE rch.referencial_id = ?
+        ORDER BY h.codigo
+    """, (referencial_id,)).fetchall()
+    conn.close()
+    habs_codigos = ", ".join(h["codigo"] for h in habs)
+    content = f"""
+        <div class="page-header">
+            <h1>✏️ Editar bloco do Referencial Curricular</h1>
+        </div>
+        {_referencial_form_html(disciplinas, referencial=referencial, habs_iniciais_codigos=habs_codigos, action=f"/norteador/referencial-curricular/{referencial_id}/editar")}
+    """
+    return HTMLResponse(render_page("Editar bloco · Referencial Curricular", content, active="norteador-referencial"))
+
+
+@app.post("/norteador/referencial-curricular/{referencial_id}/editar")
+def salvar_referencial_curricular(
+    request: Request,
+    referencial_id: int,
+    disciplina_id: int = Form(...),
+    ano_escolaridade: str = Form(...),
+    trimestre: int = Form(...),
+    unidade_tematica: str = Form(...),
+    objetos_conhecimento: str = Form(...),
+    habilidades_codigos: str = Form(""),
+):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    codigos = [c.strip().upper() for c in habilidades_codigos.replace("\n", ",").split(",") if c.strip()]
+    conn = get_db()
+    conn.execute(
+        "UPDATE referencial_curricular SET disciplina_id=?, ano_escolaridade=?, trimestre=?, unidade_tematica=?, objetos_conhecimento=?, ordem=? WHERE id=?",
+        (disciplina_id, ano_escolaridade, trimestre, unidade_tematica.strip(), objetos_conhecimento.strip(), trimestre, referencial_id)
+    )
+    conn.execute("DELETE FROM referencial_curricular_habilidades WHERE referencial_id = ?", (referencial_id,))
+    for codigo in codigos:
+        hab = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+        if not hab:
+            cur2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, None))
+            habilidade_id = cur2.lastrowid
+        else:
+            habilidade_id = hab["id"]
+        conn.execute(
+            "INSERT INTO referencial_curricular_habilidades (referencial_id, habilidade_id) VALUES (?, ?)",
+            (referencial_id, habilidade_id)
+        )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/referencial-curricular?disciplina_id={disciplina_id}&ano_escolaridade={ano_escolaridade}&trimestre={trimestre}", status_code=303)
+
+
+@app.post("/norteador/referencial-curricular/{referencial_id}/excluir")
+def excluir_referencial_curricular(request: Request, referencial_id: int):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT disciplina_id, ano_escolaridade, trimestre FROM referencial_curricular WHERE id=?", (referencial_id,)).fetchone()
+    conn.execute("DELETE FROM referencial_curricular_habilidades WHERE referencial_id = ?", (referencial_id,))
+    conn.execute("DELETE FROM referencial_curricular WHERE id = ?", (referencial_id,))
+    conn.commit()
+    conn.close()
+    if r:
+        return RedirectResponse(f"/norteador/referencial-curricular?disciplina_id={r['disciplina_id']}&ano_escolaridade={r['ano_escolaridade']}&trimestre={r['trimestre']}", status_code=303)
+    return RedirectResponse("/norteador/referencial-curricular", status_code=303)
+
+
+# ============ DOCUMENTO NORTEADOR — 04/09/2026 ============
+
+def _pode_editar_norteador(prof, conn, documento_id: int, ano_escolaridade: str) -> bool:
+    """Admin/gestão sempre pode. Docente só pode editar o ano de escolaridade em que
+    está listado como responsável naquele Documento Norteador (04/09/2026)."""
+    if prof.get("is_admin") or prof.get("is_gestor"):
+        return True
+    vinculo = conn.execute(
+        "SELECT 1 FROM documento_norteador_docentes WHERE documento_id=? AND ano_escolaridade=? AND professor_id=?",
+        (documento_id, ano_escolaridade, prof["id"])
+    ).fetchone()
+    return bool(vinculo)
+
+
+@app.get("/norteador", response_class=HTMLResponse)
+def listar_norteadores(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    if prof.get("is_admin") or prof.get("is_gestor"):
+        docs = conn.execute("""
+            SELECT dn.*, d.nome AS disciplina_nome FROM documentos_norteadores dn
+            JOIN disciplinas d ON d.id = dn.disciplina_id
+            ORDER BY dn.ano_letivo DESC, dn.trimestre DESC, d.nome
+        """).fetchall()
+    else:
+        docs = conn.execute("""
+            SELECT DISTINCT dn.*, d.nome AS disciplina_nome FROM documentos_norteadores dn
+            JOIN disciplinas d ON d.id = dn.disciplina_id
+            JOIN documento_norteador_docentes dnd ON dnd.documento_id = dn.id
+            WHERE dnd.professor_id = ?
+            ORDER BY dn.ano_letivo DESC, dn.trimestre DESC, d.nome
+        """, (prof["id"],)).fetchall()
+    conn.close()
+
+    if not docs:
+        linhas = '<tr><td colspan="4" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum Documento Norteador ainda.</td></tr>'
+    else:
+        linhas = "".join(f"""<tr>
+            <td style="padding:8px;">{d["disciplina_nome"]}</td>
+            <td style="padding:8px; text-align:center;">{d["trimestre"]}º Trimestre {d["ano_letivo"]}</td>
+            <td style="padding:8px;"><a href="/norteador/{d["id"]}" class="btn" style="padding:4px 10px; font-size:12px;">Abrir</a></td>
+        </tr>""" for d in docs)
+
+    novo_btn = '<a href="/norteador/novo" class="btn btn-primary">+ Novo Documento Norteador</a>' if (prof.get("is_admin") or prof.get("is_gestor")) else ""
+    content = f"""
+        <div class="page-header">
+            <h1>🧭 Documentos Norteadores</h1>
+            <p class="subtitle">Planejamento bimestral/trimestral de atividades, conectado à BNCC e ao Referencial Curricular.</p>
+        </div>
+        <div class="page-actions" style="margin-bottom:14px;">
+            {novo_btn}
+            {'<a href="/norteador/calendario" class="btn">📅 Calendário do Trimestre</a>' if (prof.get("is_admin") or prof.get("is_gestor")) else ""}
+            {'<a href="/norteador/referencial-curricular" class="btn">📚 Referencial Curricular</a>' if (prof.get("is_admin") or prof.get("is_gestor")) else ""}
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left;">Disciplina</th>
+                <th style="padding:8px;">Período</th>
+                <th style="padding:8px;"></th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+    """
+    return HTMLResponse(render_page("Documentos Norteadores", content, active="norteador"))
+
+
+@app.get("/norteador/novo", response_class=HTMLResponse)
+def form_novo_norteador(request: Request):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    disciplinas = conn.execute("SELECT id, nome FROM disciplinas WHERE nome != 'Geral' ORDER BY nome").fetchall()
+    professores = conn.execute("SELECT id, nome FROM professores WHERE status='ativo' ORDER BY nome").fetchall()
+    conn.close()
+    opts_disc = "".join(f'<option value="{d["id"]}">{d["nome"]}</option>' for d in disciplinas)
+    opts_prof = "".join(f'<option value="{p["id"]}">{p["nome"]}</option>' for p in professores)
+
+    blocos_ano = ""
+    for a in ANOS:
+        blocos_ano += f"""
+        <div style="margin-bottom:10px;">
+            <label style="margin:0;">Docente(s) responsável(is) — {a}
+                <select name="docentes_{a}" multiple size="4">{opts_prof}</select>
+            </label>
+        </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🧭 Novo Documento Norteador</h1>
+            <p class="subtitle">Segure Ctrl (ou Cmd no Mac) pra marcar mais de um docente por ano.</p>
+        </div>
+        <form action="/norteador/novo" method="post">
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 220px;">Disciplina
+                    <select name="disciplina_id" required>
+                        <option value="">— selecione —</option>
+                        {opts_disc}
+                    </select>
+                </label>
+                <label style="flex:1 1 140px;">Trimestre
+                    <select name="trimestre" required>
+                        <option value="1">1º</option><option value="2">2º</option><option value="3">3º</option>
+                    </select>
+                </label>
+                <label style="flex:1 1 140px;">Ano letivo
+                    <input type="number" name="ano_letivo" value="2026" required>
+                </label>
+                <label style="flex:1 1 140px;">Aulas semanais
+                    <input type="number" name="aulas_semanais" min="1" value="2">
+                </label>
+            </div>
+            <label>Planejamento (nota geral)
+                <textarea name="planejamento_nota" rows="2" placeholder='Ex: "Planejamento unificado por área/ano de escolaridade"'></textarea>
+            </label>
+            <h3 style="font-size:13px; text-transform:uppercase; color:var(--text-muted); margin-top:18px;">Docentes por ano de escolaridade</h3>
+            {blocos_ano}
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Criar Documento Norteador</button>
+                <a href="/norteador" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Novo Documento Norteador", content, active="norteador"))
+
+
+@app.post("/norteador/novo")
+async def criar_norteador(request: Request, disciplina_id: int = Form(...), trimestre: int = Form(...),
+                           ano_letivo: int = Form(...), aulas_semanais: Optional[int] = Form(None),
+                           planejamento_nota: str = Form("")):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    form = await request.form()
+    conn = get_db()
+    try:
+        cursor = conn.execute("""
+            INSERT INTO documentos_norteadores (disciplina_id, trimestre, ano_letivo, aulas_semanais, planejamento_nota)
+            VALUES (?, ?, ?, ?, ?)
+        """, (disciplina_id, trimestre, ano_letivo, aulas_semanais, planejamento_nota.strip() or None))
+    except sqlite3.IntegrityError:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Já existe um Documento Norteador pra essa disciplina, trimestre e ano.</p><a href="/norteador" class="btn">Voltar</a>', active="norteador"))
+    documento_id = cursor.lastrowid
+
+    for a in ANOS:
+        ids_selecionados = form.getlist(f"docentes_{a}")
+        for pid in ids_selecionados:
+            if pid.strip().isdigit():
+                conn.execute("INSERT INTO documento_norteador_docentes (documento_id, ano_escolaridade, professor_id) VALUES (?, ?, ?)",
+                             (documento_id, a, int(pid)))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/{documento_id}", status_code=303)
+
+
+@app.get("/norteador/{documento_id}", response_class=HTMLResponse)
+def ver_norteador(request: Request, documento_id: int):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    doc = conn.execute("""
+        SELECT dn.*, d.nome AS disciplina_nome FROM documentos_norteadores dn
+        JOIN disciplinas d ON d.id = dn.disciplina_id WHERE dn.id = ?
+    """, (documento_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
+
+    docentes = conn.execute("""
+        SELECT dnd.ano_escolaridade, p.nome FROM documento_norteador_docentes dnd
+        LEFT JOIN professores p ON p.id = dnd.professor_id WHERE dnd.documento_id = ? ORDER BY dnd.ano_escolaridade
+    """, (documento_id,)).fetchall()
+    conn.close()
+
+    docentes_por_ano = {}
+    for d in docentes:
+        docentes_por_ano.setdefault(d["ano_escolaridade"], []).append(d["nome"])
+
+    blocos_ano_html = ""
+    for a in ANOS:
+        nomes = ", ".join(docentes_por_ano.get(a, [])) or "— ninguém atribuído ainda —"
+        blocos_ano_html += f"""
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px;">
+            <div><strong>{a}</strong><div style="font-size:12px; color:var(--text-muted);">{nomes}</div></div>
+            <a href="/norteador/{documento_id}/{a}" class="btn btn-primary">Abrir planejamento</a>
+        </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🧭 {doc["disciplina_nome"]} — {doc["trimestre"]}º Trimestre {doc["ano_letivo"]}</h1>
+            <p class="subtitle">{doc["aulas_semanais"] or "—"} aula(s) semanal(is) · {doc["planejamento_nota"] or ""}</p>
+        </div>
+        <div class="page-actions" style="margin-bottom:16px;">
+            <a href="/norteador/{documento_id}/documento" class="btn" target="_blank">🖨️ Ver documento formatado</a>
+        </div>
+        {blocos_ano_html}
+    """
+    return HTMLResponse(render_page("Documento Norteador", content, active="norteador"))
+
+
+@app.get("/norteador/{documento_id}/documento", response_class=HTMLResponse)
+def documento_norteador_formatado(request: Request, documento_id: int):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    doc = conn.execute("""
+        SELECT dn.*, d.nome AS disciplina_nome FROM documentos_norteadores dn
+        JOIN disciplinas d ON d.id = dn.disciplina_id WHERE dn.id = ?
+    """, (documento_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
+
+    docentes = conn.execute("""
+        SELECT dnd.ano_escolaridade, p.nome FROM documento_norteador_docentes dnd
+        LEFT JOIN professores p ON p.id = dnd.professor_id WHERE dnd.documento_id = ? ORDER BY dnd.ano_escolaridade
+    """, (documento_id,)).fetchall()
+    docentes_por_ano = {}
+    for d in docentes:
+        docentes_por_ano.setdefault(d["ano_escolaridade"], []).append(d["nome"])
+
+    semanas = conn.execute(
+        "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem", (doc["trimestre"], doc["ano_letivo"])
+    ).fetchall()
+    alertas = conn.execute(
+        "SELECT * FROM calendario_alertas WHERE trimestre=? AND ano_letivo=? ORDER BY id", (doc["trimestre"], doc["ano_letivo"])
+    ).fetchall()
+    alertas_por_semana = {}
+    for al in alertas:
+        alertas_por_semana.setdefault(al["ordem_apos_semana_id"], []).append(al["texto"])
+
+    tabelas_por_ano_html = ""
+    for a in ANOS:
+        preenchidas = {r["calendario_semana_id"]: r for r in conn.execute(
+            "SELECT * FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=?", (documento_id, a)
+        ).fetchall()}
+        linhas = ""
+        for al_texto in alertas_por_semana.get(None, []):
+            linhas += f'<tr><td colspan="5" style="background:#fef3c7; padding:4px 8px; font-size:11px;">{html.escape(al_texto)}</td></tr>'
+        for s in semanas:
+            r = preenchidas.get(s["id"])
+            habs_str = "—"
+            if r:
+                habs = conn.execute("""SELECT h.codigo FROM documento_norteador_semana_habilidades dsh
+                    JOIN habilidades_bncc h ON h.id=dsh.habilidade_id WHERE dsh.semana_id=?""", (r["id"],)).fetchall()
+                habs_str = ", ".join(h["codigo"] for h in habs) or "—"
+            linhas += f"""<tr>
+                <td style="padding:4px 8px; font-size:11px; font-weight:600;">{s["label"]}{f'<div style="font-weight:400; color:#666;">{s["nota"]}</div>' if s["nota"] else ""}</td>
+                <td style="padding:4px 8px; font-size:11px;">{habs_str}</td>
+                <td style="padding:4px 8px; font-size:11px;">{(r["objeto_conhecimento"] if r and r["objeto_conhecimento"] else "—")}</td>
+                <td style="padding:4px 8px; font-size:11px;">{(r["objetivo_aprendizagem"] if r and r["objetivo_aprendizagem"] else "—")}</td>
+                <td style="padding:4px 8px; font-size:11px;">{(r["atividade"] if r and r["atividade"] else "—")}</td>
+            </tr>"""
+            for al_texto in alertas_por_semana.get(s["id"], []):
+                linhas += f'<tr><td colspan="5" style="background:#fef3c7; padding:4px 8px; font-size:11px;">{html.escape(al_texto)}</td></tr>'
+
+        nomes_ano = ", ".join(docentes_por_ano.get(a, [])) or "—"
+        tabelas_por_ano_html += f"""
+        <h3 style="font-size:13px; margin:20px 0 4px 0; page-break-before:always;">{a} de escolaridade — {nomes_ano}</h3>
+        <table style="width:100%; border-collapse:collapse; font-size:11px; margin-bottom:10px;">
+            <thead><tr style="background:#f0f0f0;">
+                <th style="padding:4px 8px; text-align:left;">Semana</th>
+                <th style="padding:4px 8px; text-align:left;">Habilidade</th>
+                <th style="padding:4px 8px; text-align:left;">Objeto do conhecimento</th>
+                <th style="padding:4px 8px; text-align:left;">Objetivo de aprendizagem</th>
+                <th style="padding:4px 8px; text-align:left;">Atividade</th>
+            </tr></thead>
+            <tbody>{linhas if linhas else '<tr><td colspan="5" style="padding:8px; text-align:center; color:#888;">Nenhuma semana cadastrada.</td></tr>'}</tbody>
+        </table>"""
+
+    grade_docentes = "".join(f"""
+        <td style="padding:6px 10px; text-align:center; vertical-align:top; border:1px solid #ccc;">
+            <div style="font-weight:700; font-size:11px;">{a}</div>
+            <div style="font-size:11px;">{", ".join(docentes_por_ano.get(a, [])) or "—"}</div>
+        </td>""" for a in ANOS)
+    conn.close()
+
+    html_completo = f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Documento Norteador · {doc["disciplina_nome"]}</title>
+<style>
+    @media print {{ @page {{ size: A4 landscape; margin: 12mm; }} body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
+    body {{ margin:0; background:#fff; font-family: Helvetica, Arial, sans-serif; }}
+</style>
+</head><body>
+<div style="padding:14px 20px; max-width:1100px; margin:0 auto; font-size:13px;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:10px;">
+        <img src="/static/imagens/logo_walmir.png" alt="" style="height:44px; width:auto;">
+        <div style="text-align:center;">
+            <div style="font-weight:700; font-size:15px;">E.M Walmir de Freitas Monteiro</div>
+            <div style="font-size:12px; color:#555;">Volta Redonda — RJ</div>
+        </div>
+    </div>
+    <h2 style="text-align:center; margin:10px 0; font-size:16px; border:1px solid #333; padding:6px;">DOCUMENTO NORTEADOR - {doc["trimestre"]}º trimestre / {doc["ano_letivo"]}</h2>
+    <h3 style="text-align:center; margin:6px 0 14px 0; font-size:13px; border:1px solid #333; padding:5px;">Componente Curricular: {doc["disciplina_nome"].upper()}</h3>
+
+    <table style="width:100%; border-collapse:collapse; margin-bottom:14px;">
+        <tr>{grade_docentes}</tr>
+    </table>
+
+    <div style="font-size:12px; margin-bottom:14px;">
+        <strong>ORIENTAÇÕES GERAIS</strong><br>
+        <strong>AULAS SEMANAIS:</strong> {doc["aulas_semanais"] or "—"} aula(s) semanal(is)<br>
+        <strong>PLANEJAMENTO:</strong> {doc["planejamento_nota"] or "—"}
+    </div>
+
+    {tabelas_por_ano_html}
+
+    <div style="font-size:9px; color:#888; border-top:1px solid #ddd; padding-top:5px; margin-top:20px; text-align:center;">
+        Gerado automaticamente — E.M Walmir de Freitas Monteiro · {datetime.now().strftime("%d de %B de %Y")}
+    </div>
+</div>
+</body></html>"""
+    return HTMLResponse(html_completo)
+
+@app.get("/norteador/{documento_id}/{ano_escolaridade}", response_class=HTMLResponse)
+def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridade: str):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    doc = conn.execute("SELECT * FROM documentos_norteadores WHERE id = ?", (documento_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
+    pode_editar = _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade)
+
+    semanas = conn.execute(
+        "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem",
+        (doc["trimestre"], doc["ano_letivo"])
+    ).fetchall()
+    preenchidas = {r["calendario_semana_id"]: r for r in conn.execute(
+        "SELECT * FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=?",
+        (documento_id, ano_escolaridade)
+    ).fetchall()}
+    habilidades_por_semana = {}
+    for semana_id, row in preenchidas.items():
+        habs = conn.execute("""
+            SELECT h.codigo FROM documento_norteador_semana_habilidades dsh
+            JOIN habilidades_bncc h ON h.id = dsh.habilidade_id WHERE dsh.semana_id = ?
+        """, (row["id"],)).fetchall()
+        habilidades_por_semana[semana_id] = [h["codigo"] for h in habs]
+
+    # Sugestões do Referencial Curricular pra essa disciplina+ano+trimestre — mostradas
+    # como apoio, o docente escolhe o que quiser usar (04/09/2026).
+    referencial = conn.execute(
+        "SELECT * FROM referencial_curricular WHERE disciplina_id=? AND ano_escolaridade=? AND trimestre=?",
+        (doc["disciplina_id"], ano_escolaridade, doc["trimestre"])
+    ).fetchall()
+
+    # Índice de cobertura do Referencial Curricular (05/09/2026, a pedido de Felipe):
+    # mostra ao docente quanto do conteúdo estimado do trimestre já foi coberto pelas
+    # semanas preenchidas. Funciona pra qualquer disciplina, pois usa só o que já está
+    # cadastrado no Referencial Curricular daquela disciplina/ano/trimestre (seed
+    # automático ou blocos manuais em /norteador/referencial-curricular) — não tem nada
+    # específico de disciplina aqui.
+    habilidades_cobertas_geral = set()
+    for lst in habilidades_por_semana.values():
+        habilidades_cobertas_geral.update(lst)
+
+    referencial_com_habs = []
+    habilidades_referencial_geral = set()
+    for ref in referencial:
+        habs_ref = conn.execute("""
+            SELECT h.codigo, h.descricao FROM referencial_curricular_habilidades rch
+            JOIN habilidades_bncc h ON h.id = rch.habilidade_id WHERE rch.referencial_id = ?
+        """, (ref["id"],)).fetchall()
+        codigos_ref = [h["codigo"] for h in habs_ref]
+        habilidades_referencial_geral.update(codigos_ref)
+        referencial_com_habs.append((ref, habs_ref, codigos_ref))
+    conn.close()
+
+    sugestoes_html = ""
+    linhas_cobertura = ""
+    for ref, habs_ref, codigos_ref in referencial_com_habs:
+        habs_str = ", ".join(h["codigo"] for h in habs_ref)
+        objetos_html = "<br>".join(f"• {linha}" for linha in ref["objetos_conhecimento"].split("\n"))
+        sugestoes_html += f"""
+        <div style="margin-bottom:10px; padding:10px; background:var(--bg-subtle); border-radius:6px; font-size:12px;">
+            <strong>{ref["unidade_tematica"]}</strong><br>
+            <span style="color:var(--text-muted);">{objetos_html}</span><br>
+            <span style="color:var(--accent); font-weight:600;">{habs_str}</span>
+        </div>"""
+
+        cobertas_dessa_unidade = [c for c in codigos_ref if c in habilidades_cobertas_geral]
+        pendentes_dessa_unidade = [c for c in codigos_ref if c not in habilidades_cobertas_geral]
+        if not codigos_ref:
+            status_label, status_cor = "— sem habilidades —", "var(--text-muted)"
+        elif not cobertas_dessa_unidade:
+            status_label, status_cor = "não iniciado", "var(--red)"
+        elif not pendentes_dessa_unidade:
+            status_label, status_cor = "completo", "var(--green)"
+        else:
+            status_label, status_cor = "parcial", "var(--orange)"
+        pendentes_str = ", ".join(pendentes_dessa_unidade) if pendentes_dessa_unidade else "—"
+        linhas_cobertura += f"""<tr>
+            <td style="padding:6px;">{ref["unidade_tematica"]}</td>
+            <td style="padding:6px; text-align:center;">{len(cobertas_dessa_unidade)}/{len(codigos_ref)}</td>
+            <td style="padding:6px; color:{status_cor}; font-weight:600;">{status_label}</td>
+            <td style="padding:6px; font-size:11px; color:var(--text-muted);">{pendentes_str}</td>
+        </tr>"""
+
+    if not sugestoes_html:
+        sugestoes_html = '<p style="font-size:12px; color:var(--text-muted);">Nenhum Referencial Curricular cadastrado ainda pra essa disciplina/ano/trimestre.</p>'
+
+    total_referencial = len(habilidades_referencial_geral)
+    cobertas_do_referencial = len(habilidades_cobertas_geral & habilidades_referencial_geral)
+    extras_fora_referencial = habilidades_cobertas_geral - habilidades_referencial_geral
+    if total_referencial > 0:
+        percentual_cobertura = round(100 * cobertas_do_referencial / total_referencial)
+        cor_barra = "var(--red)" if percentual_cobertura < 34 else ("var(--orange)" if percentual_cobertura < 75 else "var(--green)")
+        aviso_extras = (
+            f'<p style="font-size:11px; color:var(--text-muted); margin:6px 0 0;">+ {len(extras_fora_referencial)} habilidade(s) planejada(s) que não estão no Referencial Curricular cadastrado ({", ".join(sorted(extras_fora_referencial))}).</p>'
+            if extras_fora_referencial else ""
+        )
+        indice_cobertura_html = f"""
+        <div class="card" style="padding:16px; margin-bottom:16px;">
+            <h3 style="margin-top:0; font-size:14px;">📊 Cobertura do conteúdo estimado do trimestre</h3>
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+                <div style="flex:1; background:var(--bg-subtle); border-radius:6px; height:16px; overflow:hidden;">
+                    <div style="width:{percentual_cobertura}%; background:{cor_barra}; height:100%;"></div>
+                </div>
+                <strong style="white-space:nowrap;">{percentual_cobertura}%</strong>
+            </div>
+            <p style="font-size:12px; color:var(--text-muted); margin:0;">{cobertas_do_referencial} de {total_referencial} habilidade(s) do Referencial Curricular já aparecem no planejamento semanal.</p>
+            {aviso_extras}
+            <details style="margin-top:10px;">
+                <summary style="cursor:pointer; font-size:12px; font-weight:600;">Ver cobertura por unidade temática</summary>
+                <table style="width:100%; border-collapse:collapse; font-size:12px; margin-top:8px;">
+                    <thead><tr style="background:var(--bg-subtle);">
+                        <th style="padding:6px; text-align:left;">Unidade temática</th>
+                        <th style="padding:6px;">Habilidades</th>
+                        <th style="padding:6px; text-align:left;">Status</th>
+                        <th style="padding:6px; text-align:left;">Pendentes</th>
+                    </tr></thead>
+                    <tbody>{linhas_cobertura}</tbody>
+                </table>
+            </details>
+        </div>"""
+    else:
+        indice_cobertura_html = ""
+
+    linhas_form = ""
+    for s in semanas:
+        r = preenchidas.get(s["id"])
+        habs_atual = ", ".join(habilidades_por_semana.get(s["id"], []))
+        objeto_atual = r["objeto_conhecimento"] if r else ""
+        objetivo_atual = r["objetivo_aprendizagem"] if r else ""
+        atividade_atual = r["atividade"] if r else ""
+        disabled = "" if pode_editar else "disabled"
+        linhas_form += f"""
+        <tr>
+            <td style="padding:6px; font-weight:600; vertical-align:top; white-space:nowrap;">{s["label"]}{f'<div style="font-size:10px; color:var(--text-muted); font-weight:400;">{s["nota"]}</div>' if s["nota"] else ""}</td>
+            <td style="padding:6px; vertical-align:top;"><input type="text" name="hab_{s["id"]}" value="{habs_atual}" placeholder="EF69AR01, EF69AR02" style="width:130px; margin:0;" {disabled}></td>
+            <td style="padding:6px; vertical-align:top;"><textarea name="obj_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{objeto_atual}</textarea></td>
+            <td style="padding:6px; vertical-align:top;"><textarea name="objetivo_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{objetivo_atual}</textarea></td>
+            <td style="padding:6px; vertical-align:top;"><textarea name="ativ_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{atividade_atual}</textarea></td>
+        </tr>"""
+
+    aviso_sem_permissao = "" if pode_editar else '<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-bottom:14px;">Você está vendo esse planejamento, mas só quem está atribuído como docente responsável desse ano (ou admin/gestão) pode editar.</div>'
+    botao_salvar = '<button type="submit" class="btn btn-primary">Salvar planejamento</button>' if pode_editar else ""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🧭 Planejamento — {ano_escolaridade}</h1>
+        </div>
+        {aviso_sem_permissao}
+        {indice_cobertura_html}
+        <details style="margin-bottom:16px;">
+            <summary style="cursor:pointer; font-weight:600; font-size:13px;">📚 Sugestões do Referencial Curricular (clique pra ver)</summary>
+            <div style="margin-top:10px;">{sugestoes_html}</div>
+        </details>
+        <form method="post" action="/norteador/{documento_id}/{ano_escolaridade}">
+            <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:12px; min-width:900px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px; text-align:left;">Semana</th>
+                    <th style="padding:6px; text-align:left;">Habilidade(s) BNCC</th>
+                    <th style="padding:6px; text-align:left;">Objeto do conhecimento</th>
+                    <th style="padding:6px; text-align:left;">Objetivo de aprendizagem</th>
+                    <th style="padding:6px; text-align:left;">Atividade</th>
+                </tr></thead>
+                <tbody>{linhas_form if linhas_form else '<tr><td colspan="5" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma semana cadastrada no calendário desse trimestre ainda.</td></tr>'}</tbody>
+            </table>
+            </div>
+            <div class="page-actions" style="margin-top:14px;">
+                {botao_salvar}
+                <a href="/norteador/{documento_id}" class="btn">Voltar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Planejamento", content, active="norteador"))
+
+
+@app.post("/norteador/{documento_id}/{ano_escolaridade}")
+async def salvar_norteador_ano(request: Request, documento_id: int, ano_escolaridade: str):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    if not _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade):
+        conn.close()
+        return RedirectResponse(f"/norteador/{documento_id}/{ano_escolaridade}", status_code=303)
+
+    doc = conn.execute("SELECT * FROM documentos_norteadores WHERE id = ?", (documento_id,)).fetchone()
+    semanas = conn.execute(
+        "SELECT id FROM calendario_semanas WHERE trimestre=? AND ano_letivo=?", (doc["trimestre"], doc["ano_letivo"])
+    ).fetchall()
+
+    form = await request.form()
+    for s in semanas:
+        sid = s["id"]
+        objeto = (form.get(f"obj_{sid}") or "").strip()
+        objetivo = (form.get(f"objetivo_{sid}") or "").strip()
+        atividade = (form.get(f"ativ_{sid}") or "").strip()
+        habs_texto = (form.get(f"hab_{sid}") or "").strip()
+
+        existente = conn.execute(
+            "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
+            (documento_id, ano_escolaridade, sid)
+        ).fetchone()
+        if existente:
+            semana_row_id = existente["id"]
+            conn.execute("""UPDATE documento_norteador_semanas SET objeto_conhecimento=?, objetivo_aprendizagem=?,
+                             atividade=?, atualizado_por_professor_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                         (objeto or None, objetivo or None, atividade or None, prof["id"], semana_row_id))
+        else:
+            cur = conn.execute("""INSERT INTO documento_norteador_semanas
+                (documento_id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem, atividade, atualizado_por_professor_id, atualizado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (documento_id, ano_escolaridade, sid, objeto or None, objetivo or None, atividade or None, prof["id"]))
+            semana_row_id = cur.lastrowid
+
+        conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id = ?", (semana_row_id,))
+        codigos = [c.strip().upper() for c in habs_texto.split(",") if c.strip()]
+        for codigo in codigos:
+            hab = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+            if not hab:
+                cur2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, None))
+                hab_id = cur2.lastrowid
+            else:
+                hab_id = hab["id"]
+            conn.execute("INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)", (semana_row_id, hab_id))
+
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/{documento_id}/{ano_escolaridade}", status_code=303)
+
+
+
 @app.get("/login", response_class=HTMLResponse)
 def pagina_login(request: Request, next: str = "/", erro: str = ""):
     prof = get_current_professor(request)
@@ -3122,6 +5278,9 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Gestão de tarefas") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
+                <div class="sidebar-section">Documento Norteador</div>
+                {nav_item("/norteador", "norteador", "🧭", "Meus Documentos Norteadores") if professor else ""}
+                {nav_item("/norteador/calendario", "norteador-calendario", "📅", "Calendário do Trimestre") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 <div class="sidebar-section">Análises pedagógicas</div>
                 {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
                 {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Mapa de notas") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma")) if professor else ""}
@@ -3492,6 +5651,7 @@ def home(request: Request):
                 ("📈", "Análises", "/analises-pedagogicas", True),
                 ("📊", "Dashboard Pedagógico", "/boletim/dashboard", True),
                 ("🖼️", "Carômetro", "/carometro", True),
+                ("🧭", "Documento Norteador", "/norteador", True),
             ]),
             ("Banco", "#16a34a", [
                 ("📚", "Disciplinas", "/disciplinas", is_admin),
