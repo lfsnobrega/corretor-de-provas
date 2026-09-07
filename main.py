@@ -4337,10 +4337,15 @@ def listar_norteadores(request: Request):
     if not docs:
         linhas = '<tr><td colspan="4" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum Documento Norteador ainda.</td></tr>'
     else:
+        is_gestao_listagem = bool(prof.get("is_admin") or prof.get("is_gestor"))
+        botoes_gestao = (lambda d: f"""
+            <a href="/norteador/{d["id"]}/editar" class="btn" style="padding:2px 8px; font-size:11px;">✏️</a>
+            <form method="post" action="/norteador/{d["id"]}/excluir" style="display:inline;" onsubmit="return confirm('Excluir esse Documento Norteador inteiro? Isso apaga TODO o planejamento semanal já preenchido nele, em todos os anos. Essa ação não pode ser desfeita.');"><button type="submit" class="btn" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>
+        """) if is_gestao_listagem else (lambda d: "")
         linhas = "".join(f"""<tr>
             <td style="padding:8px;">{d["disciplina_nome"]}</td>
             <td style="padding:8px; text-align:center;">{d["trimestre"]}º Trimestre {d["ano_letivo"]}</td>
-            <td style="padding:8px;"><a href="/norteador/{d["id"]}" class="btn" style="padding:4px 10px; font-size:12px;">Abrir</a></td>
+            <td style="padding:8px; white-space:nowrap;"><a href="/norteador/{d["id"]}" class="btn" style="padding:4px 10px; font-size:12px;">Abrir</a> {botoes_gestao(d)}</td>
         </tr>""" for d in docs)
 
     novo_btn = '<a href="/norteador/novo" class="btn btn-primary">+ Novo Documento Norteador</a>' if (prof.get("is_admin") or prof.get("is_gestor")) else ""
@@ -4515,6 +4520,12 @@ def ver_norteador(request: Request, documento_id: int):
         </div>"""
 
     editar_btn = f'<a href="/norteador/{documento_id}/editar" class="btn">✏️ Editar documento (docentes/orientações)</a>' if is_gestao else ""
+    excluir_btn = (
+        f'''<form method="post" action="/norteador/{documento_id}/excluir" style="display:inline;" onsubmit="return confirm('Excluir esse Documento Norteador inteiro? Isso apaga TODO o planejamento semanal já preenchido nele, em todos os anos. Essa ação não pode ser desfeita.');">
+            <button type="submit" class="btn" style="color:var(--red); border-color:var(--red);">🗑️ Excluir documento</button>
+        </form>'''
+        if is_gestao else ""
+    )
     content = f"""
         <div class="page-header">
             <h1>🧭 {doc["disciplina_nome"]} — {doc["trimestre"]}º Trimestre {doc["ano_letivo"]}</h1>
@@ -4523,6 +4534,7 @@ def ver_norteador(request: Request, documento_id: int):
         <div class="page-actions" style="margin-bottom:16px;">
             <a href="/norteador/{documento_id}/documento" class="btn" target="_blank">🖨️ Ver documento formatado</a>
             {editar_btn}
+            {excluir_btn}
         </div>
         {blocos_ano_html}
     """
@@ -4620,6 +4632,29 @@ async def salvar_edicao_norteador(request: Request, documento_id: int,
     conn.commit()
     conn.close()
     return RedirectResponse(f"/norteador/{documento_id}", status_code=303)
+
+
+@app.post("/norteador/{documento_id}/excluir")
+def excluir_documento_norteador(request: Request, documento_id: int):
+    """Exclui o Documento Norteador inteiro e todo o planejamento semanal ligado a ele.
+    SQLite não está com foreign_keys=ON nesta app, então o CASCADE do schema não roda
+    sozinho — limpa manualmente na ordem certa (05/09/2026)."""
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    semana_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM documento_norteador_semanas WHERE documento_id = ?", (documento_id,)
+    ).fetchall()]
+    if semana_ids:
+        placeholders = ",".join("?" * len(semana_ids))
+        conn.execute(f"DELETE FROM documento_norteador_semana_habilidades WHERE semana_id IN ({placeholders})", semana_ids)
+    conn.execute("DELETE FROM documento_norteador_semanas WHERE documento_id = ?", (documento_id,))
+    conn.execute("DELETE FROM documento_norteador_docentes WHERE documento_id = ?", (documento_id,))
+    conn.execute("DELETE FROM documentos_norteadores WHERE id = ?", (documento_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/norteador", status_code=303)
 
 
 @app.get("/norteador/{documento_id}/documento", response_class=HTMLResponse)
@@ -4766,6 +4801,13 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem",
         (doc["trimestre"], doc["ano_letivo"])
     ).fetchall()
+    alertas = conn.execute(
+        "SELECT * FROM calendario_alertas WHERE trimestre=? AND ano_letivo=? ORDER BY id",
+        (doc["trimestre"], doc["ano_letivo"])
+    ).fetchall()
+    alertas_por_semana = {}
+    for al in alertas:
+        alertas_por_semana.setdefault(al["ordem_apos_semana_id"], []).append(al["texto"])
     preenchidas = {r["calendario_semana_id"]: r for r in conn.execute(
         "SELECT * FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=?",
         (documento_id, ano_escolaridade)
@@ -4887,6 +4929,8 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         indice_cobertura_html = ""
 
     linhas_form = ""
+    for al_texto in alertas_por_semana.get(None, []):
+        linhas_form += f'<tr><td colspan="5" style="background:var(--orange-bg); padding:6px 10px; font-size:12px;">⚠ {html.escape(al_texto)}</td></tr>'
     for s in semanas:
         r = preenchidas.get(s["id"])
         habs_atual = ", ".join(habilidades_por_semana.get(s["id"], []))
@@ -4913,6 +4957,8 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
             <td style="padding:6px; vertical-align:top;"><textarea name="objetivo_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{objetivo_atual}</textarea></td>
             <td style="padding:6px; vertical-align:top;"><textarea name="ativ_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{atividade_atual}</textarea></td>
         </tr>"""
+        for al_texto in alertas_por_semana.get(s["id"], []):
+            linhas_form += f'<tr><td colspan="5" style="background:var(--orange-bg); padding:6px 10px; font-size:12px;">⚠ {html.escape(al_texto)}</td></tr>'
 
     # JS compartilhado: um widget de busca/autocomplete de habilidades BNCC por linha
     # (mesma dinâmica do cadastro de questões), que ao escolher a habilidade também
@@ -11174,7 +11220,7 @@ def admin_usuarios(request: Request):
         elif not u["is_admin"] and not u["is_gestor"]: perfil.append('<span style="background:var(--bg-subtle); color:var(--text-muted); font-size:10px; padding:1px 6px; border-radius:3px;">PROFESSOR</span>')
         acesso = (u["ultimo_acesso"] or "")[:16].replace("T", " ")
         is_eu = u["id"] == prof["id"]
-        acoes = ""
+        acoes = f'<a href="/admin/usuarios/{u["id"]}/editar-nome" class="btn" style="padding:4px 10px; font-size:11px;">✏️ Nome</a>'
         if not is_eu:
             if us == "pendente":
                 acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Aprovar</button></form>'
@@ -11207,6 +11253,49 @@ def admin_usuarios(request: Request):
                 <th style="padding:10px 8px; text-align:left;">Ações</th></tr></thead>
             <tbody>{rows}</tbody></table>"""
     return render_page("Usuários", body, active="")
+
+
+@app.get("/admin/usuarios/{usuario_id}/editar-nome", response_class=HTMLResponse)
+def form_editar_nome_usuario(request: Request, usuario_id: int):
+    """Correção de nomes cadastrados errado (05/09/2026, a pedido de Felipe) — não mexe
+    em e-mail/matrícula/perfil, só no nome de exibição."""
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return HTMLResponse(render_page("Acesso negado", '<div class="empty">Apenas administradores.</div>', active=""), status_code=403)
+    conn = get_db()
+    u = conn.execute("SELECT id, nome, email FROM professores WHERE id = ?", (usuario_id,)).fetchone()
+    conn.close()
+    if not u:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Usuário não encontrado.</div>', active=""))
+    body = f"""
+        <div class="page-header">
+            <h1>✏️ Editar nome do usuário</h1>
+            <p class="subtitle">{u["email"] or "sem e-mail (login local)"}</p>
+        </div>
+        <form method="post" action="/admin/usuarios/{usuario_id}/editar-nome">
+            <label>Nome<input type="text" name="nome" required value="{u["nome"]}"></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar</button>
+                <a href="/admin/usuarios" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Editar nome", body, active="")
+
+
+@app.post("/admin/usuarios/{usuario_id}/editar-nome")
+def salvar_edicao_nome_usuario(request: Request, usuario_id: int, nome: str = Form(...)):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/", status_code=303)
+    nome = nome.strip()
+    if not nome:
+        return RedirectResponse(f"/admin/usuarios/{usuario_id}/editar-nome", status_code=303)
+    conn = get_db()
+    conn.execute("UPDATE professores SET nome = ? WHERE id = ?", (nome, usuario_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/usuarios", status_code=303)
 
 
 @app.get("/admin/usuarios/novo-local", response_class=HTMLResponse)
