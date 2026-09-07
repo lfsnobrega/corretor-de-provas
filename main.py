@@ -3831,6 +3831,7 @@ def calendario_trimestre(request: Request, trimestre: Optional[int] = None, ano:
             <td style="padding:6px 10px; font-size:12px; color:var(--text-muted);">{s["nota"] or "—"}</td>
             <td style="padding:6px 10px; text-align:center;">{s["ordem"]}</td>
             <td style="padding:6px 10px;">
+                <a href="/norteador/calendario/semana/{s["id"]}/editar" class="btn" style="padding:2px 8px; font-size:11px;">✏️</a>
                 <form method="post" action="/norteador/calendario/semana/{s["id"]}/excluir" style="display:inline;" onsubmit="return confirm('Excluir essa semana? Isso também apaga o planejamento já preenchido nela em todas as disciplinas.');"><button type="submit" class="btn" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>
             </td>
         </tr>"""
@@ -3922,6 +3923,62 @@ def excluir_semana_calendario(request: Request, semana_id: int):
     if s:
         return RedirectResponse(f"/norteador/calendario?trimestre={s['trimestre']}&ano={s['ano_letivo']}", status_code=303)
     return RedirectResponse("/norteador/calendario", status_code=303)
+
+
+@app.get("/norteador/calendario/semana/{semana_id}/editar", response_class=HTMLResponse)
+def form_editar_semana_calendario(request: Request, semana_id: int):
+    """Corrige uma semana cadastrada no trimestre errado sem apagar o planejamento já
+    preenchido nela (editar em vez de excluir+recriar preserva o id da semana, que é
+    referenciado por documento_norteador_semanas — 05/09/2026, a pedido de Felipe)."""
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    s = conn.execute("SELECT * FROM calendario_semanas WHERE id = ?", (semana_id,)).fetchone()
+    conn.close()
+    if not s:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Semana não encontrada.</div>', active="norteador-calendario"))
+
+    tri_opts = "".join(
+        f'<option value="{t}"{" selected" if s["trimestre"]==t else ""}>{t}º Trimestre</option>' for t in (1, 2, 3)
+    )
+    content = f"""
+        <div class="page-header">
+            <h1>✏️ Editar semana do calendário</h1>
+            <p class="subtitle">Corrigir trimestre/ano aqui preserva o planejamento já preenchido nessa semana em todas as disciplinas — diferente de excluir e recriar.</p>
+        </div>
+        <form method="post" action="/norteador/calendario/semana/{semana_id}/editar">
+            <label>Rótulo da semana<input type="text" name="label" required value="{s["label"]}"></label>
+            <label>Nota (opcional)<input type="text" name="nota" value="{s["nota"] or ""}"></label>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px;">
+                <label>Trimestre<select name="trimestre" required>{tri_opts}</select></label>
+                <label>Ano letivo<input type="number" name="ano_letivo" required value="{s["ano_letivo"]}"></label>
+                <label>Ordem<input type="number" name="ordem" required value="{s["ordem"]}"></label>
+            </div>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar</button>
+                <a href="/norteador/calendario?trimestre={s['trimestre']}&ano={s['ano_letivo']}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Editar semana", content, active="norteador-calendario"))
+
+
+@app.post("/norteador/calendario/semana/{semana_id}/editar")
+def salvar_edicao_semana_calendario(request: Request, semana_id: int, label: str = Form(...),
+                                     nota: str = Form(""), trimestre: int = Form(...),
+                                     ano_letivo: int = Form(...), ordem: int = Form(...)):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    conn.execute(
+        "UPDATE calendario_semanas SET label=?, nota=?, trimestre=?, ano_letivo=?, ordem=? WHERE id=?",
+        (label.strip(), nota.strip() or None, trimestre, ano_letivo, ordem, semana_id)
+    )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/calendario?trimestre={trimestre}&ano={ano_letivo}", status_code=303)
 
 
 @app.post("/norteador/calendario/alerta/novo")
@@ -4406,6 +4463,7 @@ def ver_norteador(request: Request, documento_id: int):
     prof = get_current_professor(request)
     if not prof:
         return RedirectResponse("/login", status_code=303)
+    is_gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
 
     conn = get_db()
     doc = conn.execute("""
@@ -4420,7 +4478,26 @@ def ver_norteador(request: Request, documento_id: int):
         SELECT dnd.ano_escolaridade, p.nome FROM documento_norteador_docentes dnd
         LEFT JOIN professores p ON p.id = dnd.professor_id WHERE dnd.documento_id = ? ORDER BY dnd.ano_escolaridade
     """, (documento_id,)).fetchall()
-    conn.close()
+
+    # Acesso (05/09/2026): gestão/admin abre qualquer documento. Professor só abre os
+    # documentos em que foi designado (em pelo menos um ano de escolaridade) na criação
+    # ou edição do Documento Norteador.
+    if not is_gestao:
+        meu_vinculo = conn.execute(
+            "SELECT DISTINCT ano_escolaridade FROM documento_norteador_docentes WHERE documento_id=? AND professor_id=?",
+            (documento_id, prof["id"])
+        ).fetchall()
+        conn.close()
+        anos_designados_professor = {r["ano_escolaridade"] for r in meu_vinculo}
+        if not anos_designados_professor:
+            return HTMLResponse(render_page(
+                "Sem acesso",
+                '<div class="empty">Você não foi designado como docente responsável em nenhum ano desse Documento Norteador. '
+                'Fale com a gestão se acha que isso é um engano.</div><a href="/norteador" class="btn">Voltar</a>',
+                active="norteador"
+            ))
+    else:
+        conn.close()
 
     docentes_por_ano = {}
     for d in docentes:
@@ -4428,6 +4505,8 @@ def ver_norteador(request: Request, documento_id: int):
 
     blocos_ano_html = ""
     for a in ANOS:
+        if not is_gestao and a not in anos_designados_professor:
+            continue  # professor não vê anos em que não foi designado
         nomes = ", ".join(docentes_por_ano.get(a, [])) or "— ninguém atribuído ainda —"
         blocos_ano_html += f"""
         <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px;">
@@ -4435,6 +4514,7 @@ def ver_norteador(request: Request, documento_id: int):
             <a href="/norteador/{documento_id}/{a}" class="btn btn-primary">Abrir planejamento</a>
         </div>"""
 
+    editar_btn = f'<a href="/norteador/{documento_id}/editar" class="btn">✏️ Editar documento (docentes/orientações)</a>' if is_gestao else ""
     content = f"""
         <div class="page-header">
             <h1>🧭 {doc["disciplina_nome"]} — {doc["trimestre"]}º Trimestre {doc["ano_letivo"]}</h1>
@@ -4442,10 +4522,104 @@ def ver_norteador(request: Request, documento_id: int):
         </div>
         <div class="page-actions" style="margin-bottom:16px;">
             <a href="/norteador/{documento_id}/documento" class="btn" target="_blank">🖨️ Ver documento formatado</a>
+            {editar_btn}
         </div>
         {blocos_ano_html}
     """
     return HTMLResponse(render_page("Documento Norteador", content, active="norteador"))
+
+
+@app.get("/norteador/{documento_id}/editar", response_class=HTMLResponse)
+def form_editar_norteador(request: Request, documento_id: int):
+    """Edição do Documento Norteador: adicionar/remover docentes por ano e mudar
+    orientações (aulas semanais, planejamento). Disciplina/trimestre/ano letivo não são
+    editáveis aqui pra não desalinhar o planejamento semanal já preenchido, que é
+    referenciado pelo calendário daquele trimestre (05/09/2026)."""
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    conn = get_db()
+    doc = conn.execute("""
+        SELECT dn.*, d.nome AS disciplina_nome FROM documentos_norteadores dn
+        JOIN disciplinas d ON d.id = dn.disciplina_id WHERE dn.id = ?
+    """, (documento_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
+
+    docentes_atuais = conn.execute(
+        "SELECT ano_escolaridade, professor_id FROM documento_norteador_docentes WHERE documento_id = ?",
+        (documento_id,)
+    ).fetchall()
+    professores = conn.execute("SELECT id, nome FROM professores WHERE status='ativo' ORDER BY nome").fetchall()
+    conn.close()
+
+    ids_por_ano = {}
+    for d in docentes_atuais:
+        ids_por_ano.setdefault(d["ano_escolaridade"], set()).add(d["professor_id"])
+
+    blocos_ano = ""
+    for a in ANOS:
+        selecionados = ids_por_ano.get(a, set())
+        opts_prof = "".join(
+            f'<option value="{p["id"]}"{" selected" if p["id"] in selecionados else ""}>{p["nome"]}</option>'
+            for p in professores
+        )
+        blocos_ano += f"""
+        <div style="margin-bottom:10px;">
+            <label style="margin:0;">Docente(s) responsável(is) — {a}
+                <select name="docentes_{a}" multiple size="4">{opts_prof}</select>
+            </label>
+        </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>✏️ Editar Documento Norteador</h1>
+            <p class="subtitle">{doc["disciplina_nome"]} — {doc["trimestre"]}º Trimestre {doc["ano_letivo"]}. Segure Ctrl (ou Cmd no Mac) pra marcar mais de um docente por ano.</p>
+        </div>
+        <form action="/norteador/{documento_id}/editar" method="post">
+            <label>Aulas semanais
+                <input type="number" name="aulas_semanais" min="1" value="{doc["aulas_semanais"] or ""}">
+            </label>
+            <label>Planejamento (nota geral)
+                <textarea name="planejamento_nota" rows="2">{doc["planejamento_nota"] or ""}</textarea>
+            </label>
+            <h3 style="font-size:13px; text-transform:uppercase; color:var(--text-muted); margin-top:18px;">Docentes por ano de escolaridade</h3>
+            {blocos_ano}
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar alterações</button>
+                <a href="/norteador/{documento_id}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Editar Documento Norteador", content, active="norteador"))
+
+
+@app.post("/norteador/{documento_id}/editar")
+async def salvar_edicao_norteador(request: Request, documento_id: int,
+                                   aulas_semanais: Optional[int] = Form(None),
+                                   planejamento_nota: str = Form("")):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    form = await request.form()
+    conn = get_db()
+    conn.execute(
+        "UPDATE documentos_norteadores SET aulas_semanais=?, planejamento_nota=? WHERE id=?",
+        (aulas_semanais, planejamento_nota.strip() or None, documento_id)
+    )
+    conn.execute("DELETE FROM documento_norteador_docentes WHERE documento_id = ?", (documento_id,))
+    for a in ANOS:
+        ids_selecionados = form.getlist(f"docentes_{a}")
+        for pid in ids_selecionados:
+            if pid.strip().isdigit():
+                conn.execute("INSERT INTO documento_norteador_docentes (documento_id, ano_escolaridade, professor_id) VALUES (?, ?, ?)",
+                             (documento_id, a, int(pid)))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/norteador/{documento_id}", status_code=303)
 
 
 @app.get("/norteador/{documento_id}/documento", response_class=HTMLResponse)
@@ -4577,6 +4751,16 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         conn.close()
         return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
     pode_editar = _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade)
+    if not pode_editar:
+        # 05/09/2026: professor sem vínculo nesse ano não pode nem visualizar, só quem
+        # foi designado (ou gestão/admin, que _pode_editar_norteador já libera).
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem acesso",
+            f'<div class="empty">Você não foi designado como docente responsável do {ano_escolaridade} nesse Documento Norteador. '
+            f'Fale com a gestão se acha que isso é um engano.</div><a href="/norteador/{documento_id}" class="btn">Voltar</a>',
+            active="norteador"
+        ))
 
     semanas = conn.execute(
         "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem",
@@ -4656,6 +4840,15 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     if not sugestoes_html:
         sugestoes_html = '<p style="font-size:12px; color:var(--text-muted);">Nenhum Referencial Curricular cadastrado ainda pra essa disciplina/ano/trimestre.</p>'
 
+    # Mapa habilidade -> objetos de conhecimento do Referencial Curricular (primeira
+    # ocorrência), usado pelo JS abaixo pra autopreencher a coluna "Objeto do
+    # conhecimento" assim que o docente escolhe a habilidade na busca (05/09/2026).
+    objeto_por_habilidade = {}
+    for ref, habs_ref, codigos_ref in referencial_com_habs:
+        for c in codigos_ref:
+            if c not in objeto_por_habilidade:
+                objeto_por_habilidade[c] = ref["objetos_conhecimento"]
+
     total_referencial = len(habilidades_referencial_geral)
     cobertas_do_referencial = len(habilidades_cobertas_geral & habilidades_referencial_geral)
     extras_fora_referencial = habilidades_cobertas_geral - habilidades_referencial_geral
@@ -4701,14 +4894,122 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         objetivo_atual = r["objetivo_aprendizagem"] if r else ""
         atividade_atual = r["atividade"] if r else ""
         disabled = "" if pode_editar else "disabled"
+        busca_html = (
+            f'<input type="search" class="bncc-row-search" placeholder="Código ou palavra-chave" style="margin:0; font-size:11px; padding:3px 6px;">'
+            if pode_editar else ""
+        )
+        habilidade_widget = f"""
+            <div class="bncc-row-widget" data-semana="{s["id"]}">
+                <input type="hidden" name="hab_{s["id"]}" class="bncc-row-hidden" value="{habs_atual}">
+                <div class="bncc-row-chips" style="display:flex; flex-wrap:wrap; gap:4px; min-height:20px; margin-bottom:4px;"></div>
+                {busca_html}
+                <div class="bncc-row-results" style="margin-top:4px;"></div>
+            </div>"""
         linhas_form += f"""
         <tr>
             <td style="padding:6px; font-weight:600; vertical-align:top; white-space:nowrap;">{s["label"]}{f'<div style="font-size:10px; color:var(--text-muted); font-weight:400;">{s["nota"]}</div>' if s["nota"] else ""}</td>
-            <td style="padding:6px; vertical-align:top;"><input type="text" name="hab_{s["id"]}" value="{habs_atual}" placeholder="EF69AR01, EF69AR02" style="width:130px; margin:0;" {disabled}></td>
+            <td style="padding:6px; vertical-align:top; min-width:170px;">{habilidade_widget}</td>
             <td style="padding:6px; vertical-align:top;"><textarea name="obj_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{objeto_atual}</textarea></td>
             <td style="padding:6px; vertical-align:top;"><textarea name="objetivo_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{objetivo_atual}</textarea></td>
             <td style="padding:6px; vertical-align:top;"><textarea name="ativ_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{atividade_atual}</textarea></td>
         </tr>"""
+
+    # JS compartilhado: um widget de busca/autocomplete de habilidades BNCC por linha
+    # (mesma dinâmica do cadastro de questões), que ao escolher a habilidade também
+    # preenche a coluna "Objeto do conhecimento" com o que está cadastrado no
+    # Referencial Curricular pra essa habilidade — sem travar o campo, o docente pode
+    # reescrever livremente (05/09/2026, a pedido de Felipe).
+    objeto_por_habilidade_json = json.dumps(objeto_por_habilidade, ensure_ascii=False)
+    js_multi_bncc = (
+        "\n<script>\n(function() {\n"
+        "    var OBJETO_POR_HABILIDADE = " + objeto_por_habilidade_json + ";\n"
+        "    var DISC_ID = " + str(doc["disciplina_id"]) + ";\n"
+        "    document.querySelectorAll('.bncc-row-widget').forEach(function(container) {\n"
+        "        var hiddenInput = container.querySelector('.bncc-row-hidden');\n"
+        "        var chipsDiv = container.querySelector('.bncc-row-chips');\n"
+        "        var searchInput = container.querySelector('.bncc-row-search');\n"
+        "        var resultsDiv = container.querySelector('.bncc-row-results');\n"
+        "        var sid = container.getAttribute('data-semana');\n"
+        "        var objetoArea = document.querySelector('textarea[name=\"obj_' + sid + '\"]');\n"
+        "        var selecionados = [];\n"
+        "        function renderChips() {\n"
+        "            chipsDiv.innerHTML = '';\n"
+        "            selecionados.forEach(function(cod) {\n"
+        "                var chip = document.createElement('span');\n"
+        "                chip.style.cssText = 'display:inline-flex;align-items:center;gap:3px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:1px 6px;font-size:11px;font-weight:600;';\n"
+        "                chip.innerHTML = cod + ' <button type=\"button\" style=\"background:none;border:none;cursor:pointer;color:var(--accent);font-size:12px;padding:0;line-height:1;\" title=\"Remover\">\\xd7</button>';\n"
+        "                chip.querySelector('button').addEventListener('click', function() {\n"
+        "                    if (!searchInput) return;\n"
+        "                    selecionados = selecionados.filter(function(c){return c!==cod;});\n"
+        "                    renderChips();\n"
+        "                });\n"
+        "                chipsDiv.appendChild(chip);\n"
+        "            });\n"
+        "            hiddenInput.value = selecionados.join(', ');\n"
+        "        }\n"
+        "        function preencherObjeto(cod) {\n"
+        "            if (!objetoArea) return;\n"
+        "            var texto = OBJETO_POR_HABILIDADE[cod];\n"
+        "            if (!texto) return;\n"
+        "            var atual = objetoArea.value;\n"
+        "            var linhasAtuais = atual.split('\\n');\n"
+        "            texto.split('\\n').forEach(function(l) {\n"
+        "                if (l && linhasAtuais.indexOf(l) < 0) { atual = atual ? (atual + '\\n' + l) : l; linhasAtuais.push(l); }\n"
+        "            });\n"
+        "            objetoArea.value = atual;\n"
+        "        }\n"
+        "        function adicionar(cod) {\n"
+        "            cod = cod.trim().toUpperCase();\n"
+        "            if (!cod || selecionados.indexOf(cod) >= 0) return;\n"
+        "            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = ''; if (searchInput) searchInput.value = '';\n"
+        "            preencherObjeto(cod);\n"
+        "        }\n"
+        "        function buscar() {\n"
+        "            if (!searchInput) return;\n"
+        "            var q = searchInput.value.trim();\n"
+        "            if (q.length < 2) { resultsDiv.innerHTML = ''; return; }\n"
+        "            var pareceCode = /^[A-Za-z]{2}\\d{2}[A-Za-z]{2}\\d{2}/.test(q);\n"
+        "            var url = pareceCode ? '/habilidades/buscar?codigos=' + encodeURIComponent(q.toUpperCase())\n"
+        "                : '/habilidades/buscar?q=' + encodeURIComponent(q) + (DISC_ID ? '&disciplina_id=' + DISC_ID : '');\n"
+        "            fetch(url).then(function(r){return r.json();}).then(function(data) {\n"
+        "                var results = [];\n"
+        "                if (pareceCode) { Object.keys(data).forEach(function(k){if(k!=='results') results.push({codigo:k,descricao:data[k]});}); }\n"
+        "                else { results = data.results || []; }\n"
+        "                if (results.length === 0) {\n"
+        "                    if (pareceCode) {\n"
+        "                        resultsDiv.innerHTML = '<div style=\"padding:4px 6px;font-size:11px;color:var(--text-muted);\">Código não encontrado. <button type=\"button\" style=\"background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:0;text-decoration:underline;\">Adicionar mesmo assim</button></div>';\n"
+        "                        resultsDiv.querySelector('button').addEventListener('click', function(){adicionar(q);});\n"
+        "                    } else {\n"
+        "                        resultsDiv.innerHTML = '<div style=\"padding:4px 6px;font-size:11px;color:var(--text-muted);\">Nenhum resultado.</div>';\n"
+        "                    }\n"
+        "                    return;\n"
+        "                }\n"
+        "                var htmlOut = '';\n"
+        "                results.forEach(function(r) {\n"
+        "                    htmlOut += '<div data-cod=\"' + r.codigo + '\" style=\"padding:4px 6px;border:1px solid var(--border);border-radius:4px;margin-bottom:2px;cursor:pointer;background:var(--card);font-size:11px;\" onmouseover=\"this.style.background=\\'var(--accent-bg)\\'\" onmouseout=\"this.style.background=\\'var(--card)\\'\"><strong style=\"color:var(--accent);\">' + r.codigo + '</strong> \\xb7 ' + (r.descricao||'').replace(/</g,'&lt;') + '</div>';\n"
+        "                });\n"
+        "                resultsDiv.innerHTML = htmlOut;\n"
+        "            }).catch(function(){resultsDiv.innerHTML='';});\n"
+        "        }\n"
+        "        if (searchInput) {\n"
+        "            var _t;\n"
+        "            searchInput.addEventListener('input', function(){clearTimeout(_t); _t=setTimeout(buscar,350);});\n"
+        "            searchInput.addEventListener('keydown', function(e){if(e.key==='Enter'){e.preventDefault();buscar();}});\n"
+        "        }\n"
+        "        resultsDiv.addEventListener('click', function(e){\n"
+        "            var item = e.target.closest('[data-cod]');\n"
+        "            if (item) adicionar(item.dataset.cod);\n"
+        "        });\n"
+        "        var init = hiddenInput.value.trim();\n"
+        "        if (init) {\n"
+        "            init.split(/[,\\n]/).map(function(x){return x.trim().toUpperCase();}).filter(Boolean).forEach(function(c){\n"
+        "                if (selecionados.indexOf(c) < 0) selecionados.push(c);\n"
+        "            });\n"
+        "            renderChips();\n"
+        "        }\n"
+        "    });\n"
+        "})();\n</script>\n"
+    )
 
     aviso_sem_permissao = "" if pode_editar else '<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-bottom:14px;">Você está vendo esse planejamento, mas só quem está atribuído como docente responsável desse ano (ou admin/gestão) pode editar.</div>'
     botao_salvar = '<button type="submit" class="btn btn-primary">Salvar planejamento</button>' if pode_editar else ""
@@ -4741,6 +5042,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
                 <a href="/norteador/{documento_id}" class="btn">Voltar</a>
             </div>
         </form>
+        {js_multi_bncc}
     """
     return HTMLResponse(render_page("Planejamento", content, active="norteador"))
 
