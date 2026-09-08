@@ -4928,9 +4928,9 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     else:
         indice_cobertura_html = ""
 
-    linhas_form = ""
+    cards_form = ""
     for al_texto in alertas_por_semana.get(None, []):
-        linhas_form += f'<tr><td colspan="5" style="background:var(--orange-bg); padding:6px 10px; font-size:12px;">⚠ {html.escape(al_texto)}</td></tr>'
+        cards_form += f'<div class="norteador-alerta">⚠ {html.escape(al_texto)}</div>'
     for s in semanas:
         r = preenchidas.get(s["id"])
         habs_atual = ", ".join(habilidades_por_semana.get(s["id"], []))
@@ -4939,26 +4939,39 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         atividade_atual = r["atividade"] if r else ""
         disabled = "" if pode_editar else "disabled"
         busca_html = (
-            f'<input type="search" class="bncc-row-search" placeholder="Código ou palavra-chave" style="margin:0; font-size:11px; padding:3px 6px;">'
+            '<input type="search" class="bncc-row-search" placeholder="Digite o código (EF69EF03) ou uma palavra-chave (esporte, leitura...)">'
             if pode_editar else ""
         )
         habilidade_widget = f"""
             <div class="bncc-row-widget" data-semana="{s["id"]}">
                 <input type="hidden" name="hab_{s["id"]}" class="bncc-row-hidden" value="{habs_atual}">
-                <div class="bncc-row-chips" style="display:flex; flex-wrap:wrap; gap:4px; min-height:20px; margin-bottom:4px;"></div>
+                <div class="bncc-row-chips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:24px; margin-bottom:6px;"></div>
                 {busca_html}
-                <div class="bncc-row-results" style="margin-top:4px;"></div>
+                <div class="bncc-row-results" style="margin-top:6px;"></div>
             </div>"""
-        linhas_form += f"""
-        <tr>
-            <td style="padding:6px; font-weight:600; vertical-align:top; white-space:nowrap;">{s["label"]}{f'<div style="font-size:10px; color:var(--text-muted); font-weight:400;">{s["nota"]}</div>' if s["nota"] else ""}</td>
-            <td style="padding:6px; vertical-align:top; min-width:170px;">{habilidade_widget}</td>
-            <td style="padding:6px; vertical-align:top;"><textarea name="obj_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{objeto_atual}</textarea></td>
-            <td style="padding:6px; vertical-align:top;"><textarea name="objetivo_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{objetivo_atual}</textarea></td>
-            <td style="padding:6px; vertical-align:top;"><textarea name="ativ_{s["id"]}" rows="2" style="width:100%; margin:0;" {disabled}>{atividade_atual}</textarea></td>
-        </tr>"""
+        cards_form += f"""
+        <div class="norteador-semana-card" data-semana-card="{s["id"]}">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:12px;">
+                <h3 style="margin:0; font-size:15px;">{s["label"]}{f' <span style="font-size:11px; color:var(--text-muted); font-weight:400;">— {s["nota"]}</span>' if s["nota"] else ""}</h3>
+                <span class="autosave-status" data-status-semana="{s["id"]}" style="font-size:11px; color:var(--text-muted); white-space:nowrap;"></span>
+            </div>
+            <label style="margin-bottom:12px;">Habilidade(s) BNCC
+                {habilidade_widget}
+            </label>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+                <label>Objeto do conhecimento
+                    <textarea name="obj_{s["id"]}" rows="5" style="width:100%; margin:0;" {disabled}>{objeto_atual}</textarea>
+                </label>
+                <label>Objetivo de aprendizagem
+                    <textarea name="objetivo_{s["id"]}" rows="5" style="width:100%; margin:0;" {disabled}>{objetivo_atual}</textarea>
+                </label>
+            </div>
+            <label>Atividade
+                <textarea name="ativ_{s["id"]}" rows="3" style="width:100%; margin:0;" {disabled}>{atividade_atual}</textarea>
+            </label>
+        </div>"""
         for al_texto in alertas_por_semana.get(s["id"], []):
-            linhas_form += f'<tr><td colspan="5" style="background:var(--orange-bg); padding:6px 10px; font-size:12px;">⚠ {html.escape(al_texto)}</td></tr>'
+            cards_form += f'<div class="norteador-alerta">⚠ {html.escape(al_texto)}</div>'
 
     # JS compartilhado: um widget de busca/autocomplete de habilidades BNCC por linha
     # (mesma dinâmica do cadastro de questões), que ao escolher a habilidade também
@@ -4970,6 +4983,50 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "\n<script>\n(function() {\n"
         "    var OBJETO_POR_HABILIDADE = " + objeto_por_habilidade_json + ";\n"
         "    var DISC_ID = " + str(doc["disciplina_id"]) + ";\n"
+        "    var AUTOSAVE_URL_BASE = " + json.dumps(f"/norteador/{documento_id}/{ano_escolaridade}/semana/") + ";\n"
+        "    var PODE_EDITAR = " + ("true" if pode_editar else "false") + ";\n"
+        "\n"
+        "    function marcarStatus(sid, texto, cor) {\n"
+        "        var el = document.querySelector('[data-status-semana=\"' + sid + '\"]');\n"
+        "        if (el) { el.textContent = texto; el.style.color = cor || 'var(--text-muted)'; }\n"
+        "    }\n"
+        "\n"
+        "    function autosalvar(sid) {\n"
+        "        if (!PODE_EDITAR) return;\n"
+        "        var objetoArea = document.querySelector('textarea[name=\"obj_' + sid + '\"]');\n"
+        "        var objetivoArea = document.querySelector('textarea[name=\"objetivo_' + sid + '\"]');\n"
+        "        var ativArea = document.querySelector('textarea[name=\"ativ_' + sid + '\"]');\n"
+        "        var habInput = document.querySelector('input[name=\"hab_' + sid + '\"]');\n"
+        "        marcarStatus(sid, 'Salvando…');\n"
+        "        var body = new URLSearchParams();\n"
+        "        body.set('objeto', objetoArea ? objetoArea.value : '');\n"
+        "        body.set('objetivo', objetivoArea ? objetivoArea.value : '');\n"
+        "        body.set('atividade', ativArea ? ativArea.value : '');\n"
+        "        body.set('habilidades', habInput ? habInput.value : '');\n"
+        "        fetch(AUTOSAVE_URL_BASE + sid + '/autosave', { method: 'POST', body: body })\n"
+        "            .then(function(r) { return r.json(); })\n"
+        "            .then(function(data) {\n"
+        "                if (data.ok) { marcarStatus(sid, '✓ Salvo às ' + data.saved_at, 'var(--green)'); }\n"
+        "                else { marcarStatus(sid, '⚠ Não foi possível salvar', 'var(--red)'); }\n"
+        "            })\n"
+        "            .catch(function() { marcarStatus(sid, '⚠ Sem conexão — tente de novo', 'var(--red)'); });\n"
+        "    }\n"
+        "\n"
+        "    var timers = {};\n"
+        "    function agendarAutosave(sid) {\n"
+        "        if (!PODE_EDITAR) return;\n"
+        "        marcarStatus(sid, 'Digitando…');\n"
+        "        clearTimeout(timers[sid]);\n"
+        "        timers[sid] = setTimeout(function() { autosalvar(sid); }, 1200);\n"
+        "    }\n"
+        "\n"
+        "    document.querySelectorAll('.norteador-semana-card').forEach(function(card) {\n"
+        "        var sid = card.getAttribute('data-semana-card');\n"
+        "        card.querySelectorAll('textarea').forEach(function(ta) {\n"
+        "            ta.addEventListener('input', function() { agendarAutosave(sid); });\n"
+        "        });\n"
+        "    });\n"
+        "\n"
         "    document.querySelectorAll('.bncc-row-widget').forEach(function(container) {\n"
         "        var hiddenInput = container.querySelector('.bncc-row-hidden');\n"
         "        var chipsDiv = container.querySelector('.bncc-row-chips');\n"
@@ -4982,12 +5039,12 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "            chipsDiv.innerHTML = '';\n"
         "            selecionados.forEach(function(cod) {\n"
         "                var chip = document.createElement('span');\n"
-        "                chip.style.cssText = 'display:inline-flex;align-items:center;gap:3px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:1px 6px;font-size:11px;font-weight:600;';\n"
-        "                chip.innerHTML = cod + ' <button type=\"button\" style=\"background:none;border:none;cursor:pointer;color:var(--accent);font-size:12px;padding:0;line-height:1;\" title=\"Remover\">\\xd7</button>';\n"
+        "                chip.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;';\n"
+        "                chip.innerHTML = cod + ' <button type=\"button\" style=\"background:none;border:none;cursor:pointer;color:var(--accent);font-size:13px;padding:0;line-height:1;\" title=\"Remover\">\\xd7</button>';\n"
         "                chip.querySelector('button').addEventListener('click', function() {\n"
-        "                    if (!searchInput) return;\n"
         "                    selecionados = selecionados.filter(function(c){return c!==cod;});\n"
         "                    renderChips();\n"
+        "                    agendarAutosave(sid);\n"
         "                });\n"
         "                chipsDiv.appendChild(chip);\n"
         "            });\n"
@@ -5009,6 +5066,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "            if (!cod || selecionados.indexOf(cod) >= 0) return;\n"
         "            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = ''; if (searchInput) searchInput.value = '';\n"
         "            preencherObjeto(cod);\n"
+        "            agendarAutosave(sid);\n"
         "        }\n"
         "        function buscar() {\n"
         "            if (!searchInput) return;\n"
@@ -5023,16 +5081,16 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "                else { results = data.results || []; }\n"
         "                if (results.length === 0) {\n"
         "                    if (pareceCode) {\n"
-        "                        resultsDiv.innerHTML = '<div style=\"padding:4px 6px;font-size:11px;color:var(--text-muted);\">Código não encontrado. <button type=\"button\" style=\"background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:0;text-decoration:underline;\">Adicionar mesmo assim</button></div>';\n"
+        "                        resultsDiv.innerHTML = '<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Código não encontrado. <button type=\"button\" style=\"background:none;border:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0;text-decoration:underline;\">Adicionar mesmo assim</button></div>';\n"
         "                        resultsDiv.querySelector('button').addEventListener('click', function(){adicionar(q);});\n"
         "                    } else {\n"
-        "                        resultsDiv.innerHTML = '<div style=\"padding:4px 6px;font-size:11px;color:var(--text-muted);\">Nenhum resultado.</div>';\n"
+        "                        resultsDiv.innerHTML = '<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Nenhum resultado.</div>';\n"
         "                    }\n"
         "                    return;\n"
         "                }\n"
-        "                var htmlOut = '';\n"
+        "                var htmlOut = '<div style=\"color:var(--text-muted);font-size:11px;padding:2px 2px 4px;\">' + results.length + ' habilidade(s) \\u2014 clique para adicionar:</div>';\n"
         "                results.forEach(function(r) {\n"
-        "                    htmlOut += '<div data-cod=\"' + r.codigo + '\" style=\"padding:4px 6px;border:1px solid var(--border);border-radius:4px;margin-bottom:2px;cursor:pointer;background:var(--card);font-size:11px;\" onmouseover=\"this.style.background=\\'var(--accent-bg)\\'\" onmouseout=\"this.style.background=\\'var(--card)\\'\"><strong style=\"color:var(--accent);\">' + r.codigo + '</strong> \\xb7 ' + (r.descricao||'').replace(/</g,'&lt;') + '</div>';\n"
+        "                    htmlOut += '<div data-cod=\"' + r.codigo + '\" style=\"padding:7px 9px;border:1px solid var(--border);border-radius:5px;margin-bottom:4px;cursor:pointer;background:var(--card);font-size:12px;line-height:1.4;\" onmouseover=\"this.style.background=\\'var(--accent-bg)\\'\" onmouseout=\"this.style.background=\\'var(--card)\\'\"><strong style=\"color:var(--accent);\">' + r.codigo + '</strong> \\xb7 ' + (r.descricao||'').replace(/</g,'&lt;') + '</div>';\n"
         "                });\n"
         "                resultsDiv.innerHTML = htmlOut;\n"
         "            }).catch(function(){resultsDiv.innerHTML='';});\n"
@@ -5058,31 +5116,32 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     )
 
     aviso_sem_permissao = "" if pode_editar else '<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-bottom:14px;">Você está vendo esse planejamento, mas só quem está atribuído como docente responsável desse ano (ou admin/gestão) pode editar.</div>'
-    botao_salvar = '<button type="submit" class="btn btn-primary">Salvar planejamento</button>' if pode_editar else ""
+    botao_salvar = '<button type="submit" class="btn btn-primary">Salvar tudo agora</button>' if pode_editar else ""
+    aviso_autosave = (
+        '<div class="tip" style="margin-bottom:14px;">💾 Cada campo é salvo automaticamente sozinho (olhe o "Salvo às…" no canto de cada semana). '
+        'O botão "Salvar tudo agora" é só um reforço, não é obrigatório clicar nele pra não perder o que já foi digitado.</div>'
+        if pode_editar else ""
+    )
 
     content = f"""
         <div class="page-header">
             <h1>🧭 Planejamento — {ano_escolaridade}</h1>
         </div>
         {aviso_sem_permissao}
+        {aviso_autosave}
         {indice_cobertura_html}
         <details style="margin-bottom:16px;">
             <summary style="cursor:pointer; font-weight:600; font-size:13px;">📚 Sugestões do Referencial Curricular (clique pra ver)</summary>
             <div style="margin-top:10px;">{sugestoes_html}</div>
         </details>
+        <style>
+            .norteador-semana-card {{ border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:16px; background:var(--card); }}
+            .norteador-alerta {{ background:var(--orange-bg); border:1px solid var(--orange); border-radius:8px; padding:8px 14px; margin-bottom:14px; font-size:12px; }}
+            .bncc-row-widget input[type="search"] {{ width:100%; }}
+            .bncc-row-results {{ max-height:220px; overflow-y:auto; }}
+        </style>
         <form method="post" action="/norteador/{documento_id}/{ano_escolaridade}">
-            <div style="overflow-x:auto;">
-            <table style="width:100%; border-collapse:collapse; font-size:12px; min-width:900px;">
-                <thead><tr style="background:var(--bg-subtle);">
-                    <th style="padding:6px; text-align:left;">Semana</th>
-                    <th style="padding:6px; text-align:left;">Habilidade(s) BNCC</th>
-                    <th style="padding:6px; text-align:left;">Objeto do conhecimento</th>
-                    <th style="padding:6px; text-align:left;">Objetivo de aprendizagem</th>
-                    <th style="padding:6px; text-align:left;">Atividade</th>
-                </tr></thead>
-                <tbody>{linhas_form if linhas_form else '<tr><td colspan="5" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma semana cadastrada no calendário desse trimestre ainda.</td></tr>'}</tbody>
-            </table>
-            </div>
+            {cards_form if cards_form else '<div class="empty">Nenhuma semana cadastrada no calendário desse trimestre ainda.</div>'}
             <div class="page-actions" style="margin-top:14px;">
                 {botao_salvar}
                 <a href="/norteador/{documento_id}" class="btn">Voltar</a>
@@ -5091,6 +5150,57 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         {js_multi_bncc}
     """
     return HTMLResponse(render_page("Planejamento", content, active="norteador"))
+
+
+@app.post("/norteador/{documento_id}/{ano_escolaridade}/semana/{semana_id}/autosave")
+async def autosave_norteador_semana(request: Request, documento_id: int, ano_escolaridade: str, semana_id: int):
+    """Salva uma semana isoladamente assim que o docente digita (05/09/2026, a pedido
+    de Felipe) — mesma lógica de upsert usada no 'Salvar tudo agora', só que disparada
+    por AJAX a cada campo em vez de esperar o POST do formulário inteiro."""
+    prof = get_current_professor(request)
+    if not prof:
+        return JSONResponse({"ok": False, "erro": "não autenticado"}, status_code=401)
+
+    conn = get_db()
+    if not _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade):
+        conn.close()
+        return JSONResponse({"ok": False, "erro": "sem permissão"}, status_code=403)
+
+    form = await request.form()
+    objeto = (form.get("objeto") or "").strip()
+    objetivo = (form.get("objetivo") or "").strip()
+    atividade = (form.get("atividade") or "").strip()
+    habs_texto = (form.get("habilidades") or "").strip()
+    codigos = [c.strip().upper() for c in habs_texto.split(",") if c.strip()]
+
+    existente = conn.execute(
+        "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
+        (documento_id, ano_escolaridade, semana_id)
+    ).fetchone()
+    if existente:
+        semana_row_id = existente["id"]
+        conn.execute("""UPDATE documento_norteador_semanas SET objeto_conhecimento=?, objetivo_aprendizagem=?,
+                         atividade=?, atualizado_por_professor_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                     (objeto or None, objetivo or None, atividade or None, prof["id"], semana_row_id))
+    else:
+        cur = conn.execute("""INSERT INTO documento_norteador_semanas
+            (documento_id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem, atividade, atualizado_por_professor_id, atualizado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (documento_id, ano_escolaridade, semana_id, objeto or None, objetivo or None, atividade or None, prof["id"]))
+        semana_row_id = cur.lastrowid
+
+    conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id = ?", (semana_row_id,))
+    for codigo in codigos:
+        hab = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+        if not hab:
+            cur2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, None))
+            hab_id = cur2.lastrowid
+        else:
+            hab_id = hab["id"]
+        conn.execute("INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)", (semana_row_id, hab_id))
+    conn.commit()
+    conn.close()
+    return JSONResponse({"ok": True, "saved_at": datetime.now().strftime("%H:%M:%S")})
 
 
 @app.post("/norteador/{documento_id}/{ano_escolaridade}")
