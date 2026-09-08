@@ -5005,23 +5005,6 @@ def _calcular_resumo_norteador(documento_id: int, ano_escolaridade: str):
     return sugestoes_html, indice_cobertura_html, resumo_final_habilidades_html, objeto_por_habilidade
 
 
-@app.get("/norteador/{documento_id}/{ano_escolaridade}/resumo-fragmento")
-def resumo_fragmento_norteador(request: Request, documento_id: int, ano_escolaridade: str):
-    """Reflete o estado mais atual do planejamento (índice de cobertura + resumo de
-    habilidades) sem precisar recarregar a página inteira — chamado pelo JS depois de
-    cada autosave bem-sucedido (05/09/2026, a pedido de Felipe)."""
-    prof = get_current_professor(request)
-    if not prof:
-        return JSONResponse({"ok": False}, status_code=401)
-    conn = get_db()
-    tem_acesso = _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade)
-    conn.close()
-    if not tem_acesso:
-        return JSONResponse({"ok": False}, status_code=403)
-    _, indice_cobertura_html, resumo_final_habilidades_html, _ = _calcular_resumo_norteador(documento_id, ano_escolaridade)
-    return JSONResponse({"ok": True, "cobertura_html": indice_cobertura_html, "resumo_html": resumo_final_habilidades_html})
-
-
 @app.get("/norteador/{documento_id}/{ano_escolaridade}", response_class=HTMLResponse)
 def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridade: str):
     prof = get_current_professor(request)
@@ -5097,7 +5080,6 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         <div class="norteador-semana-card" data-semana-card="{s["id"]}">
             <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:12px;">
                 <h3 style="margin:0; font-size:15px;">{s["label"]}{f' <span style="font-size:11px; color:var(--text-muted); font-weight:400;">— {s["nota"]}</span>' if s["nota"] else ""}</h3>
-                <span class="autosave-status" data-status-semana="{s["id"]}" style="font-size:11px; color:var(--text-muted); white-space:nowrap;"></span>
             </div>
             <label style="margin-bottom:12px;">Habilidade(s) BNCC
                 {habilidade_widget}
@@ -5127,183 +5109,86 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "\n<script>\n(function() {\n"
         "    var OBJETO_POR_HABILIDADE = " + objeto_por_habilidade_json + ";\n"
         "    var DISC_ID = " + str(doc["disciplina_id"]) + ";\n"
-        "    var AUTOSAVE_URL_BASE = " + json.dumps(f"/norteador/{documento_id}/{ano_escolaridade}/semana/") + ";\n"
-        "    var PODE_EDITAR = " + ("true" if pode_editar else "false") + ";\n"
         "\n"
-        "    function marcarStatus(sid, texto, cor) {\n"
-        "        var el = document.querySelector('[data-status-semana=\"' + sid + '\"]');\n"
-        "        if (el) { el.textContent = texto; el.style.color = cor || 'var(--text-muted)'; }\n"
-        "    }\n"
-        "\n"
-        "    function atualizarResumoDinamico() {\n"
-        "        fetch(window.location.pathname + '/resumo-fragmento').then(function(r){return r.json();}).then(function(data) {\n"
-        "            if (!data.ok) return;\n"
-        "            var cob = document.getElementById('bloco-cobertura');\n"
-        "            var res = document.getElementById('bloco-resumo-habilidades');\n"
-        "            if (cob) cob.innerHTML = data.cobertura_html;\n"
-        "            if (res) res.innerHTML = data.resumo_html;\n"
-        "        }).catch(function(){});\n"
-        "    }\n"
-        "\n"
-        "    // Evita que dois autosaves da mesma semana rodem ao mesmo tempo: se um já está\n"
-        "    // em andamento quando outro é disparado, só marca 'reenviar' e espera o atual\n"
-        "    // terminar pra mandar de novo com o estado mais recente. Sem isso, uma resposta\n"
-        "    // atrasada podia chegar DEPOIS de uma mais nova e sobrescrever com dado velho —\n"
-        "    // era isso que fazia a habilidade 'sumir' às vezes (05/09/2026).\n"
-        "    var emVoo = {};\n"
-        "    var reenviar = {};\n"
-        "    function autosalvar(sid) {\n"
-        "        if (!PODE_EDITAR) return;\n"
-        "        if (emVoo[sid]) { reenviar[sid] = true; return; }\n"
-        "        emVoo[sid] = true;\n"
-        "        var objetoArea = document.querySelector('textarea[name=\"obj_' + sid + '\"]');\n"
-        "        var objetivoArea = document.querySelector('textarea[name=\"objetivo_' + sid + '\"]');\n"
-        "        var ativArea = document.querySelector('textarea[name=\"ativ_' + sid + '\"]');\n"
-        "        var habInput = document.querySelector('input[name=\"hab_' + sid + '\"]');\n"
-        "        marcarStatus(sid, 'Salvando…');\n"
-        "        var body = new URLSearchParams();\n"
-        "        body.set('objeto', objetoArea ? objetoArea.value : '');\n"
-        "        body.set('objetivo', objetivoArea ? objetivoArea.value : '');\n"
-        "        body.set('atividade', ativArea ? ativArea.value : '');\n"
-        "        body.set('habilidades', habInput ? habInput.value : '');\n"
-        "        fetch(AUTOSAVE_URL_BASE + sid + '/autosave', { method: 'POST', body: body })\n"
-        "            .then(function(r) { return r.json(); })\n"
-        "            .then(function(data) {\n"
-        "                emVoo[sid] = false;\n"
-        "                if (data.ok) {\n"
-        "                    marcarStatus(sid, '✓ Salvo às ' + data.saved_at, 'var(--green)');\n"
-        "                    atualizarResumoDinamico();\n"
-        "                } else {\n"
-        "                    marcarStatus(sid, '⚠ Erro ao salvar, tentando de novo…', 'var(--red)');\n"
-        "                    setTimeout(function() { autosalvar(sid); }, 2000);\n"
-        "                }\n"
-        "                if (reenviar[sid]) { reenviar[sid] = false; autosalvar(sid); }\n"
-        "            })\n"
-        "            .catch(function() {\n"
-        "                emVoo[sid] = false;\n"
-        "                marcarStatus(sid, '⚠ Sem conexão, tentando de novo…', 'var(--red)');\n"
-        "                setTimeout(function() { autosalvar(sid); }, 2000);\n"
-        "                if (reenviar[sid]) { reenviar[sid] = false; autosalvar(sid); }\n"
-        "            });\n"
-        "    }\n"
-        "\n"
-        "    var timers = {};\n"
-        "    function agendarAutosave(sid) {\n"
-        "        if (!PODE_EDITAR) return;\n"
-        "        marcarStatus(sid, 'Digitando…');\n"
-        "        clearTimeout(timers[sid]);\n"
-        "        timers[sid] = setTimeout(function() { timers[sid] = null; autosalvar(sid); }, 1200);\n"
-        "    }\n"
-        "\n"
-        "    // Salva imediatamente ao fechar/sair da página se ainda houver alteração\n"
-        "    // pendente (o debounce de 1,2s não deu tempo de disparar sozinho) — evita\n"
-        "    // perder o que acabou de ser digitado ou uma habilidade recém-adicionada\n"
-        "    // (05/09/2026, corrigindo relato de Felipe de habilidade \"não fixando\").\n"
-        "    window.addEventListener('beforeunload', function() {\n"
-        "        Object.keys(timers).forEach(function(sid) {\n"
-        "            if (!timers[sid]) return;\n"
-        "            clearTimeout(timers[sid]);\n"
-        "            timers[sid] = null;\n"
-        "            var objetoArea = document.querySelector('textarea[name=\"obj_' + sid + '\"]');\n"
-        "            var objetivoArea = document.querySelector('textarea[name=\"objetivo_' + sid + '\"]');\n"
-        "            var ativArea = document.querySelector('textarea[name=\"ativ_' + sid + '\"]');\n"
-        "            var habInput = document.querySelector('input[name=\"hab_' + sid + '\"]');\n"
-        "            var body = new URLSearchParams();\n"
-        "            body.set('objeto', objetoArea ? objetoArea.value : '');\n"
-        "            body.set('objetivo', objetivoArea ? objetivoArea.value : '');\n"
-        "            body.set('atividade', ativArea ? ativArea.value : '');\n"
-        "            body.set('habilidades', habInput ? habInput.value : '');\n"
-        "            var blob = new Blob([body.toString()], {type: 'application/x-www-form-urlencoded'});\n"
-        "            navigator.sendBeacon(AUTOSAVE_URL_BASE + sid + '/autosave', blob);\n"
-        "        });\n"
-        "    });\n"
-        "\n"
-        "    document.querySelectorAll('.norteador-semana-card').forEach(function(card) {\n"
-        "        var sid = card.getAttribute('data-semana-card');\n"
-        "        card.querySelectorAll('textarea').forEach(function(ta) {\n"
-        "            ta.addEventListener('input', function() { agendarAutosave(sid); });\n"
-        "        });\n"
-        "    });\n"
-        "\n"
-        "    document.querySelectorAll('.bncc-row-widget').forEach(function(container) {\n"
-        "        var hiddenInput = container.querySelector('.bncc-row-hidden');\n"
-        "        var chipsDiv = container.querySelector('.bncc-row-chips');\n"
-        "        var searchInput = container.querySelector('.bncc-row-search');\n"
-        "        var resultsDiv = container.querySelector('.bncc-row-results');\n"
-        "        var sid = container.getAttribute('data-semana');\n"
-        "        var objetoArea = document.querySelector('textarea[name=\"obj_' + sid + '\"]');\n"
+        "    // Sem autosave (removido em 05/09/2026 a pedido de Felipe, depois de bugs\n"
+        "    // recorrentes de habilidade não persistindo). Este widget só monta a lista\n"
+        "    // de habilidades escolhidas no campo escondido e preenche o Objeto do\n"
+        "    // Conhecimento como sugestão -- o que realmente vai pro banco é decidido no\n"
+        "    // clique em \'Salvar tudo agora\', que envia o formulário inteiro de uma vez\n"
+        "    // (comportamento simples e testado, sem chamadas de rede paralelas).\n"
+        "    document.querySelectorAll(\'.bncc-row-widget\').forEach(function(container) {\n"
+        "        var hiddenInput = container.querySelector(\'.bncc-row-hidden\');\n"
+        "        var chipsDiv = container.querySelector(\'.bncc-row-chips\');\n"
+        "        var searchInput = container.querySelector(\'.bncc-row-search\');\n"
+        "        var resultsDiv = container.querySelector(\'.bncc-row-results\');\n"
+        "        var sid = container.getAttribute(\'data-semana\');\n"
+        "        var objetoArea = document.querySelector(\'textarea[name=\"obj_\' + sid + \'\"]\');\n"
         "        var selecionados = [];\n"
         "        function renderChips() {\n"
-        "            chipsDiv.innerHTML = '';\n"
+        "            chipsDiv.innerHTML = \'\';\n"
         "            selecionados.forEach(function(cod) {\n"
-        "                var chip = document.createElement('span');\n"
-        "                chip.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;';\n"
-        "                chip.innerHTML = cod + ' <button type=\"button\" style=\"background:none;border:none;cursor:pointer;color:var(--accent);font-size:13px;padding:0;line-height:1;\" title=\"Remover\">\\xd7</button>';\n"
-        "                chip.querySelector('button').addEventListener('click', function() {\n"
+        "                var chip = document.createElement(\'span\');\n"
+        "                chip.style.cssText = \'display:inline-flex;align-items:center;gap:4px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;\';\n"
+        "                chip.innerHTML = cod + \' <button type=\"button\" style=\"background:none;border:none;cursor:pointer;color:var(--accent);font-size:13px;padding:0;line-height:1;\" title=\"Remover\">\\xd7</button>\';\n"
+        "                chip.querySelector(\'button\').addEventListener(\'click\', function() {\n"
         "                    selecionados = selecionados.filter(function(c){return c!==cod;});\n"
         "                    renderChips();\n"
-        "                    clearTimeout(timers[sid]); timers[sid] = null;\n"
-        "                    autosalvar(sid);\n"
         "                });\n"
         "                chipsDiv.appendChild(chip);\n"
         "            });\n"
-        "            hiddenInput.value = selecionados.join(', ');\n"
+        "            hiddenInput.value = selecionados.join(\', \');\n"
         "        }\n"
         "        function preencherObjeto(cod) {\n"
         "            if (!objetoArea) return;\n"
         "            var texto = OBJETO_POR_HABILIDADE[cod];\n"
         "            if (!texto) return;\n"
         "            var atual = objetoArea.value;\n"
-        "            var linhasAtuais = atual.split('\\n');\n"
-        "            texto.split('\\n').forEach(function(l) {\n"
-        "                if (l && linhasAtuais.indexOf(l) < 0) { atual = atual ? (atual + '\\n' + l) : l; linhasAtuais.push(l); }\n"
+        "            var linhasAtuais = atual.split(\'\\n\');\n"
+        "            texto.split(\'\\n\').forEach(function(l) {\n"
+        "                if (l && linhasAtuais.indexOf(l) < 0) { atual = atual ? (atual + \'\\n\' + l) : l; linhasAtuais.push(l); }\n"
         "            });\n"
         "            objetoArea.value = atual;\n"
         "        }\n"
         "        function adicionar(cod) {\n"
         "            cod = cod.trim().toUpperCase();\n"
         "            if (!cod || selecionados.indexOf(cod) >= 0) return;\n"
-        "            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = ''; if (searchInput) searchInput.value = '';\n"
+        "            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = \'\'; if (searchInput) searchInput.value = \'\';\n"
         "            preencherObjeto(cod);\n"
-        "            // Habilidade escolhida = ação deliberada do docente, salva na hora (não\n"
-        "            // espera debounce) — é o dado mais importante do planejamento.\n"
-        "            clearTimeout(timers[sid]); timers[sid] = null;\n"
-        "            autosalvar(sid);\n"
         "        }\n"
         "        function buscar() {\n"
         "            if (!searchInput) return;\n"
         "            var q = searchInput.value.trim();\n"
-        "            if (q.length < 2) { resultsDiv.innerHTML = ''; return; }\n"
+        "            if (q.length < 2) { resultsDiv.innerHTML = \'\'; return; }\n"
         "            var pareceCode = /^[A-Za-z]{2}\\d{2}[A-Za-z]{2}\\d{2}/.test(q);\n"
-        "            var url = pareceCode ? '/habilidades/buscar?codigos=' + encodeURIComponent(q.toUpperCase())\n"
-        "                : '/habilidades/buscar?q=' + encodeURIComponent(q) + (DISC_ID ? '&disciplina_id=' + DISC_ID : '');\n"
+        "            var url = pareceCode ? \'/habilidades/buscar?codigos=\' + encodeURIComponent(q.toUpperCase())\n"
+        "                : \'/habilidades/buscar?q=\' + encodeURIComponent(q) + (DISC_ID ? \'&disciplina_id=\' + DISC_ID : \'\');\n"
         "            fetch(url).then(function(r){return r.json();}).then(function(data) {\n"
         "                var results = [];\n"
-        "                if (pareceCode) { Object.keys(data).forEach(function(k){if(k!=='results') results.push({codigo:k,descricao:data[k]});}); }\n"
+        "                if (pareceCode) { Object.keys(data).forEach(function(k){if(k!==\'results\') results.push({codigo:k,descricao:data[k]});}); }\n"
         "                else { results = data.results || []; }\n"
         "                if (results.length === 0) {\n"
         "                    if (pareceCode) {\n"
-        "                        resultsDiv.innerHTML = '<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Código não encontrado. <button type=\"button\" style=\"background:none;border:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0;text-decoration:underline;\">Adicionar mesmo assim</button></div>';\n"
-        "                        resultsDiv.querySelector('button').addEventListener('click', function(){adicionar(q);});\n"
+        "                        resultsDiv.innerHTML = \'<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Código não encontrado. <button type=\"button\" style=\"background:none;border:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0;text-decoration:underline;\">Adicionar mesmo assim</button></div>\';\n"
+        "                        resultsDiv.querySelector(\'button\').addEventListener(\'click\', function(){adicionar(q);});\n"
         "                    } else {\n"
-        "                        resultsDiv.innerHTML = '<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Nenhum resultado.</div>';\n"
+        "                        resultsDiv.innerHTML = \'<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Nenhum resultado.</div>\';\n"
         "                    }\n"
         "                    return;\n"
         "                }\n"
-        "                var htmlOut = '<div style=\"color:var(--text-muted);font-size:11px;padding:2px 2px 4px;\">' + results.length + ' habilidade(s) \\u2014 clique para adicionar:</div>';\n"
+        "                var htmlOut = \'<div style=\"color:var(--text-muted);font-size:11px;padding:2px 2px 4px;\">\' + results.length + \' habilidade(s) \\u2014 clique para adicionar:</div>\';\n"
         "                results.forEach(function(r) {\n"
-        "                    htmlOut += '<div data-cod=\"' + r.codigo + '\" style=\"padding:7px 9px;border:1px solid var(--border);border-radius:5px;margin-bottom:4px;cursor:pointer;background:var(--card);font-size:12px;line-height:1.4;\" onmouseover=\"this.style.background=\\'var(--accent-bg)\\'\" onmouseout=\"this.style.background=\\'var(--card)\\'\"><strong style=\"color:var(--accent);\">' + r.codigo + '</strong> \\xb7 ' + (r.descricao||'').replace(/</g,'&lt;') + '</div>';\n"
+        "                    htmlOut += \'<div data-cod=\"\' + r.codigo + \'\" style=\"padding:7px 9px;border:1px solid var(--border);border-radius:5px;margin-bottom:4px;cursor:pointer;background:var(--card);font-size:12px;line-height:1.4;\" onmouseover=\"this.style.background=\\\'var(--accent-bg)\\\'\" onmouseout=\"this.style.background=\\\'var(--card)\\\'\"><strong style=\"color:var(--accent);\">\' + r.codigo + \'</strong> \\xb7 \' + (r.descricao||\'\').replace(/</g,\'&lt;\') + \'</div>\';\n"
         "                });\n"
         "                resultsDiv.innerHTML = htmlOut;\n"
-        "            }).catch(function(){resultsDiv.innerHTML='';});\n"
+        "            }).catch(function(){resultsDiv.innerHTML=\'\';});\n"
         "        }\n"
         "        if (searchInput) {\n"
         "            var _t;\n"
-        "            searchInput.addEventListener('input', function(){clearTimeout(_t); _t=setTimeout(buscar,350);});\n"
-        "            searchInput.addEventListener('keydown', function(e){if(e.key==='Enter'){e.preventDefault();buscar();}});\n"
+        "            searchInput.addEventListener(\'input\', function(){clearTimeout(_t); _t=setTimeout(buscar,350);});\n"
+        "            searchInput.addEventListener(\'keydown\', function(e){if(e.key===\'Enter\'){e.preventDefault();buscar();}});\n"
         "        }\n"
-        "        resultsDiv.addEventListener('click', function(e){\n"
-        "            var item = e.target.closest('[data-cod]');\n"
+        "        resultsDiv.addEventListener(\'click\', function(e){\n"
+        "            var item = e.target.closest(\'[data-cod]\');\n"
         "            if (item) adicionar(item.dataset.cod);\n"
         "        });\n"
         "        var init = hiddenInput.value.trim();\n"
@@ -5318,10 +5203,11 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     )
 
     aviso_sem_permissao = "" if pode_editar else '<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-bottom:14px;">Você está vendo esse planejamento, mas só quem está atribuído como docente responsável desse ano (ou admin/gestão) pode editar.</div>'
-    botao_salvar = '<button type="submit" class="btn btn-primary">Salvar tudo agora</button>' if pode_editar else ""
-    aviso_autosave = (
-        '<div class="tip" style="margin-bottom:14px;">💾 Cada campo é salvo automaticamente sozinho (olhe o "Salvo às…" no canto de cada semana). '
-        'O botão "Salvar tudo agora" é só um reforço, não é obrigatório clicar nele pra não perder o que já foi digitado.</div>'
+    botao_salvar = '<button type="submit" class="btn btn-primary">💾 Salvar planejamento</button>' if pode_editar else ""
+    aviso_salvar_manual = (
+        '<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-bottom:14px; font-weight:600;">'
+        '⚠️ Nada é salvo automaticamente. Preencha as semanas que quiser e clique em "💾 Salvar planejamento" no final da página antes de sair — '
+        'senão o que você digitou aqui se perde.</div>'
         if pode_editar else ""
     )
 
@@ -5330,7 +5216,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
             <h1>🧭 Planejamento — {ano_escolaridade}</h1>
         </div>
         {aviso_sem_permissao}
-        {aviso_autosave}
+        {aviso_salvar_manual}
         <div id="bloco-cobertura">{indice_cobertura_html}</div>
         <details style="margin-bottom:16px;">
             <summary style="cursor:pointer; font-weight:600; font-size:13px;">📚 Sugestões do Referencial Curricular (clique pra ver)</summary>
@@ -5342,7 +5228,11 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
             .bncc-row-widget input[type="search"] {{ width:100%; }}
             .bncc-row-results {{ max-height:220px; overflow-y:auto; }}
         </style>
-        <form method="post" action="/norteador/{documento_id}/{ano_escolaridade}">
+        <form method="post" action="/norteador/{documento_id}/{ano_escolaridade}" id="form-norteador">
+            <div class="page-actions" style="margin-bottom:14px;">
+                {botao_salvar}
+                <a href="/norteador/{documento_id}" class="btn">Voltar</a>
+            </div>
             {cards_form if cards_form else '<div class="empty">Nenhuma semana cadastrada no calendário desse trimestre ainda.</div>'}
             <div id="bloco-resumo-habilidades">{resumo_final_habilidades_html}</div>
             <div class="page-actions" style="margin-top:14px;">
@@ -5353,73 +5243,6 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         {js_multi_bncc}
     """
     return HTMLResponse(render_page("Planejamento", content, active="norteador"))
-
-
-@app.post("/norteador/{documento_id}/{ano_escolaridade}/semana/{semana_id}/autosave")
-async def autosave_norteador_semana(request: Request, documento_id: int, ano_escolaridade: str, semana_id: int):
-    """Salva uma semana isoladamente assim que o docente digita (05/09/2026, a pedido
-    de Felipe) — mesma lógica de upsert usada no 'Salvar tudo agora', só que disparada
-    por AJAX a cada campo em vez de esperar o POST do formulário inteiro.
-
-    05/09/2026 (correção): a coluna habilidades_bncc.codigo é UNIQUE, e o padrão antigo
-    'buscar por código, se não existir inserir' tem uma condição de corrida — se duas
-    chamadas de autosave (de semanas diferentes) tentarem cadastrar o MESMO código novo
-    quase ao mesmo tempo, a segunda inserção quebra com erro de integridade e, como o
-    commit só acontecia no final da função, a semana inteira daquela chamada (incluindo
-    objeto/objetivo/atividade) não era salva — provavelmente a causa real da habilidade
-    'não fixar' relatada por Felipe. Corrigido com: (1) INSERT OR IGNORE em vez de
-    buscar-depois-inserir, que não quebra em corrida; (2) commit dos campos de texto
-    ANTES de mexer nas habilidades, pra um problema nas habilidades nunca apagar o que
-    já foi digitado; (3) try/except cobrindo tudo, sempre devolvendo JSON (nunca um erro
-    HTTP genérico que o JS não consegue interpretar)."""
-    prof = get_current_professor(request)
-    if not prof:
-        return JSONResponse({"ok": False, "erro": "não autenticado"}, status_code=401)
-
-    conn = get_db()
-    if not _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade):
-        conn.close()
-        return JSONResponse({"ok": False, "erro": "sem permissão"}, status_code=403)
-
-    try:
-        form = await request.form()
-        objeto = (form.get("objeto") or "").strip()
-        objetivo = (form.get("objetivo") or "").strip()
-        atividade = (form.get("atividade") or "").strip()
-        habs_texto = (form.get("habilidades") or "").strip()
-        codigos = [c.strip().upper() for c in habs_texto.split(",") if c.strip()]
-
-        existente = conn.execute(
-            "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
-            (documento_id, ano_escolaridade, semana_id)
-        ).fetchone()
-        if existente:
-            semana_row_id = existente["id"]
-            conn.execute("""UPDATE documento_norteador_semanas SET objeto_conhecimento=?, objetivo_aprendizagem=?,
-                             atividade=?, atualizado_por_professor_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
-                         (objeto or None, objetivo or None, atividade or None, prof["id"], semana_row_id))
-        else:
-            cur = conn.execute("""INSERT INTO documento_norteador_semanas
-                (documento_id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem, atividade, atualizado_por_professor_id, atualizado_em)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                (documento_id, ano_escolaridade, semana_id, objeto or None, objetivo or None, atividade or None, prof["id"]))
-            semana_row_id = cur.lastrowid
-        conn.commit()  # texto salvo primeiro, independente do que acontecer com as habilidades abaixo
-
-        conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id = ?", (semana_row_id,))
-        for codigo in codigos:
-            conn.execute("INSERT OR IGNORE INTO habilidades_bncc (codigo, descricao) VALUES (?, NULL)", (codigo,))
-            hab_id = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()["id"]
-            conn.execute("INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)", (semana_row_id, hab_id))
-        conn.commit()
-        conn.close()
-        return JSONResponse({"ok": True, "saved_at": datetime.now().strftime("%H:%M:%S")})
-    except Exception as e:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        return JSONResponse({"ok": False, "erro": str(e)}, status_code=200)
 
 
 @app.post("/norteador/{documento_id}/{ano_escolaridade}")
