@@ -4847,6 +4847,23 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         codigos_ref = [h["codigo"] for h in habs_ref]
         habilidades_referencial_geral.update(codigos_ref)
         referencial_com_habs.append((ref, habs_ref, codigos_ref))
+
+    # Onde cada habilidade "extra" (usada no planejamento mas fora do Referencial deste
+    # trimestre) aparece no resto do Referencial dessa disciplina — pra sinalizar se é de
+    # outro trimestre do mesmo ano, de outro ano de escolaridade, ou nem consta no
+    # Referencial cadastrado (05/09/2026, a pedido de Felipe).
+    outros_blocos_raw = conn.execute(
+        "SELECT id, ano_escolaridade, trimestre FROM referencial_curricular WHERE disciplina_id=? AND NOT (ano_escolaridade=? AND trimestre=?)",
+        (doc["disciplina_id"], ano_escolaridade, doc["trimestre"])
+    ).fetchall()
+    localizacao_codigo = {}
+    for b in outros_blocos_raw:
+        habs_b = conn.execute("""
+            SELECT h.codigo FROM referencial_curricular_habilidades rch
+            JOIN habilidades_bncc h ON h.id = rch.habilidade_id WHERE rch.referencial_id = ?
+        """, (b["id"],)).fetchall()
+        for h in habs_b:
+            localizacao_codigo.setdefault(h["codigo"], set()).add((b["ano_escolaridade"], b["trimestre"]))
     conn.close()
 
     sugestoes_html = ""
@@ -4894,11 +4911,51 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     total_referencial = len(habilidades_referencial_geral)
     cobertas_do_referencial = len(habilidades_cobertas_geral & habilidades_referencial_geral)
     extras_fora_referencial = habilidades_cobertas_geral - habilidades_referencial_geral
+
+    # Classificação das habilidades "extras" — de outro trimestre do mesmo ano, de outro
+    # ano de escolaridade, ou sem nenhuma correspondência no Referencial dessa disciplina
+    # (05/09/2026, a pedido de Felipe — mostrado num resumo ao final da tela).
+    outro_trimestre_mesmo_ano = []
+    outro_ano_escolaridade = []
+    sem_correspondencia_alguma = []
+    for codigo in sorted(extras_fora_referencial):
+        locais = localizacao_codigo.get(codigo, set())
+        if any(a == ano_escolaridade for a, t in locais):
+            outro_trimestre_mesmo_ano.append(codigo)
+        elif locais:
+            outro_ano_escolaridade.append(codigo)
+        else:
+            sem_correspondencia_alguma.append(codigo)
+
+    def _linha_resumo(rotulo, codigos_lista, cor=None):
+        if not codigos_lista and cor is None:
+            return ""
+        estilo_num = f' style="color:{cor};"' if cor else ""
+        linha = f"""<tr><td style="padding:6px; font-weight:600;">{rotulo}</td>
+            <td style="padding:6px; text-align:right; font-weight:600;"{estilo_num}>{len(codigos_lista)}</td></tr>"""
+        if codigos_lista:
+            linha += f'<tr><td colspan="2" style="padding:0 6px 8px; font-size:11px; color:var(--text-muted);">{", ".join(codigos_lista)}</td></tr>'
+        return linha
+
+    resumo_final_habilidades_html = f"""
+    <div class="card" style="padding:16px; margin:18px 0;">
+        <h3 style="margin-top:0; font-size:14px;">📌 Resumo das habilidades usadas neste planejamento</h3>
+        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+            <tbody>
+                {_linha_resumo(f"Previstas para este {doc['trimestre']}º trimestre", list(habilidades_cobertas_geral & habilidades_referencial_geral), "var(--green)")}
+                {_linha_resumo(f"De outro trimestre do mesmo ano ({ano_escolaridade})", outro_trimestre_mesmo_ano, "var(--orange)")}
+                {_linha_resumo("De outro ano de escolaridade", outro_ano_escolaridade, "var(--orange)")}
+                {_linha_resumo("Sem correspondência no Referencial Curricular dessa disciplina", sem_correspondencia_alguma, "var(--red)")}
+            </tbody>
+        </table>
+        <p style="font-size:11px; color:var(--text-muted); margin:8px 0 0;">Não tem problema usar habilidades de outro trimestre/ano (revisão, antecipação, turma com defasagem etc.) — isso aqui é só um raio-x pra você conferir se foi intencional.</p>
+    </div>""" if habilidades_cobertas_geral else ""
+
     if total_referencial > 0:
         percentual_cobertura = round(100 * cobertas_do_referencial / total_referencial)
         cor_barra = "var(--red)" if percentual_cobertura < 34 else ("var(--orange)" if percentual_cobertura < 75 else "var(--green)")
         aviso_extras = (
-            f'<p style="font-size:11px; color:var(--text-muted); margin:6px 0 0;">+ {len(extras_fora_referencial)} habilidade(s) planejada(s) que não estão no Referencial Curricular cadastrado ({", ".join(sorted(extras_fora_referencial))}).</p>'
+            f'<p style="font-size:11px; color:var(--text-muted); margin:6px 0 0;">+ {len(extras_fora_referencial)} habilidade(s) planejada(s) que não estão no Referencial deste trimestre (veja o resumo detalhado ao final da página).</p>'
             if extras_fora_referencial else ""
         )
         indice_cobertura_html = f"""
@@ -5017,8 +5074,31 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "        if (!PODE_EDITAR) return;\n"
         "        marcarStatus(sid, 'Digitando…');\n"
         "        clearTimeout(timers[sid]);\n"
-        "        timers[sid] = setTimeout(function() { autosalvar(sid); }, 1200);\n"
+        "        timers[sid] = setTimeout(function() { timers[sid] = null; autosalvar(sid); }, 1200);\n"
         "    }\n"
+        "\n"
+        "    // Salva imediatamente ao fechar/sair da página se ainda houver alteração\n"
+        "    // pendente (o debounce de 1,2s não deu tempo de disparar sozinho) — evita\n"
+        "    // perder o que acabou de ser digitado ou uma habilidade recém-adicionada\n"
+        "    // (05/09/2026, corrigindo relato de Felipe de habilidade \"não fixando\").\n"
+        "    window.addEventListener('beforeunload', function() {\n"
+        "        Object.keys(timers).forEach(function(sid) {\n"
+        "            if (!timers[sid]) return;\n"
+        "            clearTimeout(timers[sid]);\n"
+        "            timers[sid] = null;\n"
+        "            var objetoArea = document.querySelector('textarea[name=\"obj_' + sid + '\"]');\n"
+        "            var objetivoArea = document.querySelector('textarea[name=\"objetivo_' + sid + '\"]');\n"
+        "            var ativArea = document.querySelector('textarea[name=\"ativ_' + sid + '\"]');\n"
+        "            var habInput = document.querySelector('input[name=\"hab_' + sid + '\"]');\n"
+        "            var body = new URLSearchParams();\n"
+        "            body.set('objeto', objetoArea ? objetoArea.value : '');\n"
+        "            body.set('objetivo', objetivoArea ? objetivoArea.value : '');\n"
+        "            body.set('atividade', ativArea ? ativArea.value : '');\n"
+        "            body.set('habilidades', habInput ? habInput.value : '');\n"
+        "            var blob = new Blob([body.toString()], {type: 'application/x-www-form-urlencoded'});\n"
+        "            navigator.sendBeacon(AUTOSAVE_URL_BASE + sid + '/autosave', blob);\n"
+        "        });\n"
+        "    });\n"
         "\n"
         "    document.querySelectorAll('.norteador-semana-card').forEach(function(card) {\n"
         "        var sid = card.getAttribute('data-semana-card');\n"
@@ -5044,7 +5124,8 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "                chip.querySelector('button').addEventListener('click', function() {\n"
         "                    selecionados = selecionados.filter(function(c){return c!==cod;});\n"
         "                    renderChips();\n"
-        "                    agendarAutosave(sid);\n"
+        "                    clearTimeout(timers[sid]); timers[sid] = null;\n"
+        "                    autosalvar(sid);\n"
         "                });\n"
         "                chipsDiv.appendChild(chip);\n"
         "            });\n"
@@ -5066,7 +5147,10 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "            if (!cod || selecionados.indexOf(cod) >= 0) return;\n"
         "            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = ''; if (searchInput) searchInput.value = '';\n"
         "            preencherObjeto(cod);\n"
-        "            agendarAutosave(sid);\n"
+        "            // Habilidade escolhida = ação deliberada do docente, salva na hora (não\n"
+        "            // espera debounce) — é o dado mais importante do planejamento.\n"
+        "            clearTimeout(timers[sid]); timers[sid] = null;\n"
+        "            autosalvar(sid);\n"
         "        }\n"
         "        function buscar() {\n"
         "            if (!searchInput) return;\n"
@@ -5142,6 +5226,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         </style>
         <form method="post" action="/norteador/{documento_id}/{ano_escolaridade}">
             {cards_form if cards_form else '<div class="empty">Nenhuma semana cadastrada no calendário desse trimestre ainda.</div>'}
+            {resumo_final_habilidades_html}
             <div class="page-actions" style="margin-top:14px;">
                 {botao_salvar}
                 <a href="/norteador/{documento_id}" class="btn">Voltar</a>
