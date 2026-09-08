@@ -3824,7 +3824,8 @@ def calendario_trimestre(request: Request, trimestre: Optional[int] = None, ano:
     linhas = ""
     for al in alertas_por_semana.get(None, []):
         linhas += f"""<tr style="background:var(--orange-bg);"><td colspan="4" style="padding:6px 10px; font-size:12px;">⚠ {al["texto"]}
-            <form method="post" action="/norteador/calendario/alerta/{al["id"]}/excluir" style="display:inline;"><button type="submit" class="btn" style="padding:1px 6px; font-size:10px; margin-left:8px;">excluir</button></form></td></tr>"""
+            <a href="/norteador/calendario/alerta/{al["id"]}/editar" class="btn" style="padding:1px 6px; font-size:10px; margin-left:8px;">editar</a>
+            <form method="post" action="/norteador/calendario/alerta/{al["id"]}/excluir" style="display:inline;"><button type="submit" class="btn" style="padding:1px 6px; font-size:10px; margin-left:4px;">excluir</button></form></td></tr>"""
     for s in semanas:
         linhas += f"""<tr>
             <td style="padding:6px 10px; font-weight:600;">{s["label"]}</td>
@@ -3837,7 +3838,8 @@ def calendario_trimestre(request: Request, trimestre: Optional[int] = None, ano:
         </tr>"""
         for al in alertas_por_semana.get(s["id"], []):
             linhas += f"""<tr style="background:var(--orange-bg);"><td colspan="4" style="padding:6px 10px; font-size:12px;">⚠ {al["texto"]}
-                <form method="post" action="/norteador/calendario/alerta/{al["id"]}/excluir" style="display:inline;"><button type="submit" class="btn" style="padding:1px 6px; font-size:10px; margin-left:8px;">excluir</button></form></td></tr>"""
+                <a href="/norteador/calendario/alerta/{al["id"]}/editar" class="btn" style="padding:1px 6px; font-size:10px; margin-left:8px;">editar</a>
+                <form method="post" action="/norteador/calendario/alerta/{al["id"]}/excluir" style="display:inline;"><button type="submit" class="btn" style="padding:1px 6px; font-size:10px; margin-left:4px;">excluir</button></form></td></tr>"""
 
     opts_semana_alerta = '<option value="">— no início do trimestre —</option>' + "".join(
         f'<option value="{s["id"]}">Depois de "{s["label"]}"</option>' for s in semanas
@@ -4004,6 +4006,60 @@ def excluir_alerta_calendario(request: Request, alerta_id: int):
     conn = get_db()
     al = conn.execute("SELECT trimestre, ano_letivo FROM calendario_alertas WHERE id=?", (alerta_id,)).fetchone()
     conn.execute("DELETE FROM calendario_alertas WHERE id = ?", (alerta_id,))
+    conn.commit()
+    conn.close()
+    if al:
+        return RedirectResponse(f"/norteador/calendario?trimestre={al['trimestre']}&ano={al['ano_letivo']}", status_code=303)
+    return RedirectResponse("/norteador/calendario", status_code=303)
+
+
+@app.get("/norteador/calendario/alerta/{alerta_id}/editar", response_class=HTMLResponse)
+def form_editar_alerta_calendario(request: Request, alerta_id: int):
+    """Corrige o texto/posição de um alerta já cadastrado sem precisar excluir e
+    recriar (05/09/2026, a pedido de Felipe)."""
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    al = conn.execute("SELECT * FROM calendario_alertas WHERE id = ?", (alerta_id,)).fetchone()
+    if not al:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Alerta não encontrado.</div>', active="norteador-calendario"))
+    semanas = conn.execute(
+        "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem", (al["trimestre"], al["ano_letivo"])
+    ).fetchall()
+    conn.close()
+
+    opts_semana_alerta = '<option value=""' + (' selected' if not al["ordem_apos_semana_id"] else '') + '>— no início do trimestre —</option>' + "".join(
+        f'<option value="{s["id"]}"{" selected" if al["ordem_apos_semana_id"]==s["id"] else ""}>Depois de "{s["label"]}"</option>' for s in semanas
+    )
+    content = f"""
+        <div class="page-header">
+            <h1>✏️ Editar alerta do calendário</h1>
+        </div>
+        <form method="post" action="/norteador/calendario/alerta/{alerta_id}/editar">
+            <label>Texto do alerta<textarea name="texto" rows="2" required>{al["texto"]}</textarea></label>
+            <label>Posição<select name="ordem_apos_semana_id">{opts_semana_alerta}</select></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar</button>
+                <a href="/norteador/calendario?trimestre={al['trimestre']}&ano={al['ano_letivo']}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Editar alerta", content, active="norteador-calendario"))
+
+
+@app.post("/norteador/calendario/alerta/{alerta_id}/editar")
+def salvar_edicao_alerta_calendario(request: Request, alerta_id: int, texto: str = Form(...),
+                                     ordem_apos_semana_id: str = Form("")):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    semana_ref = int(ordem_apos_semana_id) if ordem_apos_semana_id.strip().isdigit() else None
+    conn = get_db()
+    al = conn.execute("SELECT trimestre, ano_letivo FROM calendario_alertas WHERE id=?", (alerta_id,)).fetchone()
+    conn.execute("UPDATE calendario_alertas SET texto=?, ordem_apos_semana_id=? WHERE id=?",
+                 (texto.strip(), semana_ref, alerta_id))
     conn.commit()
     conn.close()
     if al:
@@ -4774,40 +4830,19 @@ def documento_norteador_formatado(request: Request, documento_id: int):
 </body></html>"""
     return HTMLResponse(html_completo)
 
-@app.get("/norteador/{documento_id}/{ano_escolaridade}", response_class=HTMLResponse)
-def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridade: str):
-    prof = get_current_professor(request)
-    if not prof:
-        return RedirectResponse("/login", status_code=303)
 
+def _calcular_resumo_norteador(documento_id: int, ano_escolaridade: str):
+    """Calcula as sugestões do Referencial Curricular, o índice de cobertura e o resumo
+    de classificação de habilidades pra uma disciplina/ano/trimestre. Extraído numa
+    função à parte (05/09/2026) pra poder ser chamado tanto no carregamento da página
+    quanto no endpoint de atualização ao vivo via AJAX (pedido de Felipe: ele quer ver
+    esses números indo ao longo do preenchimento, não só recarregando a página)."""
     conn = get_db()
     doc = conn.execute("SELECT * FROM documentos_norteadores WHERE id = ?", (documento_id,)).fetchone()
     if not doc:
         conn.close()
-        return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
-    pode_editar = _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade)
-    if not pode_editar:
-        # 05/09/2026: professor sem vínculo nesse ano não pode nem visualizar, só quem
-        # foi designado (ou gestão/admin, que _pode_editar_norteador já libera).
-        conn.close()
-        return HTMLResponse(render_page(
-            "Sem acesso",
-            f'<div class="empty">Você não foi designado como docente responsável do {ano_escolaridade} nesse Documento Norteador. '
-            f'Fale com a gestão se acha que isso é um engano.</div><a href="/norteador/{documento_id}" class="btn">Voltar</a>',
-            active="norteador"
-        ))
+        return "", "", "", {}
 
-    semanas = conn.execute(
-        "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem",
-        (doc["trimestre"], doc["ano_letivo"])
-    ).fetchall()
-    alertas = conn.execute(
-        "SELECT * FROM calendario_alertas WHERE trimestre=? AND ano_letivo=? ORDER BY id",
-        (doc["trimestre"], doc["ano_letivo"])
-    ).fetchall()
-    alertas_por_semana = {}
-    for al in alertas:
-        alertas_por_semana.setdefault(al["ordem_apos_semana_id"], []).append(al["texto"])
     preenchidas = {r["calendario_semana_id"]: r for r in conn.execute(
         "SELECT * FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=?",
         (documento_id, ano_escolaridade)
@@ -4820,19 +4855,11 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         """, (row["id"],)).fetchall()
         habilidades_por_semana[semana_id] = [h["codigo"] for h in habs]
 
-    # Sugestões do Referencial Curricular pra essa disciplina+ano+trimestre — mostradas
-    # como apoio, o docente escolhe o que quiser usar (04/09/2026).
     referencial = conn.execute(
         "SELECT * FROM referencial_curricular WHERE disciplina_id=? AND ano_escolaridade=? AND trimestre=?",
         (doc["disciplina_id"], ano_escolaridade, doc["trimestre"])
     ).fetchall()
 
-    # Índice de cobertura do Referencial Curricular (05/09/2026, a pedido de Felipe):
-    # mostra ao docente quanto do conteúdo estimado do trimestre já foi coberto pelas
-    # semanas preenchidas. Funciona pra qualquer disciplina, pois usa só o que já está
-    # cadastrado no Referencial Curricular daquela disciplina/ano/trimestre (seed
-    # automático ou blocos manuais em /norteador/referencial-curricular) — não tem nada
-    # específico de disciplina aqui.
     habilidades_cobertas_geral = set()
     for lst in habilidades_por_semana.values():
         habilidades_cobertas_geral.update(lst)
@@ -4848,10 +4875,6 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         habilidades_referencial_geral.update(codigos_ref)
         referencial_com_habs.append((ref, habs_ref, codigos_ref))
 
-    # Onde cada habilidade "extra" (usada no planejamento mas fora do Referencial deste
-    # trimestre) aparece no resto do Referencial dessa disciplina — pra sinalizar se é de
-    # outro trimestre do mesmo ano, de outro ano de escolaridade, ou nem consta no
-    # Referencial cadastrado (05/09/2026, a pedido de Felipe).
     outros_blocos_raw = conn.execute(
         "SELECT id, ano_escolaridade, trimestre FROM referencial_curricular WHERE disciplina_id=? AND NOT (ano_escolaridade=? AND trimestre=?)",
         (doc["disciplina_id"], ano_escolaridade, doc["trimestre"])
@@ -4899,9 +4922,6 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     if not sugestoes_html:
         sugestoes_html = '<p style="font-size:12px; color:var(--text-muted);">Nenhum Referencial Curricular cadastrado ainda pra essa disciplina/ano/trimestre.</p>'
 
-    # Mapa habilidade -> objetos de conhecimento do Referencial Curricular (primeira
-    # ocorrência), usado pelo JS abaixo pra autopreencher a coluna "Objeto do
-    # conhecimento" assim que o docente escolhe a habilidade na busca (05/09/2026).
     objeto_por_habilidade = {}
     for ref, habs_ref, codigos_ref in referencial_com_habs:
         for c in codigos_ref:
@@ -4912,9 +4932,6 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     cobertas_do_referencial = len(habilidades_cobertas_geral & habilidades_referencial_geral)
     extras_fora_referencial = habilidades_cobertas_geral - habilidades_referencial_geral
 
-    # Classificação das habilidades "extras" — de outro trimestre do mesmo ano, de outro
-    # ano de escolaridade, ou sem nenhuma correspondência no Referencial dessa disciplina
-    # (05/09/2026, a pedido de Felipe — mostrado num resumo ao final da tela).
     outro_trimestre_mesmo_ano = []
     outro_ano_escolaridade = []
     sem_correspondencia_alguma = []
@@ -4948,8 +4965,8 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
                 {_linha_resumo("Sem correspondência no Referencial Curricular dessa disciplina", sem_correspondencia_alguma, "var(--red)")}
             </tbody>
         </table>
-        <p style="font-size:11px; color:var(--text-muted); margin:8px 0 0;">Não tem problema usar habilidades de outro trimestre/ano (revisão, antecipação, turma com defasagem etc.) — isso aqui é só um raio-x pra você conferir se foi intencional.</p>
-    </div>""" if habilidades_cobertas_geral else ""
+        <p style="font-size:11px; color:var(--text-muted); margin:8px 0 0;">Não tem problema usar habilidades de outro trimestre/ano (revisão, antecipação, turma com defasagem etc.) — isso aqui é só um raio-x pra você conferir se foi intencional. Esse resumo se atualiza sozinho conforme você vai salvando, não precisa terminar tudo de uma vez.</p>
+    </div>""" if habilidades_cobertas_geral else '<div id="resumo-vazio" style="font-size:12px; color:var(--text-muted); margin:18px 0;">Nenhuma habilidade cadastrada ainda neste planejamento.</div>'
 
     if total_referencial > 0:
         percentual_cobertura = round(100 * cobertas_do_referencial / total_referencial)
@@ -4984,6 +5001,76 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         </div>"""
     else:
         indice_cobertura_html = ""
+
+    return sugestoes_html, indice_cobertura_html, resumo_final_habilidades_html, objeto_por_habilidade
+
+
+@app.get("/norteador/{documento_id}/{ano_escolaridade}/resumo-fragmento")
+def resumo_fragmento_norteador(request: Request, documento_id: int, ano_escolaridade: str):
+    """Reflete o estado mais atual do planejamento (índice de cobertura + resumo de
+    habilidades) sem precisar recarregar a página inteira — chamado pelo JS depois de
+    cada autosave bem-sucedido (05/09/2026, a pedido de Felipe)."""
+    prof = get_current_professor(request)
+    if not prof:
+        return JSONResponse({"ok": False}, status_code=401)
+    conn = get_db()
+    tem_acesso = _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade)
+    conn.close()
+    if not tem_acesso:
+        return JSONResponse({"ok": False}, status_code=403)
+    _, indice_cobertura_html, resumo_final_habilidades_html, _ = _calcular_resumo_norteador(documento_id, ano_escolaridade)
+    return JSONResponse({"ok": True, "cobertura_html": indice_cobertura_html, "resumo_html": resumo_final_habilidades_html})
+
+
+@app.get("/norteador/{documento_id}/{ano_escolaridade}", response_class=HTMLResponse)
+def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridade: str):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+
+    conn = get_db()
+    doc = conn.execute("SELECT * FROM documentos_norteadores WHERE id = ?", (documento_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
+    pode_editar = _pode_editar_norteador(prof, conn, documento_id, ano_escolaridade)
+    if not pode_editar:
+        # 05/09/2026: professor sem vínculo nesse ano não pode nem visualizar, só quem
+        # foi designado (ou gestão/admin, que _pode_editar_norteador já libera).
+        conn.close()
+        return HTMLResponse(render_page(
+            "Sem acesso",
+            f'<div class="empty">Você não foi designado como docente responsável do {ano_escolaridade} nesse Documento Norteador. '
+            f'Fale com a gestão se acha que isso é um engano.</div><a href="/norteador/{documento_id}" class="btn">Voltar</a>',
+            active="norteador"
+        ))
+
+    semanas = conn.execute(
+        "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem",
+        (doc["trimestre"], doc["ano_letivo"])
+    ).fetchall()
+    alertas = conn.execute(
+        "SELECT * FROM calendario_alertas WHERE trimestre=? AND ano_letivo=? ORDER BY id",
+        (doc["trimestre"], doc["ano_letivo"])
+    ).fetchall()
+    alertas_por_semana = {}
+    for al in alertas:
+        alertas_por_semana.setdefault(al["ordem_apos_semana_id"], []).append(al["texto"])
+    preenchidas = {r["calendario_semana_id"]: r for r in conn.execute(
+        "SELECT * FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=?",
+        (documento_id, ano_escolaridade)
+    ).fetchall()}
+    habilidades_por_semana = {}
+    for semana_id, row in preenchidas.items():
+        habs = conn.execute("""
+            SELECT h.codigo FROM documento_norteador_semana_habilidades dsh
+            JOIN habilidades_bncc h ON h.id = dsh.habilidade_id WHERE dsh.semana_id = ?
+        """, (row["id"],)).fetchall()
+        habilidades_por_semana[semana_id] = [h["codigo"] for h in habs]
+    conn.close()
+
+    sugestoes_html, indice_cobertura_html, resumo_final_habilidades_html, objeto_por_habilidade = \
+        _calcular_resumo_norteador(documento_id, ano_escolaridade)
 
     cards_form = ""
     for al_texto in alertas_por_semana.get(None, []):
@@ -5048,8 +5135,27 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "        if (el) { el.textContent = texto; el.style.color = cor || 'var(--text-muted)'; }\n"
         "    }\n"
         "\n"
+        "    function atualizarResumoDinamico() {\n"
+        "        fetch(window.location.pathname + '/resumo-fragmento').then(function(r){return r.json();}).then(function(data) {\n"
+        "            if (!data.ok) return;\n"
+        "            var cob = document.getElementById('bloco-cobertura');\n"
+        "            var res = document.getElementById('bloco-resumo-habilidades');\n"
+        "            if (cob) cob.innerHTML = data.cobertura_html;\n"
+        "            if (res) res.innerHTML = data.resumo_html;\n"
+        "        }).catch(function(){});\n"
+        "    }\n"
+        "\n"
+        "    // Evita que dois autosaves da mesma semana rodem ao mesmo tempo: se um já está\n"
+        "    // em andamento quando outro é disparado, só marca 'reenviar' e espera o atual\n"
+        "    // terminar pra mandar de novo com o estado mais recente. Sem isso, uma resposta\n"
+        "    // atrasada podia chegar DEPOIS de uma mais nova e sobrescrever com dado velho —\n"
+        "    // era isso que fazia a habilidade 'sumir' às vezes (05/09/2026).\n"
+        "    var emVoo = {};\n"
+        "    var reenviar = {};\n"
         "    function autosalvar(sid) {\n"
         "        if (!PODE_EDITAR) return;\n"
+        "        if (emVoo[sid]) { reenviar[sid] = true; return; }\n"
+        "        emVoo[sid] = true;\n"
         "        var objetoArea = document.querySelector('textarea[name=\"obj_' + sid + '\"]');\n"
         "        var objetivoArea = document.querySelector('textarea[name=\"objetivo_' + sid + '\"]');\n"
         "        var ativArea = document.querySelector('textarea[name=\"ativ_' + sid + '\"]');\n"
@@ -5063,10 +5169,16 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "        fetch(AUTOSAVE_URL_BASE + sid + '/autosave', { method: 'POST', body: body })\n"
         "            .then(function(r) { return r.json(); })\n"
         "            .then(function(data) {\n"
-        "                if (data.ok) { marcarStatus(sid, '✓ Salvo às ' + data.saved_at, 'var(--green)'); }\n"
+        "                emVoo[sid] = false;\n"
+        "                if (data.ok) { marcarStatus(sid, '✓ Salvo às ' + data.saved_at, 'var(--green)'); atualizarResumoDinamico(); }\n"
         "                else { marcarStatus(sid, '⚠ Não foi possível salvar', 'var(--red)'); }\n"
+        "                if (reenviar[sid]) { reenviar[sid] = false; autosalvar(sid); }\n"
         "            })\n"
-        "            .catch(function() { marcarStatus(sid, '⚠ Sem conexão — tente de novo', 'var(--red)'); });\n"
+        "            .catch(function() {\n"
+        "                emVoo[sid] = false;\n"
+        "                marcarStatus(sid, '⚠ Sem conexão — tente de novo', 'var(--red)');\n"
+        "                if (reenviar[sid]) { reenviar[sid] = false; autosalvar(sid); }\n"
+        "            });\n"
         "    }\n"
         "\n"
         "    var timers = {};\n"
@@ -5213,7 +5325,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         </div>
         {aviso_sem_permissao}
         {aviso_autosave}
-        {indice_cobertura_html}
+        <div id="bloco-cobertura">{indice_cobertura_html}</div>
         <details style="margin-bottom:16px;">
             <summary style="cursor:pointer; font-weight:600; font-size:13px;">📚 Sugestões do Referencial Curricular (clique pra ver)</summary>
             <div style="margin-top:10px;">{sugestoes_html}</div>
@@ -5226,7 +5338,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         </style>
         <form method="post" action="/norteador/{documento_id}/{ano_escolaridade}">
             {cards_form if cards_form else '<div class="empty">Nenhuma semana cadastrada no calendário desse trimestre ainda.</div>'}
-            {resumo_final_habilidades_html}
+            <div id="bloco-resumo-habilidades">{resumo_final_habilidades_html}</div>
             <div class="page-actions" style="margin-top:14px;">
                 {botao_salvar}
                 <a href="/norteador/{documento_id}" class="btn">Voltar</a>
