@@ -5170,13 +5170,19 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "            .then(function(r) { return r.json(); })\n"
         "            .then(function(data) {\n"
         "                emVoo[sid] = false;\n"
-        "                if (data.ok) { marcarStatus(sid, '✓ Salvo às ' + data.saved_at, 'var(--green)'); atualizarResumoDinamico(); }\n"
-        "                else { marcarStatus(sid, '⚠ Não foi possível salvar', 'var(--red)'); }\n"
+        "                if (data.ok) {\n"
+        "                    marcarStatus(sid, '✓ Salvo às ' + data.saved_at, 'var(--green)');\n"
+        "                    atualizarResumoDinamico();\n"
+        "                } else {\n"
+        "                    marcarStatus(sid, '⚠ Erro ao salvar, tentando de novo…', 'var(--red)');\n"
+        "                    setTimeout(function() { autosalvar(sid); }, 2000);\n"
+        "                }\n"
         "                if (reenviar[sid]) { reenviar[sid] = false; autosalvar(sid); }\n"
         "            })\n"
         "            .catch(function() {\n"
         "                emVoo[sid] = false;\n"
-        "                marcarStatus(sid, '⚠ Sem conexão — tente de novo', 'var(--red)');\n"
+        "                marcarStatus(sid, '⚠ Sem conexão, tentando de novo…', 'var(--red)');\n"
+        "                setTimeout(function() { autosalvar(sid); }, 2000);\n"
         "                if (reenviar[sid]) { reenviar[sid] = false; autosalvar(sid); }\n"
         "            });\n"
         "    }\n"
@@ -5353,7 +5359,19 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
 async def autosave_norteador_semana(request: Request, documento_id: int, ano_escolaridade: str, semana_id: int):
     """Salva uma semana isoladamente assim que o docente digita (05/09/2026, a pedido
     de Felipe) — mesma lógica de upsert usada no 'Salvar tudo agora', só que disparada
-    por AJAX a cada campo em vez de esperar o POST do formulário inteiro."""
+    por AJAX a cada campo em vez de esperar o POST do formulário inteiro.
+
+    05/09/2026 (correção): a coluna habilidades_bncc.codigo é UNIQUE, e o padrão antigo
+    'buscar por código, se não existir inserir' tem uma condição de corrida — se duas
+    chamadas de autosave (de semanas diferentes) tentarem cadastrar o MESMO código novo
+    quase ao mesmo tempo, a segunda inserção quebra com erro de integridade e, como o
+    commit só acontecia no final da função, a semana inteira daquela chamada (incluindo
+    objeto/objetivo/atividade) não era salva — provavelmente a causa real da habilidade
+    'não fixar' relatada por Felipe. Corrigido com: (1) INSERT OR IGNORE em vez de
+    buscar-depois-inserir, que não quebra em corrida; (2) commit dos campos de texto
+    ANTES de mexer nas habilidades, pra um problema nas habilidades nunca apagar o que
+    já foi digitado; (3) try/except cobrindo tudo, sempre devolvendo JSON (nunca um erro
+    HTTP genérico que o JS não consegue interpretar)."""
     prof = get_current_professor(request)
     if not prof:
         return JSONResponse({"ok": False, "erro": "não autenticado"}, status_code=401)
@@ -5363,41 +5381,45 @@ async def autosave_norteador_semana(request: Request, documento_id: int, ano_esc
         conn.close()
         return JSONResponse({"ok": False, "erro": "sem permissão"}, status_code=403)
 
-    form = await request.form()
-    objeto = (form.get("objeto") or "").strip()
-    objetivo = (form.get("objetivo") or "").strip()
-    atividade = (form.get("atividade") or "").strip()
-    habs_texto = (form.get("habilidades") or "").strip()
-    codigos = [c.strip().upper() for c in habs_texto.split(",") if c.strip()]
+    try:
+        form = await request.form()
+        objeto = (form.get("objeto") or "").strip()
+        objetivo = (form.get("objetivo") or "").strip()
+        atividade = (form.get("atividade") or "").strip()
+        habs_texto = (form.get("habilidades") or "").strip()
+        codigos = [c.strip().upper() for c in habs_texto.split(",") if c.strip()]
 
-    existente = conn.execute(
-        "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
-        (documento_id, ano_escolaridade, semana_id)
-    ).fetchone()
-    if existente:
-        semana_row_id = existente["id"]
-        conn.execute("""UPDATE documento_norteador_semanas SET objeto_conhecimento=?, objetivo_aprendizagem=?,
-                         atividade=?, atualizado_por_professor_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
-                     (objeto or None, objetivo or None, atividade or None, prof["id"], semana_row_id))
-    else:
-        cur = conn.execute("""INSERT INTO documento_norteador_semanas
-            (documento_id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem, atividade, atualizado_por_professor_id, atualizado_em)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-            (documento_id, ano_escolaridade, semana_id, objeto or None, objetivo or None, atividade or None, prof["id"]))
-        semana_row_id = cur.lastrowid
-
-    conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id = ?", (semana_row_id,))
-    for codigo in codigos:
-        hab = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
-        if not hab:
-            cur2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, None))
-            hab_id = cur2.lastrowid
+        existente = conn.execute(
+            "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
+            (documento_id, ano_escolaridade, semana_id)
+        ).fetchone()
+        if existente:
+            semana_row_id = existente["id"]
+            conn.execute("""UPDATE documento_norteador_semanas SET objeto_conhecimento=?, objetivo_aprendizagem=?,
+                             atividade=?, atualizado_por_professor_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                         (objeto or None, objetivo or None, atividade or None, prof["id"], semana_row_id))
         else:
-            hab_id = hab["id"]
-        conn.execute("INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)", (semana_row_id, hab_id))
-    conn.commit()
-    conn.close()
-    return JSONResponse({"ok": True, "saved_at": datetime.now().strftime("%H:%M:%S")})
+            cur = conn.execute("""INSERT INTO documento_norteador_semanas
+                (documento_id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem, atividade, atualizado_por_professor_id, atualizado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (documento_id, ano_escolaridade, semana_id, objeto or None, objetivo or None, atividade or None, prof["id"]))
+            semana_row_id = cur.lastrowid
+        conn.commit()  # texto salvo primeiro, independente do que acontecer com as habilidades abaixo
+
+        conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id = ?", (semana_row_id,))
+        for codigo in codigos:
+            conn.execute("INSERT OR IGNORE INTO habilidades_bncc (codigo, descricao) VALUES (?, NULL)", (codigo,))
+            hab_id = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()["id"]
+            conn.execute("INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)", (semana_row_id, hab_id))
+        conn.commit()
+        conn.close()
+        return JSONResponse({"ok": True, "saved_at": datetime.now().strftime("%H:%M:%S")})
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return JSONResponse({"ok": False, "erro": str(e)}, status_code=200)
 
 
 @app.post("/norteador/{documento_id}/{ano_escolaridade}")
@@ -5443,15 +5465,11 @@ async def salvar_norteador_ano(request: Request, documento_id: int, ano_escolari
         conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id = ?", (semana_row_id,))
         codigos = [c.strip().upper() for c in habs_texto.split(",") if c.strip()]
         for codigo in codigos:
-            hab = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
-            if not hab:
-                cur2 = conn.execute("INSERT INTO habilidades_bncc (codigo, descricao) VALUES (?, ?)", (codigo, None))
-                hab_id = cur2.lastrowid
-            else:
-                hab_id = hab["id"]
+            conn.execute("INSERT OR IGNORE INTO habilidades_bncc (codigo, descricao) VALUES (?, NULL)", (codigo,))
+            hab_id = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()["id"]
             conn.execute("INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)", (semana_row_id, hab_id))
+        conn.commit()  # commit por semana (05/09/2026) — um problema numa semana não derruba as outras já processadas neste POST
 
-    conn.commit()
     conn.close()
     return RedirectResponse(f"/norteador/{documento_id}/{ano_escolaridade}", status_code=303)
 
