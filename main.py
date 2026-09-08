@@ -5061,12 +5061,12 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
     for s in semanas:
         r = preenchidas.get(s["id"])
         habs_atual = ", ".join(habilidades_por_semana.get(s["id"], []))
-        objeto_atual = r["objeto_conhecimento"] if r else ""
-        objetivo_atual = r["objetivo_aprendizagem"] if r else ""
-        atividade_atual = r["atividade"] if r else ""
+        objeto_atual = (r["objeto_conhecimento"] or "") if r else ""
+        objetivo_atual = (r["objetivo_aprendizagem"] or "") if r else ""
+        atividade_atual = (r["atividade"] or "") if r else ""
         disabled = "" if pode_editar else "disabled"
         busca_html = (
-            '<input type="search" class="bncc-row-search" placeholder="Digite o código (EF69EF03) ou uma palavra-chave (esporte, leitura...)">'
+            '<input type="search" class="bncc-row-search" autocomplete="off" placeholder="Digite o código (EF69EF03) ou uma palavra-chave (esporte, leitura...)">'
             if pode_editar else ""
         )
         habilidade_widget = f"""
@@ -5081,9 +5081,10 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
             <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:12px;">
                 <h3 style="margin:0; font-size:15px;">{s["label"]}{f' <span style="font-size:11px; color:var(--text-muted); font-weight:400;">— {s["nota"]}</span>' if s["nota"] else ""}</h3>
             </div>
-            <label style="margin-bottom:12px;">Habilidade(s) BNCC
+            <div style="margin-bottom:12px;">
+                <div style="font-weight:600; margin-bottom:4px;">Habilidade(s) BNCC</div>
                 {habilidade_widget}
-            </label>
+            </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
                 <label>Objeto do conhecimento
                     <textarea name="obj_{s["id"]}" rows="5" style="width:100%; margin:0;" {disabled}>{objeto_atual}</textarea>
