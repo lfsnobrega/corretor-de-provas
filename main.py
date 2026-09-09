@@ -1241,6 +1241,29 @@ REFERENCIAL_CURRICULAR_PORTUGUES = [
 ]
 
 
+def _migrar_atividades_por_docente(conn):
+    """Copia o texto que já existia em documento_norteador_semanas.atividade pra nova
+    tabela por docente (documento_norteador_semana_atividades), uma cópia pra cada
+    docente vinculado ao ano daquela semana — assim ninguém perde o que já tinha
+    escrito quando essa separação (atividade por professor) entrou. Idempotente via
+    INSERT OR IGNORE: não sobrescreve nada que algum docente já tenha editado na tabela
+    nova, e roda de novo a cada start só pra cobrir docentes vinculados depois da
+    primeira migração (06/09/2026)."""
+    semanas_com_atividade = conn.execute(
+        "SELECT id, documento_id, ano_escolaridade, atividade FROM documento_norteador_semanas WHERE atividade IS NOT NULL AND atividade != ''"
+    ).fetchall()
+    for s in semanas_com_atividade:
+        docentes = conn.execute(
+            "SELECT id FROM documento_norteador_docentes WHERE documento_id=? AND ano_escolaridade=?",
+            (s["documento_id"], s["ano_escolaridade"])
+        ).fetchall()
+        for d in docentes:
+            conn.execute(
+                "INSERT OR IGNORE INTO documento_norteador_semana_atividades (semana_id, docente_vinculo_id, atividade, atualizado_em) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                (s["id"], d["id"], s["atividade"])
+            )
+
+
 def _seed_referencial_curricular(conn):
     """Popula o Referencial Curricular a partir das listas REFERENCIAL_CURRICULAR_*
     (uma por disciplina). Idempotente — só insere o que ainda não existe, então pode
@@ -1992,6 +2015,28 @@ def init_db():
         FOREIGN KEY (semana_id) REFERENCES documento_norteador_semanas(id) ON DELETE CASCADE,
         FOREIGN KEY (habilidade_id) REFERENCES habilidades_bncc(id)
     )""")
+
+    # Atividade por docente (06/09/2026, a pedido de Felipe): habilidades/objeto/objetivo
+    # continuam únicos por semana (compartilhados entre todos os docentes daquele ano —
+    # é o mesmo conteúdo curricular). Mas a ATIVIDADE em si pode ser diferente por
+    # professor, já que professores diferentes atendendo turmas diferentes do mesmo ano
+    # (ex: 801/802/803 com o Prof. X, 804/805/806 com a Prof.ª Y) costumam abordar o
+    # mesmo conteúdo de formas diferentes. Cada linha aqui é a atividade de UM docente
+    # vinculado (documento_norteador_docentes.id, que cobre tanto professor com conta
+    # quanto "nome_livre" sem conta) pra UMA semana. A coluna "atividade" antiga que
+    # ficava em documento_norteador_semanas não é mais escrita a partir de agora (fica
+    # congelada como histórico do que existia antes dessa mudança).
+    conn.execute("""CREATE TABLE IF NOT EXISTS documento_norteador_semana_atividades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        semana_id INTEGER NOT NULL,
+        docente_vinculo_id INTEGER NOT NULL,
+        atividade TEXT,
+        atualizado_em TIMESTAMP,
+        UNIQUE(semana_id, docente_vinculo_id),
+        FOREIGN KEY (semana_id) REFERENCES documento_norteador_semanas(id) ON DELETE CASCADE,
+        FOREIGN KEY (docente_vinculo_id) REFERENCES documento_norteador_docentes(id) ON DELETE CASCADE
+    )""")
+    _migrar_atividades_por_docente(conn)
     _seed_referencial_curricular(conn)
 
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
@@ -4355,6 +4400,42 @@ def excluir_referencial_curricular(request: Request, referencial_id: int):
 
 # ============ DOCUMENTO NORTEADOR — 04/09/2026 ============
 
+def _docentes_vinculados_com_turmas(conn, documento_id: int, ano_escolaridade: str, disciplina_id: int):
+    """Lista os docentes vinculados a esse ano+documento, com as turmas que cada um
+    leciona nessa disciplina — puxado de boletim_professor_turma, preenchido no
+    onboarding do professor (login inicial), então não precisa cadastrar nada novo, é só
+    citação informativa (06/09/2026, a pedido de Felipe). Turma é considerada "desse
+    ano" quando o nome começa com o dígito do ano de escolaridade (ex: "801" → 8º ano),
+    mesma convenção já usada em _turmas_do_ano."""
+    ano_digito = ano_escolaridade[0] if ano_escolaridade else ""
+    docentes = conn.execute("""
+        SELECT dnd.id AS vinculo_id, dnd.professor_id, dnd.nome_livre, p.nome AS professor_nome
+        FROM documento_norteador_docentes dnd
+        LEFT JOIN professores p ON p.id = dnd.professor_id
+        WHERE dnd.documento_id = ? AND dnd.ano_escolaridade = ?
+        ORDER BY COALESCE(p.nome, dnd.nome_livre)
+    """, (documento_id, ano_escolaridade)).fetchall()
+    resultado = []
+    for d in docentes:
+        nome = d["professor_nome"] or d["nome_livre"] or "Docente sem nome"
+        turmas = []
+        if d["professor_id"]:
+            turmas_rows = conn.execute("""
+                SELECT DISTINCT t.nome FROM boletim_professor_turma bpt
+                JOIN turmas t ON t.id = bpt.turma_id
+                WHERE bpt.professor_id = ? AND bpt.disciplina_id = ?
+                ORDER BY t.nome
+            """, (d["professor_id"], disciplina_id)).fetchall()
+            turmas = [t["nome"] for t in turmas_rows if str(t["nome"]).startswith(ano_digito)]
+        resultado.append({
+            "vinculo_id": d["vinculo_id"],
+            "professor_id": d["professor_id"],
+            "nome": nome,
+            "turmas": turmas,
+        })
+    return resultado
+
+
 def _pode_editar_norteador(prof, conn, documento_id: int, ano_escolaridade: str) -> bool:
     """Admin/gestão sempre pode. Docente só pode editar o ano de escolaridade em que
     está listado como responsável naquele Documento Norteador (04/09/2026)."""
@@ -4729,12 +4810,13 @@ def documento_norteador_formatado(request: Request, documento_id: int):
         return HTMLResponse(render_page("Erro", '<div class="empty">Documento Norteador não encontrado.</div>', active="norteador"))
 
     docentes = conn.execute("""
-        SELECT dnd.ano_escolaridade, p.nome FROM documento_norteador_docentes dnd
+        SELECT dnd.id AS vinculo_id, dnd.ano_escolaridade, dnd.professor_id, COALESCE(p.nome, dnd.nome_livre) AS nome
+        FROM documento_norteador_docentes dnd
         LEFT JOIN professores p ON p.id = dnd.professor_id WHERE dnd.documento_id = ? ORDER BY dnd.ano_escolaridade
     """, (documento_id,)).fetchall()
     docentes_por_ano = {}
     for d in docentes:
-        docentes_por_ano.setdefault(d["ano_escolaridade"], []).append(d["nome"])
+        docentes_por_ano.setdefault(d["ano_escolaridade"], []).append({"vinculo_id": d["vinculo_id"], "nome": d["nome"]})
 
     semanas = conn.execute(
         "SELECT * FROM calendario_semanas WHERE trimestre=? AND ano_letivo=? ORDER BY ordem", (doc["trimestre"], doc["ano_letivo"])
@@ -4748,6 +4830,7 @@ def documento_norteador_formatado(request: Request, documento_id: int):
 
     tabelas_por_ano_html = ""
     for a in ANOS:
+        docentes_deste_ano = docentes_por_ano.get(a, [])
         preenchidas = {r["calendario_semana_id"]: r for r in conn.execute(
             "SELECT * FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=?", (documento_id, a)
         ).fetchall()}
@@ -4757,21 +4840,33 @@ def documento_norteador_formatado(request: Request, documento_id: int):
         for s in semanas:
             r = preenchidas.get(s["id"])
             habs_str = "—"
+            atividade_str = "—"
             if r:
                 habs = conn.execute("""SELECT h.codigo FROM documento_norteador_semana_habilidades dsh
                     JOIN habilidades_bncc h ON h.id=dsh.habilidade_id WHERE dsh.semana_id=?""", (r["id"],)).fetchall()
                 habs_str = ", ".join(h["codigo"] for h in habs) or "—"
+                ativ_rows = conn.execute(
+                    "SELECT docente_vinculo_id, atividade FROM documento_norteador_semana_atividades WHERE semana_id=?",
+                    (r["id"],)
+                ).fetchall()
+                ativ_por_vinculo = {ar["docente_vinculo_id"]: ar["atividade"] for ar in ativ_rows if ar["atividade"]}
+                if len(docentes_deste_ano) > 1:
+                    partes = [f"<strong>{d['nome']}:</strong> {ativ_por_vinculo[d['vinculo_id']]}"
+                              for d in docentes_deste_ano if d["vinculo_id"] in ativ_por_vinculo]
+                    atividade_str = "<br>".join(partes) if partes else "—"
+                elif docentes_deste_ano:
+                    atividade_str = ativ_por_vinculo.get(docentes_deste_ano[0]["vinculo_id"]) or "—"
             linhas += f"""<tr>
                 <td style="padding:4px 8px; font-size:11px; font-weight:600;">{s["label"]}{f'<div style="font-weight:400; color:#666;">{s["nota"]}</div>' if s["nota"] else ""}</td>
                 <td style="padding:4px 8px; font-size:11px;">{habs_str}</td>
                 <td style="padding:4px 8px; font-size:11px;">{(r["objeto_conhecimento"] if r and r["objeto_conhecimento"] else "—")}</td>
                 <td style="padding:4px 8px; font-size:11px;">{(r["objetivo_aprendizagem"] if r and r["objetivo_aprendizagem"] else "—")}</td>
-                <td style="padding:4px 8px; font-size:11px;">{(r["atividade"] if r and r["atividade"] else "—")}</td>
+                <td style="padding:4px 8px; font-size:11px;">{atividade_str}</td>
             </tr>"""
             for al_texto in alertas_por_semana.get(s["id"], []):
                 linhas += f'<tr><td colspan="5" style="background:#fef3c7; padding:4px 8px; font-size:11px;">{html.escape(al_texto)}</td></tr>'
 
-        nomes_ano = ", ".join(docentes_por_ano.get(a, [])) or "—"
+        nomes_ano = ", ".join(d["nome"] for d in docentes_deste_ano) or "—"
         tabelas_por_ano_html += f"""
         <h3 style="font-size:13px; margin:20px 0 4px 0; page-break-before:always;">{a} de escolaridade — {nomes_ano}</h3>
         <table style="width:100%; border-collapse:collapse; font-size:11px; margin-bottom:10px;">
@@ -4788,7 +4883,7 @@ def documento_norteador_formatado(request: Request, documento_id: int):
     grade_docentes = "".join(f"""
         <td style="padding:6px 10px; text-align:center; vertical-align:top; border:1px solid #ccc;">
             <div style="font-weight:700; font-size:11px;">{a}</div>
-            <div style="font-size:11px;">{", ".join(docentes_por_ano.get(a, [])) or "—"}</div>
+            <div style="font-size:11px;">{", ".join(d["nome"] for d in docentes_por_ano.get(a, [])) or "—"}</div>
         </td>""" for a in ANOS)
     conn.close()
 
@@ -5044,12 +5139,22 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         (documento_id, ano_escolaridade)
     ).fetchall()}
     habilidades_por_semana = {}
+    atividades_por_semana = {}  # semana_id (calendario) -> {docente_vinculo_id: texto}
     for semana_id, row in preenchidas.items():
         habs = conn.execute("""
             SELECT h.codigo FROM documento_norteador_semana_habilidades dsh
             JOIN habilidades_bncc h ON h.id = dsh.habilidade_id WHERE dsh.semana_id = ?
         """, (row["id"],)).fetchall()
         habilidades_por_semana[semana_id] = [h["codigo"] for h in habs]
+        ativ_rows = conn.execute(
+            "SELECT docente_vinculo_id, atividade FROM documento_norteador_semana_atividades WHERE semana_id = ?",
+            (row["id"],)
+        ).fetchall()
+        atividades_por_semana[semana_id] = {a["docente_vinculo_id"]: (a["atividade"] or "") for a in ativ_rows}
+
+    docentes_do_ano = _docentes_vinculados_com_turmas(conn, documento_id, ano_escolaridade, doc["disciplina_id"])
+    meu_vinculo_id = next((d["vinculo_id"] for d in docentes_do_ano if d["professor_id"] == prof["id"]), None)
+    sou_gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
     conn.close()
 
     sugestoes_html, indice_cobertura_html, resumo_final_habilidades_html, objeto_por_habilidade = \
@@ -5063,7 +5168,6 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         habs_atual = ", ".join(habilidades_por_semana.get(s["id"], []))
         objeto_atual = (r["objeto_conhecimento"] or "") if r else ""
         objetivo_atual = (r["objetivo_aprendizagem"] or "") if r else ""
-        atividade_atual = (r["atividade"] or "") if r else ""
         disabled = "" if pode_editar else "disabled"
         busca_html = (
             '<input type="search" class="bncc-row-search" autocomplete="off" placeholder="Digite o código (EF69EF03) ou uma palavra-chave (esporte, leitura...)">'
@@ -5076,6 +5180,34 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
                 {busca_html}
                 <div class="bncc-row-results" style="margin-top:6px;"></div>
             </div>"""
+
+        # Atividade por docente (06/09/2026): quando só tem 1 docente vinculado (ou
+        # nenhum), a tela fica igual a antes — uma caixa só, chamada "Atividade". Quando
+        # tem mais de 1, vira uma caixa por docente, com o nome dele e as turmas que
+        # leciona (só informativo) — cada um só edita a própria; gestão/admin edita
+        # todas.
+        ativs_desta_semana = atividades_por_semana.get(s["id"], {})
+        if len(docentes_do_ano) <= 1:
+            vinculo_id = docentes_do_ano[0]["vinculo_id"] if docentes_do_ano else ""
+            valor = ativs_desta_semana.get(vinculo_id, "") if vinculo_id else ""
+            bloco_atividade = f"""
+            <label>Atividade
+                <textarea name="ativ_{s["id"]}_{vinculo_id}" rows="3" style="width:100%; margin:0;" {disabled}>{valor}</textarea>
+            </label>""" if vinculo_id else f"""
+            <div class="tip" style="font-size:11px;">Nenhum docente vinculado a esse ano ainda — cadastre em "Editar documento" pra poder registrar a atividade.</div>"""
+        else:
+            blocos_docentes = ""
+            for docv in docentes_do_ano:
+                valor = ativs_desta_semana.get(docv["vinculo_id"], "")
+                pode_editar_esta = pode_editar and (sou_gestao or docv["vinculo_id"] == meu_vinculo_id)
+                d_disabled = "" if pode_editar_esta else "disabled"
+                turmas_str = f' <span style="font-weight:400; color:var(--text-muted);">(turmas {", ".join(docv["turmas"])})</span>' if docv["turmas"] else ""
+                blocos_docentes += f"""
+                <label>Atividade — {docv["nome"]}{turmas_str}
+                    <textarea name="ativ_{s["id"]}_{docv["vinculo_id"]}" rows="3" style="width:100%; margin:0;" {d_disabled}>{valor}</textarea>
+                </label>"""
+            bloco_atividade = blocos_docentes
+
         cards_form += f"""
         <div class="norteador-semana-card" data-semana-card="{s["id"]}">
             <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:12px;">
@@ -5093,9 +5225,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
                     <textarea name="objetivo_{s["id"]}" rows="5" style="width:100%; margin:0;" {disabled}>{objetivo_atual}</textarea>
                 </label>
             </div>
-            <label>Atividade
-                <textarea name="ativ_{s["id"]}" rows="3" style="width:100%; margin:0;" {disabled}>{atividade_atual}</textarea>
-            </label>
+            {bloco_atividade}
         </div>"""
         for al_texto in alertas_por_semana.get(s["id"], []):
             cards_form += f'<div class="norteador-alerta">⚠ {html.escape(al_texto)}</div>'
@@ -5261,13 +5391,13 @@ async def salvar_norteador_ano(request: Request, documento_id: int, ano_escolari
     semanas = conn.execute(
         "SELECT id FROM calendario_semanas WHERE trimestre=? AND ano_letivo=?", (doc["trimestre"], doc["ano_letivo"])
     ).fetchall()
+    sou_gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
 
     form = await request.form()
     for s in semanas:
         sid = s["id"]
         objeto = (form.get(f"obj_{sid}") or "").strip()
         objetivo = (form.get(f"objetivo_{sid}") or "").strip()
-        atividade = (form.get(f"ativ_{sid}") or "").strip()
         habs_texto = (form.get(f"hab_{sid}") or "").strip()
 
         existente = conn.execute(
@@ -5277,13 +5407,13 @@ async def salvar_norteador_ano(request: Request, documento_id: int, ano_escolari
         if existente:
             semana_row_id = existente["id"]
             conn.execute("""UPDATE documento_norteador_semanas SET objeto_conhecimento=?, objetivo_aprendizagem=?,
-                             atividade=?, atualizado_por_professor_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
-                         (objeto or None, objetivo or None, atividade or None, prof["id"], semana_row_id))
+                             atualizado_por_professor_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                         (objeto or None, objetivo or None, prof["id"], semana_row_id))
         else:
             cur = conn.execute("""INSERT INTO documento_norteador_semanas
-                (documento_id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem, atividade, atualizado_por_professor_id, atualizado_em)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                (documento_id, ano_escolaridade, sid, objeto or None, objetivo or None, atividade or None, prof["id"]))
+                (documento_id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem, atualizado_por_professor_id, atualizado_em)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (documento_id, ano_escolaridade, sid, objeto or None, objetivo or None, prof["id"]))
             semana_row_id = cur.lastrowid
 
         conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id = ?", (semana_row_id,))
@@ -5292,6 +5422,33 @@ async def salvar_norteador_ano(request: Request, documento_id: int, ano_escolari
             conn.execute("INSERT OR IGNORE INTO habilidades_bncc (codigo, descricao) VALUES (?, NULL)", (codigo,))
             hab_id = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()["id"]
             conn.execute("INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)", (semana_row_id, hab_id))
+
+        # Atividade por docente (06/09/2026): o form manda um campo "ativ_{sid}_{vinculo_id}"
+        # pra cada docente vinculado que apareceu na tela. Campos desabilitados (docente
+        # que não é o usuário logado, e ele não é gestão/admin) não são enviados pelo
+        # navegador — mas checa de novo aqui do lado do servidor por segurança, pra
+        # ninguém escrever na caixa de um colega manipulando o HTML.
+        prefixo = f"ativ_{sid}_"
+        for chave in form.keys():
+            if not chave.startswith(prefixo):
+                continue
+            vinc_id_str = chave[len(prefixo):]
+            if not vinc_id_str.isdigit():
+                continue
+            vinc_id = int(vinc_id_str)
+            vinculo = conn.execute(
+                "SELECT professor_id FROM documento_norteador_docentes WHERE id=? AND documento_id=? AND ano_escolaridade=?",
+                (vinc_id, documento_id, ano_escolaridade)
+            ).fetchone()
+            if not vinculo or not (sou_gestao or vinculo["professor_id"] == prof["id"]):
+                continue
+            texto_atividade = (form.get(chave) or "").strip()
+            conn.execute("""
+                INSERT INTO documento_norteador_semana_atividades (semana_id, docente_vinculo_id, atividade, atualizado_em)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(semana_id, docente_vinculo_id) DO UPDATE SET atividade=excluded.atividade, atualizado_em=CURRENT_TIMESTAMP
+            """, (semana_row_id, vinc_id, texto_atividade or None))
+
         conn.commit()  # commit por semana (05/09/2026) — um problema numa semana não derruba as outras já processadas neste POST
 
     conn.close()
