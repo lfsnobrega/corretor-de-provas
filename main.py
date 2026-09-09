@@ -156,6 +156,16 @@ MEDIDAS_DISCIPLINARES = {
     ],
 }
 
+# Motivos de saída da escola (06/09/2026) — usado quando um aluno sai de vez (transfere
+# pra outra escola, muda de cidade, evade etc.), sem excluir o cadastro nem o histórico.
+MOTIVOS_SAIDA_ALUNO = [
+    "Transferência para outra escola",
+    "Mudança de cidade/estado",
+    "Evasão escolar",
+    "Falecimento",
+    "Outro",
+]
+
 
 TIPOS_AFASTAMENTO = {
     "atestado_medico": "Atestado médico",
@@ -1831,6 +1841,16 @@ def init_db():
         # do Conselho de Classe por casamento de nome; usado como chave estável nas seguintes (24/08/2026).
         conn.execute("ALTER TABLE alunos ADD COLUMN codigo_rede TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alunos_codigo_rede ON alunos(codigo_rede)")
+    if "status" not in cols:
+        # Status do aluno na escola: 'ativo' (padrão) ou 'saida' (transferido pra fora,
+        # evadido etc.) — 06/09/2026, a pedido de Felipe. Antes, tirar um aluno da turma
+        # exigia excluí-lo (perdendo respostas/entregas/notas) ou criar uma turma
+        # "Inativos" como gambiarra. Agora o cadastro continua existindo (com todo o
+        # histórico intacto), só sai da lista ativa da turma.
+        conn.execute("ALTER TABLE alunos ADD COLUMN status TEXT NOT NULL DEFAULT 'ativo'")
+        conn.execute("ALTER TABLE alunos ADD COLUMN data_saida TEXT")
+        conn.execute("ALTER TABLE alunos ADD COLUMN motivo_saida TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alunos_status ON alunos(status)")
 
     cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
     if "papel" not in cols_prof:
@@ -11208,7 +11228,8 @@ def ver_turma(request: Request, turma_id: int):
     if not turma:
         conn.close()
         return HTMLResponse(render_page("Não encontrada", '<h1>Turma não encontrada</h1><p><a href="/turmas">← Voltar</a></p>', active="turmas"), status_code=404)
-    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)).fetchall()
+    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? AND status='ativo' ORDER BY numero, nome", (turma_id,)).fetchall()
+    alunos_saida = conn.execute("SELECT * FROM alunos WHERE turma_id = ? AND status != 'ativo' ORDER BY data_saida DESC", (turma_id,)).fetchall()
     proximo_numero = conn.execute("SELECT COALESCE(MAX(numero), 0) + 1 AS n FROM alunos WHERE turma_id = ?", (turma_id,)).fetchone()["n"]
     conn.close()
 
@@ -11227,7 +11248,9 @@ def ver_turma(request: Request, turma_id: int):
                     f'<div style="font-size:11px; margin-top:6px;">'
                     f'<a href="/alunos/{a["id"]}/editar" style="color:var(--text-muted);">Editar</a>'
                     f'<span style="color:var(--text-subtle);"> · </span>'
-                    f'<a href="/alunos/{a["id"]}/transferir" style="color:var(--text-muted);">Transferir</a>'
+                    f'<a href="/alunos/{a["id"]}/transferir" style="color:var(--text-muted);">Transferir de turma</a>'
+                    f'<span style="color:var(--text-subtle);"> · </span>'
+                    f'<a href="/alunos/{a["id"]}/marcar-saida" style="color:var(--text-muted);">Saiu da escola</a>'
                     f'<span style="color:var(--text-subtle);"> · </span>'
                     f'<form action="/alunos/{a["id"]}/deletar" method="post" style="display:inline; margin:0;" '
                     f"onsubmit=\"return confirm('Excluir {nome_escapado}? Se o aluno tiver entregas registradas, você poderá forçar a exclusão na próxima tela.');\">"
@@ -11239,7 +11262,33 @@ def ver_turma(request: Request, turma_id: int):
                 acoes = ""
             alunos_html += f'<div class="student-row"><div class="numero">{num}</div><div>{a["nome"]}{extra_line}{acoes}</div><div class="codigo">{a["codigo_unico"]}</div></div>'
     else:
-        alunos_html = '<div class="empty">Nenhum aluno cadastrado nesta turma ainda.</div>'
+        alunos_html = '<div class="empty">Nenhum aluno ativo cadastrado nesta turma ainda.</div>'
+
+    # Alunos que saíram da escola (06/09/2026): não aparecem na lista ativa acima, mas
+    # continuam com todo o histórico intacto — ficam listados aqui, com opção de
+    # reverter caso tenha sido engano.
+    alunos_saida_html = ""
+    if alunos_saida:
+        linhas_saida = ""
+        for a in alunos_saida:
+            data_saida_fmt = format_data_br(a["data_saida"]) if a["data_saida"] else "—"
+            reverter_btn = (
+                f'<form action="/alunos/{a["id"]}/reativar" method="post" style="display:inline; margin-left:8px;" '
+                f'onsubmit="return confirm(\'Reativar {a["nome"].replace("\'", "\\\'")}? Ele volta pra lista ativa desta turma.\');">'
+                f'<button type="submit" style="background:none; border:none; padding:0; color:var(--accent); cursor:pointer; font-size:11px; text-decoration:underline;">Reativar</button>'
+                f'</form>'
+            ) if is_admin else ""
+            linhas_saida += f"""
+            <div style="padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;">
+                <strong>{a["nome"]}</strong>
+                <span style="color:var(--text-muted); font-size:12px;"> — saiu em {data_saida_fmt}, motivo: {a["motivo_saida"] or "—"}</span>
+                {reverter_btn}
+            </div>"""
+        alunos_saida_html = f"""
+        <details style="margin-top:20px;">
+            <summary style="cursor:pointer; font-weight:600; color:var(--text-muted);">👋 Alunos que saíram desta turma ({len(alunos_saida)})</summary>
+            <div style="margin-top:10px;">{linhas_saida}</div>
+        </details>"""
 
     racas_options = '<option value="">Não informada</option>' + "".join(f'<option value="{r}">{r}</option>' for r in RACAS)
 
@@ -11281,6 +11330,7 @@ def ver_turma(request: Request, turma_id: int):
 
         <h2>Alunos</h2>
         {alunos_html}
+        {alunos_saida_html}
 
         {form_adicionar}
     """
@@ -15827,14 +15877,20 @@ def deletar_aluno(request: Request, aluno_id: int, forcar: int = 0):
             <div style="margin-top:18px;">
                 <h3 style="margin-bottom:8px;">Opções:</h3>
 
+                <div style="border:1px solid var(--accent); padding:14px; border-radius:6px; margin-bottom:10px; background:var(--accent-bg);">
+                    <strong>Registrar saída da escola</strong> (recomendado quando o aluno saiu de vez — foi transferido pra outra escola, mudou de cidade, evadiu etc.)
+                    <p style="margin:6px 0 10px 0; font-size:13px; color:var(--text-muted);">Preserva todo o histórico (respostas, entregas, notas, boletim). O aluno só sai da lista ativa da turma e fica guardado numa lista separada — dá pra reverter a qualquer momento.</p>
+                    <a href="/alunos/{aluno_id}/marcar-saida" class="btn btn-primary">→ Registrar saída</a>
+                </div>
+
                 <div style="border:1px solid var(--border); padding:14px; border-radius:6px; margin-bottom:10px;">
-                    <strong>Transferir para outra turma</strong> (recomendado se ele só mudou de turma)
-                    <p style="margin:6px 0 10px 0; font-size:13px; color:var(--text-muted);">Preserva todo o histórico. Você pode criar uma turma "Inativos 2026" e mover ele pra lá.</p>
+                    <strong>Transferir para outra turma</strong> (use se ele só mudou de turma dentro da mesma escola)
+                    <p style="margin:6px 0 10px 0; font-size:13px; color:var(--text-muted);">Preserva todo o histórico.</p>
                     <a href="/alunos/{aluno_id}/transferir" class="btn">→ Ir para transferência</a>
                 </div>
 
                 <div style="border:1px solid var(--red); padding:14px; border-radius:6px; background:var(--red-bg); color:var(--red);">
-                    <strong>Excluir definitivamente</strong> (use quando o aluno saiu da escola e o histórico não importa mais)
+                    <strong>Excluir definitivamente</strong> (só use se realmente quiser apagar tudo pra sempre)
                     <p style="margin:6px 0 10px 0; font-size:13px;">
                         ⚠ Esta ação <strong>apaga permanentemente</strong>:<br>
                         • O cadastro do aluno<br>
@@ -15933,6 +15989,92 @@ def transferir_aluno(request: Request, aluno_id: int, nova_turma_id: int = Form(
     conn.commit()
     conn.close()
     return RedirectResponse(f"/turmas/{nova_turma_id}", status_code=303)
+
+
+@app.get("/alunos/{aluno_id}/marcar-saida", response_class=HTMLResponse)
+def form_marcar_saida_aluno(request: Request, aluno_id: int):
+    """Registra que o aluno saiu da escola (transferência pra outra unidade, mudança de
+    cidade, evasão etc.) SEM excluir nada — o cadastro e todo o histórico (respostas,
+    entregas, notas, boletim) continuam intactos, só sai da lista ativa da turma
+    (06/09/2026, a pedido de Felipe: 'quando transfiro o aluno pra fora da escola,
+    perco os dados')."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT a.*, t.nome AS turma_nome FROM alunos a JOIN turmas t ON t.id = a.turma_id WHERE a.id = ?", (aluno_id,)).fetchone()
+    conn.close()
+    if not aluno:
+        return RedirectResponse("/turmas", status_code=303)
+
+    opts_motivo = "".join(f'<option value="{m}">{m}</option>' for m in MOTIVOS_SAIDA_ALUNO)
+    hoje = date.today().isoformat()
+    content = f"""
+        <div class="page-header">
+            <h1>👋 Registrar saída da escola</h1>
+            <p class="subtitle"><strong>{aluno["nome"]}</strong> · Turma: {aluno["turma_nome"]}</p>
+        </div>
+        <div class="tip">
+            Isso <strong>não exclui nada</strong>. Todo o histórico (respostas, entregas, notas, boletim já
+            gerados) continua guardado e acessível pra sempre. O aluno só sai da lista ativa da turma
+            <strong>{aluno["turma_nome"]}</strong> e passa a aparecer numa lista separada de "alunos que saíram".
+            Dá pra reverter isso a qualquer momento.
+        </div>
+        <form action="/alunos/{aluno_id}/marcar-saida" method="post" style="margin-top:20px;">
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                <label style="flex:1 1 200px;">Data de saída
+                    <input type="date" name="data_saida" required value="{hoje}">
+                </label>
+                <label style="flex:1 1 200px;">Motivo
+                    <select name="motivo_saida" required>
+                        <option value="">— selecione —</option>
+                        {opts_motivo}
+                    </select>
+                </label>
+            </div>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Confirmar saída</button>
+                <a href="/turmas/{aluno['turma_id']}" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Registrar saída da escola", content, active="turmas")
+
+
+@app.post("/alunos/{aluno_id}/marcar-saida")
+def marcar_saida_aluno(request: Request, aluno_id: int, data_saida: str = Form(...), motivo_saida: str = Form(...)):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT turma_id FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    conn.execute(
+        "UPDATE alunos SET status='saida', data_saida=?, motivo_saida=? WHERE id=?",
+        (data_saida.strip(), motivo_saida.strip(), aluno_id)
+    )
+    conn.commit()
+    turma_id = aluno["turma_id"]
+    conn.close()
+    return RedirectResponse(f"/turmas/{turma_id}", status_code=303)
+
+
+@app.post("/alunos/{aluno_id}/reativar")
+def reativar_aluno(request: Request, aluno_id: int):
+    """Desfaz o registro de saída — o aluno volta pra lista ativa da turma dele, sem
+    ter perdido nada nesse meio tempo (06/09/2026)."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT turma_id FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    conn.execute("UPDATE alunos SET status='ativo', data_saida=NULL, motivo_saida=NULL WHERE id=?", (aluno_id,))
+    conn.commit()
+    turma_id = aluno["turma_id"]
+    conn.close()
+    return RedirectResponse(f"/turmas/{turma_id}", status_code=303)
 
 
 # ==========================================
