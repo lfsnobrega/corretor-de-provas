@@ -1879,6 +1879,11 @@ def init_db():
         conn.execute("ALTER TABLE afastamentos ADD COLUMN horario_inicio TEXT")
     if "horario_fim" not in cols_afast:
         conn.execute("ALTER TABLE afastamentos ADD COLUMN horario_fim TEXT")
+    if "horas_compensar" not in cols_afast:
+        # Só preenchido quando o tipo é 'Compensação de horas' — em vez de horário de
+        # retorno, registra quantas horas a pessoa precisa compensar depois
+        # (06/09/2026, a pedido de Felipe).
+        conn.execute("ALTER TABLE afastamentos ADD COLUMN horas_compensar TEXT")
 
     # Atestado médico de ALUNOS — mesma estrutura dos afastamentos de profissionais,
     # cadastrado por Apoio/Gestão. Anexo salvo numa pasta separada do Drive (27/08/2026).
@@ -2673,6 +2678,70 @@ async def salvar_onboarding(request: Request):
 
 # ============ MÓDULO ADMINISTRATIVO — afastamentos (25/08/2026) ============
 
+def _bloco_horario_afastamento_html(sel_id: str, tipo_atual: str = "", horario_inicio_atual: str = "",
+                                     horario_fim_atual: str = "", horas_compensar_atual: str = ""):
+    """Monta o bloco de horário do formulário de Justificativa (usado tanto em criar
+    quanto em editar, via sel_id diferente) com toggle entre 'saída + retorno' (maioria
+    dos tipos) e 'saída + quantidade de horas a compensar' (só Compensação de horas)
+    (06/09/2026, a pedido de Felipe)."""
+    eh_compensacao = tipo_atual == "compensacao_horas"
+    display_bloco = "block" if (tipo_atual in TIPOS_COM_HORARIO) else "none"
+    display_fim = "none" if eh_compensacao else "block"
+    display_comp = "block" if eh_compensacao else "none"
+    tip_texto = (
+        'Informe o horário de saída e quantas horas precisam ser compensadas.'
+        if eh_compensacao else
+        'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).'
+    )
+    tipos_js = json.dumps(list(TIPOS_COM_HORARIO))
+    return f"""
+    <div id="bloco-horario-{sel_id}" style="display:{display_bloco};">
+        <div class="tip" id="tip-horario-{sel_id}" style="margin-bottom:10px;">{tip_texto}</div>
+        <div style="display:flex; flex-wrap:wrap; gap:14px;">
+            <label style="flex:1 1 200px;">Horário de saída
+                <input type="time" name="horario_inicio" id="inp-horario-inicio-{sel_id}" value="{horario_inicio_atual}">
+            </label>
+            <label id="lbl-horario-fim-{sel_id}" style="flex:1 1 200px; display:{display_fim};">Horário de retorno
+                <input type="time" name="horario_fim" id="inp-horario-fim-{sel_id}" value="{horario_fim_atual}">
+            </label>
+            <label id="lbl-horas-compensar-{sel_id}" style="flex:1 1 200px; display:{display_comp};">Quantidade de horas a compensar
+                <input type="number" name="horas_compensar" id="inp-horas-compensar-{sel_id}" step="0.5" min="0" placeholder="Ex: 2" value="{horas_compensar_atual}">
+            </label>
+        </div>
+    </div>
+    <script>
+    (function() {{
+        var _tiposComHorario = {tipos_js};
+        window._toggleHorario_{sel_id} = function(valor) {{
+            var bloco = document.getElementById('bloco-horario-{sel_id}');
+            var precisa = _tiposComHorario.includes(valor);
+            bloco.style.display = precisa ? 'block' : 'none';
+            var ehComp = valor === 'compensacao_horas';
+            document.getElementById('lbl-horario-fim-{sel_id}').style.display = ehComp ? 'none' : 'block';
+            document.getElementById('lbl-horas-compensar-{sel_id}').style.display = ehComp ? 'block' : 'none';
+            document.getElementById('inp-horario-inicio-{sel_id}').required = precisa;
+            document.getElementById('inp-horario-fim-{sel_id}').required = precisa && !ehComp;
+            document.getElementById('inp-horas-compensar-{sel_id}').required = precisa && ehComp;
+            document.getElementById('tip-horario-{sel_id}').textContent = ehComp
+                ? 'Informe o horário de saída e quantas horas precisam ser compensadas.'
+                : 'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).';
+        }};
+    }})();
+    </script>
+    """
+
+
+def _fmt_horario_afastamento(r) -> str:
+    """Texto de exibição do horário na listagem/relatório: 'saída às retorno' pros tipos
+    normais, ou 'Saída HH:MM · Xh a compensar' pra Compensação de horas (06/09/2026)."""
+    if not ("horario_inicio" in r.keys() and r["horario_inicio"]):
+        return "—"
+    if r["tipo"] == "compensacao_horas":
+        horas = r["horas_compensar"] if ("horas_compensar" in r.keys() and r["horas_compensar"]) else "?"
+        return f'Saída {r["horario_inicio"]} · {horas}h a compensar'
+    return f'{r["horario_inicio"]} às {r["horario_fim"]}'
+
+
 @app.get("/administrativo/afastamentos/novo", response_class=HTMLResponse)
 def form_novo_afastamento(request: Request):
     prof = get_current_professor(request)
@@ -2680,7 +2749,7 @@ def form_novo_afastamento(request: Request):
         return RedirectResponse("/login", status_code=303)
 
     opts_tipo = "".join(f'<option value="{k}">{v}</option>' for k, v in TIPOS_AFASTAMENTO.items())
-    tipos_com_horario_js = json.dumps(list(TIPOS_COM_HORARIO))
+    bloco_horario = _bloco_horario_afastamento_html("novo")
     content = f"""
         <div class="page-header">
             <h1>📄 Nova Justificativa para o Ponto</h1>
@@ -2688,7 +2757,7 @@ def form_novo_afastamento(request: Request):
         </div>
         <form action="/administrativo/afastamentos/novo" method="post" enctype="multipart/form-data">
             <label>Tipo de documento
-                <select name="tipo" id="sel-tipo-afastamento" required onchange="_toggleHorarioAfastamento(this.value)">
+                <select name="tipo" id="sel-tipo-afastamento" required onchange="_toggleHorario_novo(this.value)">
                     <option value="">— selecione —</option>
                     {opts_tipo}
                 </select>
@@ -2702,17 +2771,7 @@ def form_novo_afastamento(request: Request):
                 </label>
             </div>
             <p style="font-size:12px; color:var(--text-muted); margin-top:-8px;">Pra um único dia, use a mesma data nos dois campos.</p>
-            <div id="bloco-horario-afastamento" style="display:none;">
-                <div class="tip" style="margin-bottom:10px;">Esse tipo de documento precisa do horário de início e término (não é o dia inteiro).</div>
-                <div style="display:flex; flex-wrap:wrap; gap:14px;">
-                    <label style="flex:1 1 200px;">Horário de saída
-                        <input type="time" name="horario_inicio" id="inp-horario-inicio">
-                    </label>
-                    <label style="flex:1 1 200px;">Horário de retorno
-                        <input type="time" name="horario_fim" id="inp-horario-fim">
-                    </label>
-                </div>
-            </div>
+            {bloco_horario}
             <label>Observação (opcional)
                 <textarea name="observacao" rows="3" placeholder="Algum detalhe adicional, se necessário"></textarea>
             </label>
@@ -2724,16 +2783,6 @@ def form_novo_afastamento(request: Request):
                 <a href="/administrativo/afastamentos" class="btn">Ver minhas solicitações</a>
             </div>
         </form>
-        <script>
-        const _tiposComHorario = {tipos_com_horario_js};
-        function _toggleHorarioAfastamento(valor) {{
-            const bloco = document.getElementById('bloco-horario-afastamento');
-            const precisa = _tiposComHorario.includes(valor);
-            bloco.style.display = precisa ? 'block' : 'none';
-            document.getElementById('inp-horario-inicio').required = precisa;
-            document.getElementById('inp-horario-fim').required = precisa;
-        }}
-        </script>
     """
     return HTMLResponse(render_page("Nova Justificativa", content, active="administrativo-novo"))
 
@@ -2741,18 +2790,29 @@ def form_novo_afastamento(request: Request):
 @app.post("/administrativo/afastamentos/novo", response_class=HTMLResponse)
 async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio: str = Form(...),
                              data_fim: str = Form(...), observacao: str = Form(""), arquivo: Optional[UploadFile] = File(None),
-                             horario_inicio: str = Form(""), horario_fim: str = Form("")):
+                             horario_inicio: str = Form(""), horario_fim: str = Form(""), horas_compensar: str = Form("")):
     prof = get_current_professor(request)
     if not prof:
         return RedirectResponse("/login", status_code=303)
     if tipo not in TIPOS_AFASTAMENTO:
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Tipo de documento inválido.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
 
-    # Horário só é obrigatório pra tipos como Permissão de ausência (26/08/2026)
+    # Horário só é obrigatório pra tipos como Permissão de ausência (26/08/2026).
+    # Compensação de horas é diferente dos outros: só pede saída + quantidade de horas,
+    # não um horário de retorno (06/09/2026, a pedido de Felipe).
     horario_inicio = horario_inicio.strip() or None
     horario_fim = horario_fim.strip() or None
-    if tipo in TIPOS_COM_HORARIO and (not horario_inicio or not horario_fim):
-        return HTMLResponse(render_page("Erro", f'<div class="page-header"><h1>Erro</h1></div><p>Pra "{TIPOS_AFASTAMENTO[tipo]}" é preciso informar o horário de saída e retorno.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
+    horas_compensar = horas_compensar.strip() or None
+    if tipo == "compensacao_horas":
+        horario_fim = None
+        if not horario_inicio or not horas_compensar:
+            return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Pra "Compensação de horas" é preciso informar o horário de saída e a quantidade de horas a compensar.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
+    elif tipo in TIPOS_COM_HORARIO:
+        horas_compensar = None
+        if not horario_inicio or not horario_fim:
+            return HTMLResponse(render_page("Erro", f'<div class="page-header"><h1>Erro</h1></div><p>Pra "{TIPOS_AFASTAMENTO[tipo]}" é preciso informar o horário de saída e retorno.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
+    else:
+        horario_inicio = horario_fim = horas_compensar = None
 
     # Documento é opcional (02/09/2026, a pedido) — só sobe pro Drive se a pessoa
     # realmente anexou algo; senão fica sem arquivo, sem erro nenhum.
@@ -2770,9 +2830,9 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
 
     conn = get_db()
     conn.execute("""
-        INSERT INTO afastamentos (professor_id, tipo, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, horario_inicio, horario_fim)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (prof["id"], tipo, data_inicio, data_fim, observacao.strip() or None, nome_arquivo_salvo, drive_id, drive_link, status_upload, horario_inicio, horario_fim))
+        INSERT INTO afastamentos (professor_id, tipo, data_inicio, data_fim, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, horario_inicio, horario_fim, horas_compensar)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (prof["id"], tipo, data_inicio, data_fim, observacao.strip() or None, nome_arquivo_salvo, drive_id, drive_link, status_upload, horario_inicio, horario_fim, horas_compensar))
     conn.commit()
     conn.close()
 
@@ -2780,7 +2840,12 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     if erro_drive:
         aviso_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> a solicitação foi registrada, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador; o arquivo original fica só com você por enquanto.</div>'
 
-    horario_str = f' · Horário: {horario_inicio} às {horario_fim}' if horario_inicio and horario_fim else ""
+    if tipo == "compensacao_horas" and horario_inicio and horas_compensar:
+        horario_str = f' · Saída: {horario_inicio} · {horas_compensar}h a compensar'
+    elif horario_inicio and horario_fim:
+        horario_str = f' · Horário: {horario_inicio} às {horario_fim}'
+    else:
+        horario_str = ""
     content = f"""
         <div class="page-header"><h1>✅ Justificativa enviada</h1></div>
         <p>Tipo: <strong>{TIPOS_AFASTAMENTO[tipo]}</strong> · Período: {_fmt_data_br(data_inicio)} a {_fmt_data_br(data_fim)}{horario_str}</p>
@@ -2818,7 +2883,7 @@ def listar_meus_afastamentos(request: Request):
             else:
                 status_badge = '<span style="color:var(--orange);">⚠ Pendente de envio</span>'
             link_html = f' · <a href="{r["arquivo_drive_link"]}" target="_blank">Ver documento</a>' if r["arquivo_drive_link"] else ""
-            horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
+            horario_col = _fmt_horario_afastamento(r)
             linhas += f"""<tr>
                 <td style="padding:8px;">{TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"])}</td>
                 <td style="padding:8px;">{_fmt_data_br(r["data_inicio"])} a {_fmt_data_br(r["data_fim"])}</td>
@@ -2876,7 +2941,7 @@ def relatorio_afastamentos(request: Request, mes: Optional[int] = None, ano: Opt
             dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
             matricula = r["prof_matricula"] if r["prof_matricula"] else _extrair_matricula(r["prof_email"])
             link_html = f'<a href="{r["arquivo_drive_link"]}" target="_blank">Ver</a>' if r["arquivo_drive_link"] else "—"
-            horario_col = f'{r["horario_inicio"]} às {r["horario_fim"]}' if ("horario_inicio" in r.keys() and r["horario_inicio"]) else "—"
+            horario_col = _fmt_horario_afastamento(r)
             acoes = (
                 f'<a href="/administrativo/afastamentos/{r["id"]}/editar" class="btn" style="padding:3px 8px; font-size:11px;">✏️</a> '
                 f'<form method="post" action="/administrativo/afastamentos/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir esta justificativa? Não dá pra desfazer.\');">'
@@ -2935,36 +3000,30 @@ def form_editar_afastamento(request: Request, afastamento_id: int):
         return HTMLResponse(render_page("Erro", '<div class="empty">Justificativa não encontrada.</div>', active=""))
 
     opts_tipo = "".join(f'<option value="{k}"{" selected" if k==r["tipo"] else ""}>{v}</option>' for k, v in TIPOS_AFASTAMENTO.items())
-    horario_atual = ""
-    if r["horario_inicio"]:
-        horario_atual = f"""
-        <div style="display:flex; flex-wrap:wrap; gap:14px;">
-            <label style="flex:1 1 200px;">Horário de saída<input type="time" name="horario_inicio" value="{r["horario_inicio"]}"></label>
-            <label style="flex:1 1 200px;">Horário de retorno<input type="time" name="horario_fim" value="{r["horario_fim"] or ""}"></label>
-        </div>"""
+    bloco_horario = _bloco_horario_afastamento_html(
+        "edicao",
+        tipo_atual=r["tipo"],
+        horario_inicio_atual=r["horario_inicio"] or "",
+        horario_fim_atual=r["horario_fim"] or "",
+        horas_compensar_atual=(r["horas_compensar"] if ("horas_compensar" in r.keys() and r["horas_compensar"]) else "")
+    )
     content = f"""
         <div class="page-header"><h1>✏️ Editar Justificativa — {r["prof_nome"]}</h1></div>
         <form action="/administrativo/afastamentos/{afastamento_id}/editar" method="post">
             <label>Tipo de documento
-                <select name="tipo" id="sel-tipo-edicao" onchange="_toggleHorarioAfastamento(this.value)">{opts_tipo}</select>
+                <select name="tipo" id="sel-tipo-edicao" onchange="_toggleHorario_edicao(this.value)">{opts_tipo}</select>
             </label>
             <div style="display:flex; flex-wrap:wrap; gap:14px;">
                 <label style="flex:1 1 200px;">Data de início<input type="date" name="data_inicio" value="{r["data_inicio"]}" required></label>
                 <label style="flex:1 1 200px;">Data de término<input type="date" name="data_fim" value="{r["data_fim"]}" required></label>
             </div>
-            <div id="bloco-horario-edicao" style="display:{'block' if r['horario_inicio'] else 'none'};">{horario_atual}</div>
+            {bloco_horario}
             <label>Observação<textarea name="observacao" rows="3">{r["observacao"] or ""}</textarea></label>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar alterações</button>
                 <a href="/administrativo/relatorio" class="btn">Cancelar</a>
             </div>
         </form>
-        <script>
-        const _tiposComHorarioEd = {json.dumps(list(TIPOS_COM_HORARIO))};
-        function _toggleHorarioAfastamento(valor) {{
-            document.getElementById('bloco-horario-edicao').style.display = _tiposComHorarioEd.includes(valor) ? 'block' : 'none';
-        }}
-        </script>
     """
     return HTMLResponse(render_page("Editar Justificativa", content, active="administrativo-relatorio"))
 
@@ -2972,13 +3031,23 @@ def form_editar_afastamento(request: Request, afastamento_id: int):
 @app.post("/administrativo/afastamentos/{afastamento_id}/editar")
 async def salvar_edicao_afastamento(request: Request, afastamento_id: int, tipo: str = Form(...),
                                      data_inicio: str = Form(...), data_fim: str = Form(...),
-                                     observacao: str = Form(""), horario_inicio: str = Form(""), horario_fim: str = Form("")):
+                                     observacao: str = Form(""), horario_inicio: str = Form(""),
+                                     horario_fim: str = Form(""), horas_compensar: str = Form("")):
     prof = get_current_professor(request)
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/", status_code=303)
+    horario_inicio = horario_inicio.strip() or None
+    horario_fim = horario_fim.strip() or None
+    horas_compensar = horas_compensar.strip() or None
+    if tipo == "compensacao_horas":
+        horario_fim = None
+    elif tipo in TIPOS_COM_HORARIO:
+        horas_compensar = None
+    else:
+        horario_inicio = horario_fim = horas_compensar = None
     conn = get_db()
-    conn.execute("""UPDATE afastamentos SET tipo=?, data_inicio=?, data_fim=?, observacao=?, horario_inicio=?, horario_fim=? WHERE id=?""",
-                 (tipo, data_inicio, data_fim, observacao.strip() or None, horario_inicio.strip() or None, horario_fim.strip() or None, afastamento_id))
+    conn.execute("""UPDATE afastamentos SET tipo=?, data_inicio=?, data_fim=?, observacao=?, horario_inicio=?, horario_fim=?, horas_compensar=? WHERE id=?""",
+                 (tipo, data_inicio, data_fim, observacao.strip() or None, horario_inicio, horario_fim, horas_compensar, afastamento_id))
     conn.commit()
     conn.close()
     return RedirectResponse("/administrativo/relatorio", status_code=303)
@@ -3021,7 +3090,7 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
     wb = Workbook()
     ws = wb.active
     ws.title = "Justificativas"
-    cabecalho = ["Nome", "Matrícula", "Tipo", "Data início", "Data fim", "Horário saída", "Horário retorno", "Dias", "Observação", "Link do documento"]
+    cabecalho = ["Nome", "Matrícula", "Tipo", "Data início", "Data fim", "Horário saída", "Horário retorno", "Horas a compensar", "Dias", "Observação", "Link do documento"]
     ws.append(cabecalho)
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
@@ -3033,13 +3102,14 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
         matricula = r["prof_matricula"] if r["prof_matricula"] else _extrair_matricula(r["prof_email"])
         horario_inicio_r = r["horario_inicio"] if ("horario_inicio" in r.keys() and r["horario_inicio"]) else ""
         horario_fim_r = r["horario_fim"] if ("horario_fim" in r.keys() and r["horario_fim"]) else ""
+        horas_compensar_r = r["horas_compensar"] if ("horas_compensar" in r.keys() and r["horas_compensar"]) else ""
         ws.append([
             r["prof_nome"], matricula, TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"]),
-            r["data_inicio"], r["data_fim"], horario_inicio_r, horario_fim_r, dias,
+            r["data_inicio"], r["data_fim"], horario_inicio_r, horario_fim_r, horas_compensar_r, dias,
             r["observacao"] or "", r["arquivo_drive_link"] or "",
         ])
 
-    for i, largura in enumerate([28, 12, 22, 12, 12, 13, 14, 8, 30, 40], start=1):
+    for i, largura in enumerate([28, 12, 22, 12, 12, 13, 14, 14, 8, 30, 40], start=1):
         ws.column_dimensions[get_column_letter(i)].width = largura
 
     buffer = BytesIO()
