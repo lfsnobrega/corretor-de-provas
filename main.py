@@ -1274,6 +1274,105 @@ def _migrar_atividades_por_docente(conn):
             )
 
 
+# Consolidação de disciplinas duplicadas (06/09/2026, a pedido de Felipe): o Documento
+# Norteador acabou criando linhas de disciplina com nomes diferentes do mesmo componente
+# curricular ("Português" x "Língua Portuguesa", "Inglês" x "Língua Inglesa", "Ed. Física"
+# x "Educação Física"/variações). O nome "sobrevivente" de cada grupo é sempre o que já é
+# usado pelo sistema de Boletim/Conselho de Classe (que casa com a exportação oficial da
+# rede/e-cidade e tem lógica própria espalhada pelo código) — trocar esse nome quebraria
+# a importação e recriaria a duplicata a cada import. Isso é "menor impacto": o Boletim
+# nem percebe a mudança, e o Documento Norteador passa a ter uma única disciplina por
+# componente, com o Referencial Curricular corretamente ligado a ela.
+DISCIPLINAS_UNIFICAR = {
+    "Português": ["Língua Portuguesa", "Lingua Portuguesa", "Portugues"],
+    "Inglês": ["Língua Inglesa", "Lingua Inglesa", "Ingles"],
+    "Ed. Física": ["Educação Física", "Educação Fisica", "Educacao Fisica", "Educacao Física", "Ed. Fisica", "Ed Física", "Ed Fisica"],
+}
+
+# Tabelas que têm uma coluna disciplina_id — usadas tanto pela consolidação acima quanto
+# como referência de quais tabelas precisam ser repontadas ao unificar duas disciplinas.
+_TABELAS_COM_DISCIPLINA_ID = [
+    "questoes", "referencial_curricular", "documentos_norteadores",
+    "simulado_blocos", "boletim_medias", "boletim_faltas",
+    "boletim_analise", "boletim_professor_turma",
+]
+
+
+def _consolidar_disciplinas_duplicadas(conn):
+    """Une disciplinas duplicadas (mesmo componente curricular, nomes diferentes) numa
+    única linha, migrando tudo que apontava pras duplicadas pro nome canônico (o que já
+    é usado pelo Boletim). Idempotente — depois da primeira vez que roda, não encontra
+    mais duplicata nenhuma e não faz nada (06/09/2026)."""
+    for nome_canonico, variantes in DISCIPLINAS_UNIFICAR.items():
+        ids_do_grupo = []
+        vistos = set()
+        for nome in [nome_canonico] + variantes:
+            row = conn.execute("SELECT id FROM disciplinas WHERE nome = ?", (nome,)).fetchone()
+            if row and row["id"] not in vistos:
+                ids_do_grupo.append(row["id"])
+                vistos.add(row["id"])
+        if len(ids_do_grupo) <= 1:
+            if ids_do_grupo:
+                conn.execute("UPDATE disciplinas SET nome = ? WHERE id = ?", (nome_canonico, ids_do_grupo[0]))
+            continue
+
+        sobrevivente_id = ids_do_grupo[0]
+        for dup_id in ids_do_grupo[1:]:
+            for tabela in _TABELAS_COM_DISCIPLINA_ID:
+                if tabela == "boletim_professor_turma":
+                    # UNIQUE(professor_id, turma_id, disciplina_id) — se já existir a
+                    # combinação no sobrevivente, descarta a duplicada em vez de repontar.
+                    for r in conn.execute("SELECT id, professor_id, turma_id FROM boletim_professor_turma WHERE disciplina_id = ?", (dup_id,)).fetchall():
+                        existe = conn.execute(
+                            "SELECT 1 FROM boletim_professor_turma WHERE professor_id=? AND turma_id=? AND disciplina_id=?",
+                            (r["professor_id"], r["turma_id"], sobrevivente_id)
+                        ).fetchone()
+                        if existe:
+                            conn.execute("DELETE FROM boletim_professor_turma WHERE id = ?", (r["id"],))
+                        else:
+                            conn.execute("UPDATE boletim_professor_turma SET disciplina_id = ? WHERE id = ?", (sobrevivente_id, r["id"]))
+                elif tabela == "referencial_curricular":
+                    # Evita duplicar blocos idênticos (mesmo ano+trimestre+unidade
+                    # temática) — mantém o bloco do sobrevivente quando já existir igual.
+                    for r in conn.execute(
+                        "SELECT id, ano_escolaridade, trimestre, unidade_tematica FROM referencial_curricular WHERE disciplina_id = ?", (dup_id,)
+                    ).fetchall():
+                        existe = conn.execute(
+                            "SELECT id FROM referencial_curricular WHERE disciplina_id=? AND ano_escolaridade=? AND trimestre=? AND unidade_tematica=?",
+                            (sobrevivente_id, r["ano_escolaridade"], r["trimestre"], r["unidade_tematica"])
+                        ).fetchone()
+                        if existe:
+                            conn.execute("DELETE FROM referencial_curricular_habilidades WHERE referencial_id = ?", (r["id"],))
+                            conn.execute("DELETE FROM referencial_curricular WHERE id = ?", (r["id"],))
+                        else:
+                            conn.execute("UPDATE referencial_curricular SET disciplina_id = ? WHERE id = ?", (sobrevivente_id, r["id"]))
+                elif tabela == "documentos_norteadores":
+                    # Se já existir um Documento Norteador igual (mesmo trimestre+ano) no
+                    # sobrevivente, não mexe nesse — fica pro admin resolver na mão (só
+                    # acontece se os DOIS nomes já tinham documento cadastrado pro mesmo
+                    # período, caso raro).
+                    for r in conn.execute("SELECT id, trimestre, ano_letivo FROM documentos_norteadores WHERE disciplina_id = ?", (dup_id,)).fetchall():
+                        existe = conn.execute(
+                            "SELECT id FROM documentos_norteadores WHERE disciplina_id=? AND trimestre=? AND ano_letivo=?",
+                            (sobrevivente_id, r["trimestre"], r["ano_letivo"])
+                        ).fetchone()
+                        if not existe:
+                            conn.execute("UPDATE documentos_norteadores SET disciplina_id = ? WHERE id = ?", (sobrevivente_id, r["id"]))
+                else:
+                    conn.execute(f"UPDATE {tabela} SET disciplina_id = ? WHERE disciplina_id = ?", (sobrevivente_id, dup_id))
+
+            # Só apaga a duplicata se realmente não sobrou nenhuma referência a ela —
+            # evita deixar dado orfão no caso raro de conflito acima.
+            ainda_referenciado = any(
+                conn.execute(f"SELECT 1 FROM {t} WHERE disciplina_id = ? LIMIT 1", (dup_id,)).fetchone()
+                for t in _TABELAS_COM_DISCIPLINA_ID
+            )
+            if not ainda_referenciado:
+                conn.execute("DELETE FROM disciplinas WHERE id = ?", (dup_id,))
+
+        conn.execute("UPDATE disciplinas SET nome = ? WHERE id = ?", (nome_canonico, sobrevivente_id))
+
+
 def _seed_referencial_curricular(conn):
     """Popula o Referencial Curricular a partir das listas REFERENCIAL_CURRICULAR_*
     (uma por disciplina). Idempotente — só insere o que ainda não existe, então pode
@@ -1282,7 +1381,7 @@ def _seed_referencial_curricular(conn):
     linha se o código realmente não existir ainda (04/09/2026)."""
     for disciplina_nome, blocos in [
         ("Arte", REFERENCIAL_CURRICULAR_ARTE),
-        ("Educação Física", REFERENCIAL_CURRICULAR_EDUCACAO_FISICA),
+        ("Ed. Física", REFERENCIAL_CURRICULAR_EDUCACAO_FISICA),
         ("Ciências", REFERENCIAL_CURRICULAR_CIENCIAS),
         ("História", REFERENCIAL_CURRICULAR_HISTORIA),
         ("Geografia", REFERENCIAL_CURRICULAR_GEOGRAFIA),
@@ -2062,6 +2161,7 @@ def init_db():
         FOREIGN KEY (docente_vinculo_id) REFERENCES documento_norteador_docentes(id) ON DELETE CASCADE
     )""")
     _migrar_atividades_por_docente(conn)
+    _consolidar_disciplinas_duplicadas(conn)
     _seed_referencial_curricular(conn)
 
     cols_q = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
