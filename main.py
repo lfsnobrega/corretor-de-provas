@@ -1289,6 +1289,16 @@ DISCIPLINAS_UNIFICAR = {
     "Ed. Física": ["Educação Física", "Educação Fisica", "Educacao Fisica", "Educacao Física", "Ed. Fisica", "Ed Física", "Ed Fisica"],
 }
 
+# Mapa reverso (variante -> canônico), usado pra normalizar o "prefixo pai" de uma
+# subdisciplina (ex: extrair "Língua Portuguesa" de "Língua Portuguesa | Produção de
+# Texto" e reconhecer que isso é o mesmo que a disciplina "Português" já consolidada)
+# (10/09/2026).
+_VARIANTE_PARA_CANONICO = {}
+for _canon, _vars in DISCIPLINAS_UNIFICAR.items():
+    _VARIANTE_PARA_CANONICO[_canon] = _canon
+    for _v in _vars:
+        _VARIANTE_PARA_CANONICO[_v] = _canon
+
 # Tabelas que têm uma coluna disciplina_id — usadas tanto pela consolidação acima quanto
 # como referência de quais tabelas precisam ser repontadas ao unificar duas disciplinas.
 _TABELAS_COM_DISCIPLINA_ID = [
@@ -1296,6 +1306,81 @@ _TABELAS_COM_DISCIPLINA_ID = [
     "simulado_blocos", "boletim_medias", "boletim_faltas",
     "boletim_analise", "boletim_professor_turma",
 ]
+
+
+def _mesclar_conteudo_documento_norteador(conn, doc_origem_id, doc_destino_id):
+    """Migra docentes vinculados e semanas preenchidas de um Documento Norteador pra
+    outro, mantendo o que já existir no destino em caso de conflito (mesmo ano
+    escolaridade+professor ou mesma semana) e descartando o do documento de origem
+    nesse caso. Usado tanto ao unificar disciplinas duplicadas quanto ao limpar
+    documentos criados por engano numa subdisciplina (10/09/2026)."""
+    for d in conn.execute(
+        "SELECT ano_escolaridade, professor_id, nome_livre FROM documento_norteador_docentes WHERE documento_id=?", (doc_origem_id,)
+    ).fetchall():
+        if d["professor_id"] is not None:
+            ja_tem = conn.execute(
+                "SELECT 1 FROM documento_norteador_docentes WHERE documento_id=? AND ano_escolaridade=? AND professor_id=?",
+                (doc_destino_id, d["ano_escolaridade"], d["professor_id"])
+            ).fetchone()
+        else:
+            ja_tem = conn.execute(
+                "SELECT 1 FROM documento_norteador_docentes WHERE documento_id=? AND ano_escolaridade=? AND nome_livre=?",
+                (doc_destino_id, d["ano_escolaridade"], d["nome_livre"])
+            ).fetchone()
+        if not ja_tem:
+            conn.execute(
+                "INSERT INTO documento_norteador_docentes (documento_id, ano_escolaridade, professor_id, nome_livre) VALUES (?, ?, ?, ?)",
+                (doc_destino_id, d["ano_escolaridade"], d["professor_id"], d["nome_livre"])
+            )
+
+    for s in conn.execute(
+        "SELECT id, ano_escolaridade, calendario_semana_id FROM documento_norteador_semanas WHERE documento_id=?", (doc_origem_id,)
+    ).fetchall():
+        ja_tem_semana = conn.execute(
+            "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
+            (doc_destino_id, s["ano_escolaridade"], s["calendario_semana_id"])
+        ).fetchone()
+        if ja_tem_semana:
+            conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id=?", (s["id"],))
+            conn.execute("DELETE FROM documento_norteador_semana_atividades WHERE semana_id=?", (s["id"],))
+            conn.execute("DELETE FROM documento_norteador_semanas WHERE id=?", (s["id"],))
+        else:
+            conn.execute("UPDATE documento_norteador_semanas SET documento_id=? WHERE id=?", (doc_destino_id, s["id"]))
+
+    conn.execute("DELETE FROM documento_norteador_docentes WHERE documento_id=?", (doc_origem_id,))
+    conn.execute("DELETE FROM documentos_norteadores WHERE id=?", (doc_origem_id,))
+
+
+def _limpar_documentos_norteadores_subdisciplina(conn):
+    """Algumas subdisciplinas (ex: 'Matemática | Álgebra', 'Matemática | Geometria',
+    'Língua Portuguesa | Produção de Texto') existem de PROPÓSITO no sistema — servem
+    pra filtrar o banco de questões por sub-área na hora de montar um simulado (ver
+    busca de subdisciplinas nos blocos de simulado). Por isso a disciplina em si e as
+    questões dela NÃO são tocadas aqui. O que aconteceu é que Documentos Norteadores
+    foram cadastrados por engano sob essas subdisciplinas, quando o certo é usar a
+    disciplina "pai" (ex: 'Matemática') pura — confirmado por Felipe em 10/09/2026.
+    Migra o conteúdo desses documentos pra disciplina pai (mesclando com o documento
+    que já existir lá pro mesmo trimestre+ano, se houver) e idempotente."""
+    docs_sub = conn.execute("""
+        SELECT dn.id, dn.trimestre, dn.ano_letivo, d.nome
+        FROM documentos_norteadores dn JOIN disciplinas d ON d.id = dn.disciplina_id
+        WHERE d.nome LIKE '% | %'
+    """).fetchall()
+    for doc in docs_sub:
+        nome_pai_bruto = doc["nome"].split(" | ")[0].strip()
+        nome_pai = _VARIANTE_PARA_CANONICO.get(nome_pai_bruto, nome_pai_bruto)
+        pai = conn.execute("SELECT id FROM disciplinas WHERE nome = ?", (nome_pai,)).fetchone()
+        if not pai:
+            continue
+        pai_id = pai["id"]
+        doc_pai = conn.execute(
+            "SELECT id FROM documentos_norteadores WHERE disciplina_id=? AND trimestre=? AND ano_letivo=?",
+            (pai_id, doc["trimestre"], doc["ano_letivo"])
+        ).fetchone()
+        if not doc_pai:
+            conn.execute("UPDATE documentos_norteadores SET disciplina_id = ? WHERE id = ?", (pai_id, doc["id"]))
+        else:
+            _mesclar_conteudo_documento_norteador(conn, doc["id"], doc_pai["id"])
 
 
 def _consolidar_disciplinas_duplicadas(conn):
@@ -1362,48 +1447,8 @@ def _consolidar_disciplinas_duplicadas(conn):
                         ).fetchone()
                         if not existe:
                             conn.execute("UPDATE documentos_norteadores SET disciplina_id = ? WHERE id = ?", (sobrevivente_id, r["id"]))
-                            continue
-
-                        doc_sobrevivente_id = existe["id"]
-                        doc_dup_local_id = r["id"]
-
-                        for d in conn.execute(
-                            "SELECT ano_escolaridade, professor_id, nome_livre FROM documento_norteador_docentes WHERE documento_id=?", (doc_dup_local_id,)
-                        ).fetchall():
-                            if d["professor_id"] is not None:
-                                ja_tem = conn.execute(
-                                    "SELECT 1 FROM documento_norteador_docentes WHERE documento_id=? AND ano_escolaridade=? AND professor_id=?",
-                                    (doc_sobrevivente_id, d["ano_escolaridade"], d["professor_id"])
-                                ).fetchone()
-                            else:
-                                ja_tem = conn.execute(
-                                    "SELECT 1 FROM documento_norteador_docentes WHERE documento_id=? AND ano_escolaridade=? AND nome_livre=?",
-                                    (doc_sobrevivente_id, d["ano_escolaridade"], d["nome_livre"])
-                                ).fetchone()
-                            if not ja_tem:
-                                conn.execute(
-                                    "INSERT INTO documento_norteador_docentes (documento_id, ano_escolaridade, professor_id, nome_livre) VALUES (?, ?, ?, ?)",
-                                    (doc_sobrevivente_id, d["ano_escolaridade"], d["professor_id"], d["nome_livre"])
-                                )
-
-                        for s in conn.execute(
-                            "SELECT id, ano_escolaridade, calendario_semana_id FROM documento_norteador_semanas WHERE documento_id=?", (doc_dup_local_id,)
-                        ).fetchall():
-                            ja_tem_semana = conn.execute(
-                                "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
-                                (doc_sobrevivente_id, s["ano_escolaridade"], s["calendario_semana_id"])
-                            ).fetchone()
-                            if ja_tem_semana:
-                                # já tem preenchimento pra essa semana no documento que
-                                # sobrevive — mantém o que já está lá, descarta o duplicado.
-                                conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id=?", (s["id"],))
-                                conn.execute("DELETE FROM documento_norteador_semana_atividades WHERE semana_id=?", (s["id"],))
-                                conn.execute("DELETE FROM documento_norteador_semanas WHERE id=?", (s["id"],))
-                            else:
-                                conn.execute("UPDATE documento_norteador_semanas SET documento_id=? WHERE id=?", (doc_sobrevivente_id, s["id"]))
-
-                        conn.execute("DELETE FROM documento_norteador_docentes WHERE documento_id=?", (doc_dup_local_id,))
-                        conn.execute("DELETE FROM documentos_norteadores WHERE id=?", (doc_dup_local_id,))
+                        else:
+                            _mesclar_conteudo_documento_norteador(conn, r["id"], existe["id"])
                 elif tabela in ("boletim_medias", "boletim_faltas", "boletim_analise"):
                     # As três têm UNIQUE(aluno_id, disciplina_id, trimestre, ano) — se o
                     # aluno já tem nota/falta/análise lançada pro sobrevivente naquele
@@ -2421,6 +2466,7 @@ def init_db():
     # boletim_professor_turma etc., que só são criadas mais acima nesta função
     # (06/09/2026: corrigido depois de notar que essas duas rodavam cedo demais).
     _consolidar_disciplinas_duplicadas(conn)
+    _limpar_documentos_norteadores_subdisciplina(conn)
     _seed_referencial_curricular(conn)
 
     conn.commit()
