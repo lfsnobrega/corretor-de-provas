@@ -1358,6 +1358,22 @@ def _consolidar_disciplinas_duplicadas(conn):
                         ).fetchone()
                         if not existe:
                             conn.execute("UPDATE documentos_norteadores SET disciplina_id = ? WHERE id = ?", (sobrevivente_id, r["id"]))
+                elif tabela in ("boletim_medias", "boletim_faltas", "boletim_analise"):
+                    # As três têm UNIQUE(aluno_id, disciplina_id, trimestre, ano) — se o
+                    # aluno já tem nota/falta/análise lançada pro sobrevivente naquele
+                    # trimestre+ano, um UPDATE cego quebraria essa restrição (foi
+                    # exatamente isso que derrubou o servidor em produção — corrigido
+                    # 10/09/2026). Nesse caso mantém o registro já existente no
+                    # sobrevivente e descarta o duplicado, em vez de sobrescrever.
+                    for r in conn.execute(f"SELECT id, aluno_id, trimestre, ano FROM {tabela} WHERE disciplina_id = ?", (dup_id,)).fetchall():
+                        existe = conn.execute(
+                            f"SELECT id FROM {tabela} WHERE aluno_id=? AND disciplina_id=? AND trimestre=? AND ano=?",
+                            (r["aluno_id"], sobrevivente_id, r["trimestre"], r["ano"])
+                        ).fetchone()
+                        if existe:
+                            conn.execute(f"DELETE FROM {tabela} WHERE id = ?", (r["id"],))
+                        else:
+                            conn.execute(f"UPDATE {tabela} SET disciplina_id = ? WHERE id = ?", (sobrevivente_id, r["id"]))
                 else:
                     conn.execute(f"UPDATE {tabela} SET disciplina_id = ? WHERE disciplina_id = ?", (sobrevivente_id, dup_id))
 
