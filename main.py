@@ -1310,10 +1310,14 @@ _TABELAS_COM_DISCIPLINA_ID = [
 
 def _mesclar_conteudo_documento_norteador(conn, doc_origem_id, doc_destino_id):
     """Migra docentes vinculados e semanas preenchidas de um Documento Norteador pra
-    outro, mantendo o que já existir no destino em caso de conflito (mesmo ano
-    escolaridade+professor ou mesma semana) e descartando o do documento de origem
-    nesse caso. Usado tanto ao unificar disciplinas duplicadas quanto ao limpar
-    documentos criados por engano numa subdisciplina (10/09/2026)."""
+    outro. Quando já existe uma semana equivalente no destino (mesmo ano+calendario),
+    faz uma MESCLA de verdade em vez de simplesmente descartar o conteúdo de origem:
+    adota texto do destino quando ele já tem, senão usa o da origem; e UNE o conjunto de
+    habilidades das duas (nunca descarta uma habilidade só porque a semana já existia do
+    outro lado). Corrigido em 10/09/2026 depois de constatar que a versão anterior podia
+    apagar silenciosamente habilidades/conteúdo real quando as duas linhas tinham dados
+    diferentes — exatamente o que causava habilidades 'desaparecendo' depois que o
+    professor preenchia, relatado por Felipe."""
     for d in conn.execute(
         "SELECT ano_escolaridade, professor_id, nome_livre FROM documento_norteador_docentes WHERE documento_id=?", (doc_origem_id,)
     ).fetchall():
@@ -1334,18 +1338,60 @@ def _mesclar_conteudo_documento_norteador(conn, doc_origem_id, doc_destino_id):
             )
 
     for s in conn.execute(
-        "SELECT id, ano_escolaridade, calendario_semana_id FROM documento_norteador_semanas WHERE documento_id=?", (doc_origem_id,)
+        "SELECT id, ano_escolaridade, calendario_semana_id, objeto_conhecimento, objetivo_aprendizagem FROM documento_norteador_semanas WHERE documento_id=?",
+        (doc_origem_id,)
     ).fetchall():
-        ja_tem_semana = conn.execute(
-            "SELECT id FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
+        destino_semana = conn.execute(
+            "SELECT id, objeto_conhecimento, objetivo_aprendizagem FROM documento_norteador_semanas WHERE documento_id=? AND ano_escolaridade=? AND calendario_semana_id=?",
             (doc_destino_id, s["ano_escolaridade"], s["calendario_semana_id"])
         ).fetchone()
-        if ja_tem_semana:
-            conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id=?", (s["id"],))
-            conn.execute("DELETE FROM documento_norteador_semana_atividades WHERE semana_id=?", (s["id"],))
-            conn.execute("DELETE FROM documento_norteador_semanas WHERE id=?", (s["id"],))
-        else:
+        if not destino_semana:
             conn.execute("UPDATE documento_norteador_semanas SET documento_id=? WHERE id=?", (doc_destino_id, s["id"]))
+            continue
+
+        # Já existe uma semana equivalente no destino — mescla os campos de texto (adota
+        # o da origem só onde o destino estava vazio) em vez de simplesmente descartar.
+        destino_semana_id = destino_semana["id"]
+        novo_objeto = destino_semana["objeto_conhecimento"] or s["objeto_conhecimento"]
+        novo_objetivo = destino_semana["objetivo_aprendizagem"] or s["objetivo_aprendizagem"]
+        if novo_objeto != destino_semana["objeto_conhecimento"] or novo_objetivo != destino_semana["objetivo_aprendizagem"]:
+            conn.execute(
+                "UPDATE documento_norteador_semanas SET objeto_conhecimento=?, objetivo_aprendizagem=? WHERE id=?",
+                (novo_objeto, novo_objetivo, destino_semana_id)
+            )
+
+        # Habilidades: UNIÃO das duas listas — nunca descarta uma habilidade da origem
+        # só porque a semana já existia no destino.
+        for h in conn.execute("SELECT habilidade_id FROM documento_norteador_semana_habilidades WHERE semana_id=?", (s["id"],)).fetchall():
+            ja_tem_hab = conn.execute(
+                "SELECT 1 FROM documento_norteador_semana_habilidades WHERE semana_id=? AND habilidade_id=?",
+                (destino_semana_id, h["habilidade_id"])
+            ).fetchone()
+            if not ja_tem_hab:
+                conn.execute(
+                    "INSERT INTO documento_norteador_semana_habilidades (semana_id, habilidade_id) VALUES (?, ?)",
+                    (destino_semana_id, h["habilidade_id"])
+                )
+
+        # Atividades por docente: adiciona as que o destino ainda não tem pra aquele
+        # docente; se já tiver, só adota a da origem se a do destino estiver vazia.
+        for a in conn.execute("SELECT docente_vinculo_id, atividade FROM documento_norteador_semana_atividades WHERE semana_id=?", (s["id"],)).fetchall():
+            existente_ativ = conn.execute(
+                "SELECT id, atividade FROM documento_norteador_semana_atividades WHERE semana_id=? AND docente_vinculo_id=?",
+                (destino_semana_id, a["docente_vinculo_id"])
+            ).fetchone()
+            if existente_ativ:
+                if not existente_ativ["atividade"] and a["atividade"]:
+                    conn.execute("UPDATE documento_norteador_semana_atividades SET atividade=? WHERE id=?", (a["atividade"], existente_ativ["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO documento_norteador_semana_atividades (semana_id, docente_vinculo_id, atividade) VALUES (?, ?, ?)",
+                    (destino_semana_id, a["docente_vinculo_id"], a["atividade"])
+                )
+
+        conn.execute("DELETE FROM documento_norteador_semana_habilidades WHERE semana_id=?", (s["id"],))
+        conn.execute("DELETE FROM documento_norteador_semana_atividades WHERE semana_id=?", (s["id"],))
+        conn.execute("DELETE FROM documento_norteador_semanas WHERE id=?", (s["id"],))
 
     conn.execute("DELETE FROM documento_norteador_docentes WHERE documento_id=?", (doc_origem_id,))
     conn.execute("DELETE FROM documentos_norteadores WHERE id=?", (doc_origem_id,))
@@ -5550,6 +5596,13 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "    // Conhecimento como sugestão -- o que realmente vai pro banco é decidido no\n"
         "    // clique em \'Salvar tudo agora\', que envia o formulário inteiro de uma vez\n"
         "    // (comportamento simples e testado, sem chamadas de rede paralelas).\n"
+        "    //\n"
+        "    // 10/09/2026, a pedido de Felipe: a habilidade escolhida agora fica FIXADA\n"
+        "    // na tela junto com a descrição completa (não só o código) -- reduz a chance\n"
+        "    // de o professor achar que ela \'sumiu\' e reforça visualmente o que foi\n"
+        "    // selecionado. A descrição vem do próprio resultado da busca; pras\n"
+        "    // habilidades que a semana já tinha salvas (ao carregar a página), busca as\n"
+        "    // descrições de uma vez só, num único pedido por semana.\n"
         "    document.querySelectorAll(\'.bncc-row-widget\').forEach(function(container) {\n"
         "        var hiddenInput = container.querySelector(\'.bncc-row-hidden\');\n"
         "        var chipsDiv = container.querySelector(\'.bncc-row-chips\');\n"
@@ -5558,17 +5611,25 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "        var sid = container.getAttribute(\'data-semana\');\n"
         "        var objetoArea = document.querySelector(\'textarea[name=\"obj_\' + sid + \'\"]\');\n"
         "        var selecionados = [];\n"
+        "        var descricoes = {};\n"
+        "        function descricaoDe(cod) {\n"
+        "            if (descricoes[cod]) return descricoes[cod];\n"
+        "            if (OBJETO_POR_HABILIDADE[cod]) return OBJETO_POR_HABILIDADE[cod];\n"
+        "            return \'(descrição não cadastrada pra essa habilidade)\';\n"
+        "        }\n"
         "        function renderChips() {\n"
         "            chipsDiv.innerHTML = \'\';\n"
         "            selecionados.forEach(function(cod) {\n"
-        "                var chip = document.createElement(\'span\');\n"
-        "                chip.style.cssText = \'display:inline-flex;align-items:center;gap:4px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;\';\n"
-        "                chip.innerHTML = cod + \' <button type=\"button\" style=\"background:none;border:none;cursor:pointer;color:var(--accent);font-size:13px;padding:0;line-height:1;\" title=\"Remover\">\\xd7</button>\';\n"
-        "                chip.querySelector(\'button\').addEventListener(\'click\', function() {\n"
+        "                var card = document.createElement(\'div\');\n"
+        "                card.style.cssText = \'display:flex;justify-content:space-between;align-items:flex-start;gap:10px;background:var(--accent-bg);border:1px solid var(--accent-border);border-radius:6px;padding:8px 10px;margin-bottom:6px;\';\n"
+        "                var desc = (descricaoDe(cod) || \'\').replace(/</g,\'&lt;\');\n"
+        "                card.innerHTML = \'<div style=\"min-width:0;\"><strong style=\"color:var(--accent);\">\' + cod + \'</strong><div style=\"font-size:12px;color:var(--text);margin-top:3px;white-space:pre-line;\">\' + desc + \'</div></div>\'\n"
+        "                    + \'<button type=\"button\" style=\"background:none;border:none;cursor:pointer;color:var(--accent);font-size:16px;padding:0;line-height:1;flex-shrink:0;\" title=\"Remover\">\\xd7</button>\';\n"
+        "                card.querySelector(\'button\').addEventListener(\'click\', function() {\n"
         "                    selecionados = selecionados.filter(function(c){return c!==cod;});\n"
         "                    renderChips();\n"
         "                });\n"
-        "                chipsDiv.appendChild(chip);\n"
+        "                chipsDiv.appendChild(card);\n"
         "            });\n"
         "            hiddenInput.value = selecionados.join(\', \');\n"
         "        }\n"
@@ -5583,9 +5644,10 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "            });\n"
         "            objetoArea.value = atual;\n"
         "        }\n"
-        "        function adicionar(cod) {\n"
+        "        function adicionar(cod, descricao) {\n"
         "            cod = cod.trim().toUpperCase();\n"
         "            if (!cod || selecionados.indexOf(cod) >= 0) return;\n"
+        "            if (descricao) descricoes[cod] = descricao;\n"
         "            selecionados.push(cod); renderChips(); resultsDiv.innerHTML = \'\'; if (searchInput) searchInput.value = \'\';\n"
         "            preencherObjeto(cod);\n"
         "        }\n"
@@ -5600,10 +5662,12 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "                var results = [];\n"
         "                if (pareceCode) { Object.keys(data).forEach(function(k){if(k!==\'results\') results.push({codigo:k,descricao:data[k]});}); }\n"
         "                else { results = data.results || []; }\n"
+        "                var _resultadosPorCodigo = {};\n"
+        "                results.forEach(function(r){ _resultadosPorCodigo[r.codigo] = r.descricao; });\n"
         "                if (results.length === 0) {\n"
         "                    if (pareceCode) {\n"
         "                        resultsDiv.innerHTML = \'<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Código não encontrado. <button type=\"button\" style=\"background:none;border:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0;text-decoration:underline;\">Adicionar mesmo assim</button></div>\';\n"
-        "                        resultsDiv.querySelector(\'button\').addEventListener(\'click\', function(){adicionar(q);});\n"
+        "                        resultsDiv.querySelector(\'button\').addEventListener(\'click\', function(){adicionar(q, \'\');});\n"
         "                    } else {\n"
         "                        resultsDiv.innerHTML = \'<div style=\"padding:6px 8px;font-size:12px;color:var(--text-muted);\">Nenhum resultado.</div>\';\n"
         "                    }\n"
@@ -5614,6 +5678,7 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "                    htmlOut += \'<div data-cod=\"\' + r.codigo + \'\" style=\"padding:7px 9px;border:1px solid var(--border);border-radius:5px;margin-bottom:4px;cursor:pointer;background:var(--card);font-size:12px;line-height:1.4;\" onmouseover=\"this.style.background=\\\'var(--accent-bg)\\\'\" onmouseout=\"this.style.background=\\\'var(--card)\\\'\"><strong style=\"color:var(--accent);\">\' + r.codigo + \'</strong> \\xb7 \' + (r.descricao||\'\').replace(/</g,\'&lt;\') + \'</div>\';\n"
         "                });\n"
         "                resultsDiv.innerHTML = htmlOut;\n"
+        "                resultsDiv._ultimaBusca = _resultadosPorCodigo;\n"
         "            }).catch(function(){resultsDiv.innerHTML=\'\';});\n"
         "        }\n"
         "        if (searchInput) {\n"
@@ -5623,14 +5688,26 @@ def preencher_norteador_ano(request: Request, documento_id: int, ano_escolaridad
         "        }\n"
         "        resultsDiv.addEventListener(\'click\', function(e){\n"
         "            var item = e.target.closest(\'[data-cod]\');\n"
-        "            if (item) adicionar(item.dataset.cod);\n"
+        "            if (item) {\n"
+        "                var cod = item.dataset.cod;\n"
+        "                var desc = (resultsDiv._ultimaBusca && resultsDiv._ultimaBusca[cod]) || \'\';\n"
+        "                adicionar(cod, desc);\n"
+        "            }\n"
         "        });\n"
         "        var init = hiddenInput.value.trim();\n"
         "        if (init) {\n"
+        "            var codigosIniciais = [];\n"
         "            init.split(/[,\\n]/).map(function(x){return x.trim().toUpperCase();}).filter(Boolean).forEach(function(c){\n"
-        "                if (selecionados.indexOf(c) < 0) selecionados.push(c);\n"
+        "                if (selecionados.indexOf(c) < 0) { selecionados.push(c); codigosIniciais.push(c); }\n"
         "            });\n"
         "            renderChips();\n"
+        "            if (codigosIniciais.length) {\n"
+        "                fetch(\'/habilidades/buscar?codigos=\' + encodeURIComponent(codigosIniciais.join(\',\'))).then(function(r){return r.json();}).then(function(data) {\n"
+        "                    var mudou = false;\n"
+        "                    Object.keys(data).forEach(function(cod) { if (data[cod]) { descricoes[cod] = data[cod]; mudou = true; } });\n"
+        "                    if (mudou) renderChips();\n"
+        "                }).catch(function(){});\n"
+        "            }\n"
         "        }\n"
         "    });\n"
         "})();\n</script>\n"
