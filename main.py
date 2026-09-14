@@ -6292,6 +6292,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
         itens_boletim.append(nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim"))
         itens_boletim.append(nav_item("/boletim/lancamento-manual", "lancamento-manual", "📝", "Lançamento Manual (nota/falta)"))
         if professor and (professor.get("is_admin") or professor.get("is_gestor")):
+            itens_boletim.append(nav_item("/boletim/painel-lancamentos", "painel-lancamentos", "📊", "Painel de Lançamentos"))
             itens_boletim.append(nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)"))
             itens_boletim.append(nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha"))
         secao_boletim = ('<div class="sidebar-section">Boletim</div>' + "".join(itens_boletim)) if professor else ""
@@ -7110,6 +7111,24 @@ def home(request: Request):
         .destaque-urgente-seta { font-size: 20px; flex-shrink: 0; }
         </style>
         """
+        if is_admin or is_gestor:
+            # Gestão/admin também ganha um atalho pro painel de acompanhamento (% de
+            # turma×disciplina já lançada) — cor diferente pra não confundir com o
+            # banner de lançar nota em si (11/09/2026).
+            destaque_lancamento_manual += """
+            <a href="/boletim/painel-lancamentos" class="destaque-urgente destaque-urgente-gestao">
+                <div class="destaque-urgente-icon">📊</div>
+                <div class="destaque-urgente-texto">
+                    <div class="destaque-urgente-titulo">Painel de Lançamentos</div>
+                    <div class="destaque-urgente-sub">Veja o % de turmas/disciplinas com nota já lançada e quais ainda faltam.</div>
+                </div>
+                <div class="destaque-urgente-seta">→</div>
+            </a>
+            <style>
+            .destaque-urgente-gestao { background: linear-gradient(135deg, #4C6EF5, #7c3aed); box-shadow: 0 4px 14px rgba(76,110,245,0.35); }
+            .destaque-urgente-gestao:hover { box-shadow: 0 6px 18px rgba(76,110,245,0.45); }
+            </style>
+            """
 
     content = f"""
         <div class="page-header">
@@ -9078,6 +9097,7 @@ def lancamento_manual_lista(request: Request):
             JOIN professores p ON p.id = bpt.professor_id
             JOIN turmas t ON t.id = bpt.turma_id
             JOIN disciplinas d ON d.id = bpt.disciplina_id
+            WHERE d.nome NOT LIKE '% | %'
             ORDER BY t.nome, d.nome, p.nome
         """).fetchall()
     else:
@@ -9087,7 +9107,7 @@ def lancamento_manual_lista(request: Request):
             FROM boletim_professor_turma bpt
             JOIN turmas t ON t.id = bpt.turma_id
             JOIN disciplinas d ON d.id = bpt.disciplina_id
-            WHERE bpt.professor_id = ?
+            WHERE bpt.professor_id = ? AND d.nome NOT LIKE '% | %'
             ORDER BY t.nome, d.nome
         """, (prof["id"],)).fetchall()
     conn.close()
@@ -9144,6 +9164,12 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
     if not turma or not disciplina:
         conn.close()
         return HTMLResponse(render_page("Erro", '<div class="empty">Turma ou disciplina não encontrada.</div>', active="lancamento-manual"))
+    if " | " in disciplina["nome"]:
+        # Subdisciplina (ex: "Matemática | Álgebra") — existe só pra organizar o banco de
+        # questões/simulados por sub-área, não é uma disciplina com nota própria no
+        # boletim (11/09/2026, a pedido de Felipe).
+        conn.close()
+        return HTMLResponse(render_page("Sem lançamento aqui", '<div class="empty">Essa é uma subdisciplina usada só pra organizar o banco de questões — não se lança nota nela. A nota vai na disciplina principal.</div><a href="/boletim/lancamento-manual" class="btn">Voltar</a>', active="lancamento-manual"))
 
     alunos = conn.execute(
         "SELECT * FROM alunos WHERE turma_id=? AND status='ativo' ORDER BY numero, nome", (turma_id,)
@@ -9244,7 +9270,7 @@ async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_i
 
     turma = conn.execute("SELECT ano_letivo FROM turmas WHERE id=?", (turma_id,)).fetchone()
     disciplina = conn.execute("SELECT nome FROM disciplinas WHERE id=?", (disciplina_id,)).fetchone()
-    if not turma or not disciplina:
+    if not turma or not disciplina or " | " in disciplina["nome"]:
         conn.close()
         return RedirectResponse("/boletim/lancamento-manual", status_code=303)
     ano_letivo = turma["ano_letivo"]
@@ -9295,6 +9321,114 @@ async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_i
     conn.commit()
     conn.close()
     return RedirectResponse(f"/boletim/lancamento-manual/{turma_id}/{disciplina_id}?trimestre={trimestre}&salvo=1", status_code=303)
+
+
+@app.get("/boletim/painel-lancamentos", response_class=HTMLResponse)
+def painel_lancamentos(request: Request, trimestre: int = 2):
+    """Painel de acompanhamento pra gestão/admin: % de turma×disciplina com nota
+    completamente lançada, e quais faltam — não entra subdisciplina (11/09/2026, a
+    pedido de Felipe, junto com a urgência do lançamento manual)."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+
+    conn = get_db()
+    combos_raw = conn.execute("""
+        SELECT bpt.turma_id, t.nome AS turma_nome, t.ano_letivo,
+               bpt.disciplina_id, d.nome AS disciplina_nome,
+               p.nome AS professor_nome
+        FROM boletim_professor_turma bpt
+        JOIN turmas t ON t.id = bpt.turma_id
+        JOIN disciplinas d ON d.id = bpt.disciplina_id
+        LEFT JOIN professores p ON p.id = bpt.professor_id
+        WHERE d.nome NOT LIKE '% | %'
+        ORDER BY t.nome, d.nome
+    """).fetchall()
+
+    agrupado = {}
+    for c in combos_raw:
+        chave = (c["turma_id"], c["disciplina_id"])
+        if chave not in agrupado:
+            agrupado[chave] = {
+                "turma_id": c["turma_id"], "turma_nome": c["turma_nome"], "ano_letivo": c["ano_letivo"],
+                "disciplina_id": c["disciplina_id"], "disciplina_nome": c["disciplina_nome"], "professores": [],
+            }
+        if c["professor_nome"] and c["professor_nome"] not in agrupado[chave]["professores"]:
+            agrupado[chave]["professores"].append(c["professor_nome"])
+
+    resultado = []
+    for combo in agrupado.values():
+        total_alunos = conn.execute(
+            "SELECT COUNT(*) c FROM alunos WHERE turma_id=? AND status='ativo'", (combo["turma_id"],)
+        ).fetchone()["c"]
+        if total_alunos == 0:
+            continue
+        lancados = conn.execute("""
+            SELECT COUNT(*) c FROM boletim_medias bm
+            JOIN alunos a ON a.id = bm.aluno_id
+            WHERE a.turma_id=? AND a.status='ativo' AND bm.disciplina_id=? AND bm.trimestre=? AND bm.ano=?
+            AND (bm.nota IS NOT NULL OR bm.nota_texto IS NOT NULL)
+        """, (combo["turma_id"], combo["disciplina_id"], trimestre, combo["ano_letivo"])).fetchone()["c"]
+        combo["lancados"] = lancados
+        combo["total"] = total_alunos
+        combo["completo"] = lancados >= total_alunos
+        resultado.append(combo)
+    conn.close()
+
+    resultado.sort(key=lambda c: (c["completo"], c["turma_nome"], c["disciplina_nome"]))
+    total_combos = len(resultado)
+    completos = sum(1 for c in resultado if c["completo"])
+    percentual = round(100 * completos / total_combos) if total_combos else 0
+    cor_barra = "var(--red)" if percentual < 34 else ("var(--orange)" if percentual < 90 else "var(--green)")
+
+    linhas = ""
+    for c in resultado:
+        profs = ", ".join(c["professores"]) or "— sem professor vinculado —"
+        status_label = "✅ Completo" if c["completo"] else "⚠️ Pendente"
+        status_cor = "var(--green)" if c["completo"] else "var(--orange)"
+        linhas += f"""
+        <tr>
+            <td style="padding:8px;">{c["turma_nome"]}</td>
+            <td style="padding:8px;">{c["disciplina_nome"]}</td>
+            <td style="padding:8px; font-size:12px; color:var(--text-muted);">{profs}</td>
+            <td style="padding:8px; text-align:center;">{c["lancados"]}/{c["total"]}</td>
+            <td style="padding:8px; color:{status_cor}; font-weight:600;">{status_label}</td>
+            <td style="padding:8px;"><a href="/boletim/lancamento-manual/{c['turma_id']}/{c['disciplina_id']}?trimestre={trimestre}" class="btn" style="padding:3px 10px; font-size:11px;">Abrir</a></td>
+        </tr>"""
+    if not linhas:
+        linhas = '<tr><td colspan="6" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma turma/disciplina vinculada ainda em Professor×Turma.</td></tr>'
+
+    opts_trimestre = "".join(f'<option value="{t}"{" selected" if t==trimestre else ""}>{t}º Trimestre</option>' for t in (1, 2, 3))
+
+    content = f"""
+        <div class="page-header">
+            <h1>📊 Painel de Lançamentos — Nota e Falta</h1>
+            <p class="subtitle">Acompanhe quais turmas/disciplinas já lançaram o trimestre e quais ainda faltam.</p>
+        </div>
+        <form method="get" style="max-width:220px; margin-bottom:16px;">
+            <label>Trimestre<select name="trimestre" onchange="this.form.submit();">{opts_trimestre}</select></label>
+        </form>
+        <div class="card" style="padding:16px; margin-bottom:20px;">
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+                <div style="flex:1; background:var(--bg-subtle); border-radius:6px; height:18px; overflow:hidden;">
+                    <div style="width:{percentual}%; background:{cor_barra}; height:100%;"></div>
+                </div>
+                <strong style="white-space:nowrap; font-size:16px;">{percentual}%</strong>
+            </div>
+            <p style="font-size:13px; color:var(--text-muted); margin:0;">{completos} de {total_combos} turma(s)×disciplina(s) com o {trimestre}º trimestre 100% lançado.</p>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left;">Turma</th>
+                <th style="padding:8px; text-align:left;">Disciplina</th>
+                <th style="padding:8px; text-align:left;">Professor(es)</th>
+                <th style="padding:8px;">Alunos lançados</th>
+                <th style="padding:8px; text-align:left;">Status</th>
+                <th style="padding:8px;"></th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+    """
+    return HTMLResponse(render_page("Painel de Lançamentos", content, active="painel-lancamentos"))
 
 
 @app.get("/boletim/importar-ecidade", response_class=HTMLResponse)
