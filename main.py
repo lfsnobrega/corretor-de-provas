@@ -9115,8 +9115,8 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
     alunos = conn.execute(
         "SELECT * FROM alunos WHERE turma_id=? AND status='ativo' ORDER BY numero, nome", (turma_id,)
     ).fetchall()
-    notas = {r["aluno_id"]: r["nota"] for r in conn.execute(
-        "SELECT aluno_id, nota FROM boletim_medias WHERE disciplina_id=? AND trimestre=? AND ano=? AND aluno_id IN (SELECT id FROM alunos WHERE turma_id=?)",
+    notas = {r["aluno_id"]: (r["nota"], r["nota_texto"]) for r in conn.execute(
+        "SELECT aluno_id, nota, nota_texto FROM boletim_medias WHERE disciplina_id=? AND trimestre=? AND ano=? AND aluno_id IN (SELECT id FROM alunos WHERE turma_id=?)",
         (disciplina_id, trimestre, turma["ano_letivo"], turma_id)
     ).fetchall()}
     faltas = {r["aluno_id"]: r["faltas"] for r in conn.execute(
@@ -9125,17 +9125,30 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
     ).fetchall()}
     conn.close()
 
+    # Educação Digital não tem nota numérica — é um CONCEITO (PA/PS/PI), igual já é
+    # tratado na importação do e-cidade. Nesse caso mostra um seletor em vez de campo
+    # numérico, gravando em nota_texto (11/09/2026, a pedido de Felipe).
+    eh_conceito = disciplina["nome"] == "Educação Digital"
+    opcoes_conceito = ["PA", "PS", "PI"]
+
     linhas = ""
     for a in alunos:
-        nota_val = notas.get(a["id"])
+        nota_val, nota_texto_val = notas.get(a["id"], (None, None))
         faltas_val = faltas.get(a["id"])
-        nota_str = "" if nota_val is None else (str(int(nota_val)) if float(nota_val).is_integer() else str(nota_val))
         faltas_str = "" if faltas_val is None else str(faltas_val)
+        if eh_conceito:
+            opts = '<option value="">— selecione —</option>' + "".join(
+                f'<option value="{o}"{" selected" if nota_texto_val == o else ""}>{o}</option>' for o in opcoes_conceito
+            )
+            campo_nota_html = f'<select name="nota_{a["id"]}" style="width:110px; margin:0;">{opts}</select>'
+        else:
+            nota_str = "" if nota_val is None else (str(int(nota_val)) if float(nota_val).is_integer() else str(nota_val))
+            campo_nota_html = f'<input type="number" name="nota_{a["id"]}" step="0.1" min="0" max="10" value="{nota_str}" style="width:80px; margin:0;" placeholder="0,0">'
         linhas += f"""
         <tr>
             <td style="padding:8px; font-weight:600;">{a["numero"] or "—"}</td>
             <td style="padding:8px;">{a["nome"]}</td>
-            <td style="padding:8px;"><input type="number" name="nota_{a['id']}" step="0.1" min="0" max="10" value="{nota_str}" style="width:80px; margin:0;" placeholder="0,0"></td>
+            <td style="padding:8px;">{campo_nota_html}</td>
             <td style="padding:8px;"><input type="number" name="faltas_{a['id']}" step="1" min="0" value="{faltas_str}" style="width:80px; margin:0;" placeholder="0"></td>
         </tr>"""
     if not linhas:
@@ -9143,11 +9156,13 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
 
     opts_trimestre = "".join(f'<option value="{t}"{" selected" if t==trimestre else ""}>{t}º Trimestre</option>' for t in (1, 2, 3))
     aviso_salvo = '<div class="tip" style="background:var(--green-bg); border-color:var(--green); margin-bottom:14px;">✓ Salvo com sucesso.</div>' if salvo else ""
+    coluna_nota_label = "Conceito (PA/PS/PI)" if eh_conceito else "Nota Final"
+    texto_ajuda = "Preencha só o Conceito e as Faltas do trimestre" if eh_conceito else "Preencha só a Nota Final e as Faltas do trimestre"
 
     content = f"""
         <div class="page-header">
             <h1>📝 {turma["nome"]} — {disciplina["nome"]}</h1>
-            <p class="subtitle">Ano letivo {turma["ano_letivo"]}. Preencha só a Nota Final e as Faltas do trimestre — pode deixar em branco quem você ainda não for lançar agora.</p>
+            <p class="subtitle">Ano letivo {turma["ano_letivo"]}. {texto_ajuda} — pode deixar em branco quem você ainda não for lançar agora.</p>
         </div>
         {aviso_salvo}
         <form method="get" action="/boletim/lancamento-manual/{turma_id}/{disciplina_id}" style="margin-bottom:14px;">
@@ -9162,7 +9177,7 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
                 <thead><tr style="background:var(--bg-subtle);">
                     <th style="padding:8px; text-align:left;">Nº</th>
                     <th style="padding:8px; text-align:left;">Aluno</th>
-                    <th style="padding:8px; text-align:left;">Nota Final</th>
+                    <th style="padding:8px; text-align:left;">{coluna_nota_label}</th>
                     <th style="padding:8px; text-align:left;">Faltas</th>
                 </tr></thead>
                 <tbody>{linhas}</tbody>
@@ -9195,10 +9210,12 @@ async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_i
             return RedirectResponse("/boletim/lancamento-manual", status_code=303)
 
     turma = conn.execute("SELECT ano_letivo FROM turmas WHERE id=?", (turma_id,)).fetchone()
-    if not turma:
+    disciplina = conn.execute("SELECT nome FROM disciplinas WHERE id=?", (disciplina_id,)).fetchone()
+    if not turma or not disciplina:
         conn.close()
         return RedirectResponse("/boletim/lancamento-manual", status_code=303)
     ano_letivo = turma["ano_letivo"]
+    eh_conceito = disciplina["nome"] == "Educação Digital"
 
     form = await request.form()
     trimestre = int(form.get("trimestre") or 2)
@@ -9206,12 +9223,20 @@ async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_i
 
     for a in alunos:
         aluno_id = a["id"]
-        nota_raw = (form.get(f"nota_{aluno_id}") or "").strip().replace(",", ".")
-        faltas_raw = (form.get(f"faltas_{aluno_id}") or "").strip()
+        nota_raw = (form.get(f"nota_{aluno_id}") or "").strip()
 
-        if nota_raw:
+        if nota_raw and eh_conceito:
+            # Educação Digital é conceito (PA/PS/PI), não número — grava em nota_texto,
+            # igual já é feito na importação do e-cidade (11/09/2026).
+            conn.execute("""
+                INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                VALUES (?, ?, ?, ?, NULL, ?)
+                ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota=NULL, nota_texto=excluded.nota_texto
+            """, (aluno_id, disciplina_id, trimestre, ano_letivo, nota_raw))
+        elif nota_raw:
+            nota_raw_num = nota_raw.replace(",", ".")
             try:
-                nota_val = float(nota_raw)
+                nota_val = float(nota_raw_num)
             except ValueError:
                 nota_val = None
             if nota_val is not None:
@@ -9221,6 +9246,7 @@ async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_i
                     ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota=excluded.nota, nota_texto=NULL
                 """, (aluno_id, disciplina_id, trimestre, ano_letivo, nota_val))
 
+        faltas_raw = (form.get(f"faltas_{aluno_id}") or "").strip()
         if faltas_raw:
             try:
                 faltas_val = int(faltas_raw)
