@@ -7079,6 +7079,38 @@ def home(request: Request):
         </div>
         """
 
+    destaque_lancamento_manual = ""
+    if prof and not eh_apoio_restrito and not eh_orientacao_restrito:
+        # Banner em destaque pro Lançamento Manual de nota/falta (11/09/2026) — sistema
+        # da rede (e-cidade) fora do ar, professores precisam achar isso rápido, sem
+        # procurar no menu. Fica bem no topo da tela inicial, antes de tudo o mais.
+        destaque_lancamento_manual = """
+        <a href="/boletim/lancamento-manual" class="destaque-urgente">
+            <div class="destaque-urgente-icon">📝</div>
+            <div class="destaque-urgente-texto">
+                <div class="destaque-urgente-titulo">Lançamento Manual de Nota e Falta — 2º Trimestre</div>
+                <div class="destaque-urgente-sub">Sistema da rede fora do ar? Lance aqui — atualiza os dashboards, risco de repetência e Conselho de Classe na hora.</div>
+            </div>
+            <div class="destaque-urgente-seta">→</div>
+        </a>
+        <style>
+        .destaque-urgente {
+            display: flex; align-items: center; gap: 14px;
+            background: linear-gradient(135deg, #ea580c, #dc2626);
+            color: white; text-decoration: none;
+            padding: 14px 18px; border-radius: 12px; margin-bottom: 20px;
+            box-shadow: 0 4px 14px rgba(220,38,38,0.35);
+            transition: transform 0.12s ease, box-shadow 0.12s ease;
+        }
+        .destaque-urgente:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(220,38,38,0.45); }
+        .destaque-urgente-icon { font-size: 28px; line-height: 1; flex-shrink: 0; }
+        .destaque-urgente-texto { flex: 1; min-width: 0; }
+        .destaque-urgente-titulo { font-weight: 700; font-size: 14px; }
+        .destaque-urgente-sub { font-size: 12px; opacity: 0.92; margin-top: 2px; }
+        .destaque-urgente-seta { font-size: 20px; flex-shrink: 0; }
+        </style>
+        """
+
     content = f"""
         <div class="page-header">
             <h1 style="margin-bottom:4px;">Olá, {nome_prof} 👋</h1>
@@ -7086,6 +7118,7 @@ def home(request: Request):
         </div>
         <div class="home-layout">
             <div class="home-layout-main">
+                {destaque_lancamento_manual}
                 {mobile_launcher_html}
                 {aplicacoes_abertas_html}
             </div>
