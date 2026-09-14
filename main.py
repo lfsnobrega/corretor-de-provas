@@ -2,7 +2,7 @@ from fastapi import FastAPI, Form, UploadFile, File, Request, Depends, HTTPExcep
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional, List
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
@@ -6290,6 +6290,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
         # importação (admin/gestão) são montados separadamente (25/08/2026, reorganização).
         itens_boletim = []
         itens_boletim.append(nav_item("/boletim/boletim-individual", "boletim-individual", "🧾", "Gerar Boletim"))
+        itens_boletim.append(nav_item("/boletim/lancamento-manual", "lancamento-manual", "📝", "Lançamento Manual (nota/falta)"))
         if professor and (professor.get("is_admin") or professor.get("is_gestor")):
             itens_boletim.append(nav_item("/boletim/importar-ecidade", "boletim-importar-ecidade", "📥", "Importar notas (e-cidade)"))
             itens_boletim.append(nav_item("/boletim/importar", "boletim-importar", "📥", "Importar planilha"))
@@ -6303,6 +6304,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
 
         nav_body = f"""
                 {nav_item("/", "home", "🏠", "Início")}
+                {nav_item("/painel-rapido", "painel-rapido", "📱", "Resumo Rápido") if professor else ""}
                 <div class="sidebar-section">Banco de questões</div>
                 {nav_item("/questoes", "questoes", "✏️", "Cadastrar questão")}
                 <div class="sidebar-section">Tarefas</div>
@@ -6583,6 +6585,186 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         )
 
     return f'<div class="question questao-card-preview"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}{anulada_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
+
+
+@app.get("/painel-rapido", response_class=HTMLResponse)
+def painel_rapido(request: Request):
+    """Painel resumido, pensado pra abrir rápido no celular e mostrar só o que precisa
+    de atenção agora: avisos do calendário do trimestre, Documentos Norteadores
+    incompletos e aplicações com entregas aguardando revisão (10/09/2026, a pedido de
+    Felipe). Pra professores comuns mostra só o que é deles; pra admin/gestão mostra a
+    escola inteira."""
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    sou_gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
+
+    conn = get_db()
+    hoje = date.today()
+    ano_letivo_atual = hoje.year
+
+    # --- Avisos do calendário do trimestre (próximos) ---
+    # calendario_semanas não tem data de verdade, só um "label" tipo "14/09 a 18/09" —
+    # extrai a data de início dali pra poder ordenar por proximidade de hoje.
+    alertas = conn.execute(
+        "SELECT * FROM calendario_alertas WHERE ano_letivo=? ORDER BY id", (ano_letivo_atual,)
+    ).fetchall()
+    semanas_por_id = {s["id"]: s for s in conn.execute(
+        "SELECT * FROM calendario_semanas WHERE ano_letivo=?", (ano_letivo_atual,)
+    ).fetchall()}
+
+    def _parse_data_semana(label):
+        m = re.match(r'^(\d{2})/(\d{2})', label or "")
+        if not m:
+            return None
+        try:
+            return date(ano_letivo_atual, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+
+    com_data = []
+    for al in alertas:
+        semana_ref = semanas_por_id.get(al["ordem_apos_semana_id"]) if al["ordem_apos_semana_id"] else None
+        data_ref = _parse_data_semana(semana_ref["label"]) if semana_ref else None
+        if data_ref:
+            com_data.append((data_ref, al))
+    com_data.sort(key=lambda x: x[0])
+    margem = timedelta(days=3)
+    proximos_avisos = [(d, al) for d, al in com_data if d >= hoje - margem][:5]
+    if not proximos_avisos and com_data:
+        proximos_avisos = com_data[-5:]
+
+    # --- Documentos Norteadores pendentes de preencher ---
+    if sou_gestao:
+        vinculos = conn.execute("""
+            SELECT dn.id AS documento_id, dn.trimestre, dn.ano_letivo, d.nome AS disciplina_nome, dnd.ano_escolaridade
+            FROM documentos_norteadores dn
+            JOIN disciplinas d ON d.id = dn.disciplina_id
+            LEFT JOIN documento_norteador_docentes dnd ON dnd.documento_id = dn.id
+            WHERE dn.ano_letivo = ?
+        """, (ano_letivo_atual,)).fetchall()
+    else:
+        vinculos = conn.execute("""
+            SELECT dn.id AS documento_id, dn.trimestre, dn.ano_letivo, d.nome AS disciplina_nome, dnd.ano_escolaridade
+            FROM documento_norteador_docentes dnd
+            JOIN documentos_norteadores dn ON dn.id = dnd.documento_id
+            JOIN disciplinas d ON d.id = dn.disciplina_id
+            WHERE dnd.professor_id = ? AND dn.ano_letivo = ?
+        """, (prof["id"], ano_letivo_atual)).fetchall()
+
+    vistos = set()
+    pendentes_norteador = []
+    for v in vinculos:
+        if not v["ano_escolaridade"]:
+            continue
+        chave = (v["documento_id"], v["ano_escolaridade"])
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        total_semanas = conn.execute(
+            "SELECT COUNT(*) c FROM calendario_semanas WHERE trimestre=? AND ano_letivo=?",
+            (v["trimestre"], v["ano_letivo"])
+        ).fetchone()["c"]
+        if total_semanas == 0:
+            continue
+        preenchidas = conn.execute("""
+            SELECT COUNT(*) c FROM documento_norteador_semanas
+            WHERE documento_id=? AND ano_escolaridade=?
+            AND objeto_conhecimento IS NOT NULL AND objeto_conhecimento != ''
+        """, (v["documento_id"], v["ano_escolaridade"])).fetchone()["c"]
+        if preenchidas < total_semanas:
+            pendentes_norteador.append({
+                "documento_id": v["documento_id"], "disciplina": v["disciplina_nome"],
+                "ano_escolaridade": v["ano_escolaridade"], "trimestre": v["trimestre"],
+                "faltam": total_semanas - preenchidas, "total": total_semanas,
+            })
+    pendentes_norteador.sort(key=lambda x: -x["faltam"])
+
+    # --- Aplicações com entregas aguardando revisão ---
+    # O sistema não guarda um status de "correção pendente" por questão discursiva (a
+    # correção dessas é manual, fora do sistema) — a proxy usada aqui é: aplicações
+    # ainda ABERTAS que já têm entrega de aluno, ou seja, precisam da atenção do professor.
+    sql_aplic = """
+        SELECT ap.id, COALESCE(ap.titulo, p.titulo) AS titulo, t.nome AS turma_nome,
+               COUNT(DISTINCT e.aluno_id) AS n_entregas
+        FROM aplicacoes ap
+        JOIN provas p ON p.id = ap.prova_id
+        JOIN turmas t ON t.id = ap.turma_id
+        JOIN entregas e ON e.aplicacao_id = ap.id
+        WHERE ap.aberta = 1
+    """
+    params = []
+    if not sou_gestao:
+        sql_aplic += " AND ap.criada_por_professor_id = ?"
+        params.append(prof["id"])
+    sql_aplic += " GROUP BY ap.id ORDER BY n_entregas DESC LIMIT 8"
+    aplicacoes_pendentes = conn.execute(sql_aplic, params).fetchall()
+
+    conn.close()
+
+    html_avisos = ""
+    for d, al in proximos_avisos:
+        html_avisos += f"""
+        <div class="painel-item">
+            <div class="painel-item-data">{d.strftime('%d/%m')}</div>
+            <div class="painel-item-texto">{html.escape(al["texto"])}</div>
+        </div>"""
+    if not html_avisos:
+        html_avisos = '<div class="empty" style="padding:12px;">Nenhum aviso cadastrado.</div>'
+
+    html_norteador = ""
+    for p in pendentes_norteador[:8]:
+        html_norteador += f"""
+        <a href="/norteador/{p['documento_id']}/{p['ano_escolaridade']}" class="painel-item painel-item-link">
+            <div class="painel-item-texto"><strong>{p['disciplina']}</strong> — {p['ano_escolaridade']} ({p['trimestre']}º trim.)</div>
+            <div class="painel-item-badge">{p['faltam']}/{p['total']} semanas</div>
+        </a>"""
+    if not html_norteador:
+        html_norteador = '<div class="empty" style="padding:12px;">Tudo preenchido — nenhuma pendência 🎉</div>'
+
+    html_aplicacoes = ""
+    for a in aplicacoes_pendentes:
+        html_aplicacoes += f"""
+        <a href="/aplicacoes/{a['id']}" class="painel-item painel-item-link">
+            <div class="painel-item-texto"><strong>{a['titulo']}</strong> — {a['turma_nome']}</div>
+            <div class="painel-item-badge">{a['n_entregas']} entrega(s)</div>
+        </a>"""
+    if not html_aplicacoes:
+        html_aplicacoes = '<div class="empty" style="padding:12px;">Nenhuma aplicação aberta com entregas no momento.</div>'
+
+    content = f"""
+    <style>
+        .painel-secao {{ margin-bottom: 22px; }}
+        .painel-secao h2 {{ font-size: 15px; margin-bottom: 8px; display:flex; align-items:center; gap:6px; }}
+        .painel-item {{ display:flex; justify-content:space-between; align-items:center; gap:10px;
+            padding:10px 12px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px;
+            background:var(--card); font-size:13px; }}
+        .painel-item-link {{ text-decoration:none; color:inherit; }}
+        .painel-item-data {{ font-weight:700; color:var(--accent); white-space:nowrap; font-size:12px; }}
+        .painel-item-badge {{ background:var(--accent-bg); color:var(--accent); padding:2px 8px;
+            border-radius:12px; font-size:11px; font-weight:600; white-space:nowrap; }}
+    </style>
+    <div class="page-header">
+        <h1>📱 Resumo rápido</h1>
+        <p class="subtitle">Atualizado agora — {hoje.strftime('%d/%m/%Y')}</p>
+    </div>
+
+    <div class="painel-secao">
+        <h2>📅 Avisos do calendário</h2>
+        {html_avisos}
+    </div>
+
+    <div class="painel-secao">
+        <h2>📋 Documentos Norteadores pendentes</h2>
+        {html_norteador}
+    </div>
+
+    <div class="painel-secao">
+        <h2>📝 Aplicações aguardando revisão</h2>
+        {html_aplicacoes}
+    </div>
+    """
+    return HTMLResponse(render_page("Resumo Rápido", content, active="painel-rapido"))
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -8837,6 +9019,223 @@ def _boletim_normalizar(s):
 
 def _boletim_normalizar_disciplina(nome):
     return BOLETIM_SUBJECT_MAP.get(_boletim_normalizar(nome), str(nome or "").strip())
+
+
+@app.get("/boletim/lancamento-manual", response_class=HTMLResponse)
+def lancamento_manual_lista(request: Request):
+    """Lista as combinações turma+disciplina que o professor pode lançar nota/falta
+    manualmente. Criado em 11/09/2026, URGENTE: o sistema oficial da rede (e-cidade)
+    está fora do ar e os professores precisam de um jeito de registrar a nota final e
+    as faltas do 2º trimestre sem depender dele — escreve direto em boletim_medias e
+    boletim_faltas, as MESMAS tabelas que já alimentam todos os dashboards, o card de
+    'possíveis repetentes' (regra: média T1+T2 < 5,0) e o Conselho de Classe. Por isso
+    não precisa de nenhuma outra tela nova: assim que a nota é salva aqui, já aparece
+    em tudo o mais automaticamente."""
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    sou_gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
+
+    conn = get_db()
+    if sou_gestao:
+        combos = conn.execute("""
+            SELECT bpt.professor_id, p.nome AS professor_nome, bpt.turma_id, t.nome AS turma_nome,
+                   bpt.disciplina_id, d.nome AS disciplina_nome
+            FROM boletim_professor_turma bpt
+            JOIN professores p ON p.id = bpt.professor_id
+            JOIN turmas t ON t.id = bpt.turma_id
+            JOIN disciplinas d ON d.id = bpt.disciplina_id
+            ORDER BY t.nome, d.nome, p.nome
+        """).fetchall()
+    else:
+        combos = conn.execute("""
+            SELECT bpt.professor_id, bpt.turma_id, t.nome AS turma_nome,
+                   bpt.disciplina_id, d.nome AS disciplina_nome
+            FROM boletim_professor_turma bpt
+            JOIN turmas t ON t.id = bpt.turma_id
+            JOIN disciplinas d ON d.id = bpt.disciplina_id
+            WHERE bpt.professor_id = ?
+            ORDER BY t.nome, d.nome
+        """, (prof["id"],)).fetchall()
+    conn.close()
+
+    linhas = ""
+    for c in combos:
+        extra_nome = f' <span style="color:var(--text-muted); font-size:12px;">— {c["professor_nome"]}</span>' if sou_gestao else ""
+        linhas += f"""
+        <a href="/boletim/lancamento-manual/{c['turma_id']}/{c['disciplina_id']}?trimestre=2" class="painel-item painel-item-link">
+            <div class="painel-item-texto"><strong>{c["turma_nome"]}</strong> — {c["disciplina_nome"]}{extra_nome}</div>
+            <div class="painel-item-badge">Lançar 2º trim.</div>
+        </a>"""
+    if not linhas:
+        linhas = '<div class="empty" style="padding:14px;">Nenhuma turma/disciplina vinculada a você ainda. Fale com a gestão pra vincular no cadastro de professor×turma.</div>'
+
+    content = f"""
+    <style>
+        .painel-item {{ display:flex; justify-content:space-between; align-items:center; gap:10px;
+            padding:10px 12px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px;
+            background:var(--card); font-size:13px; }}
+        .painel-item-link {{ text-decoration:none; color:inherit; }}
+        .painel-item-badge {{ background:var(--accent-bg); color:var(--accent); padding:2px 8px;
+            border-radius:12px; font-size:11px; font-weight:600; white-space:nowrap; }}
+    </style>
+    <div class="page-header">
+        <h1>📝 Lançamento Manual — Nota Final e Faltas</h1>
+        <p class="subtitle">Enquanto o sistema da rede está fora do ar. Escolha a turma/disciplina pra lançar o 2º trimestre.</p>
+    </div>
+    <div class="tip">Isso grava direto no Boletim do sistema — assim que você salvar, já atualiza os dashboards, o risco de repetência e o Conselho de Classe. Dá pra voltar aqui e corrigir quantas vezes precisar.</div>
+    <div style="margin-top:16px;">{linhas}</div>
+    """
+    return HTMLResponse(render_page("Lançamento Manual", content, active="lancamento-manual"))
+
+
+@app.get("/boletim/lancamento-manual/{turma_id}/{disciplina_id}", response_class=HTMLResponse)
+def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, trimestre: int = 2, salvo: int = 0):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    sou_gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
+
+    conn = get_db()
+    if not sou_gestao:
+        vinculo = conn.execute(
+            "SELECT 1 FROM boletim_professor_turma WHERE professor_id=? AND turma_id=? AND disciplina_id=?",
+            (prof["id"], turma_id, disciplina_id)
+        ).fetchone()
+        if not vinculo:
+            conn.close()
+            return HTMLResponse(render_page("Sem acesso", '<div class="empty">Você não está vinculado a essa turma/disciplina.</div><a href="/boletim/lancamento-manual" class="btn">Voltar</a>', active="lancamento-manual"))
+
+    turma = conn.execute("SELECT * FROM turmas WHERE id=?", (turma_id,)).fetchone()
+    disciplina = conn.execute("SELECT * FROM disciplinas WHERE id=?", (disciplina_id,)).fetchone()
+    if not turma or not disciplina:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Turma ou disciplina não encontrada.</div>', active="lancamento-manual"))
+
+    alunos = conn.execute(
+        "SELECT * FROM alunos WHERE turma_id=? AND status='ativo' ORDER BY numero, nome", (turma_id,)
+    ).fetchall()
+    notas = {r["aluno_id"]: r["nota"] for r in conn.execute(
+        "SELECT aluno_id, nota FROM boletim_medias WHERE disciplina_id=? AND trimestre=? AND ano=? AND aluno_id IN (SELECT id FROM alunos WHERE turma_id=?)",
+        (disciplina_id, trimestre, turma["ano_letivo"], turma_id)
+    ).fetchall()}
+    faltas = {r["aluno_id"]: r["faltas"] for r in conn.execute(
+        "SELECT aluno_id, faltas FROM boletim_faltas WHERE disciplina_id=? AND trimestre=? AND ano=? AND aluno_id IN (SELECT id FROM alunos WHERE turma_id=?)",
+        (disciplina_id, trimestre, turma["ano_letivo"], turma_id)
+    ).fetchall()}
+    conn.close()
+
+    linhas = ""
+    for a in alunos:
+        nota_val = notas.get(a["id"])
+        faltas_val = faltas.get(a["id"])
+        nota_str = "" if nota_val is None else (str(int(nota_val)) if float(nota_val).is_integer() else str(nota_val))
+        faltas_str = "" if faltas_val is None else str(faltas_val)
+        linhas += f"""
+        <tr>
+            <td style="padding:8px; font-weight:600;">{a["numero"] or "—"}</td>
+            <td style="padding:8px;">{a["nome"]}</td>
+            <td style="padding:8px;"><input type="number" name="nota_{a['id']}" step="0.1" min="0" max="10" value="{nota_str}" style="width:80px; margin:0;" placeholder="0,0"></td>
+            <td style="padding:8px;"><input type="number" name="faltas_{a['id']}" step="1" min="0" value="{faltas_str}" style="width:80px; margin:0;" placeholder="0"></td>
+        </tr>"""
+    if not linhas:
+        linhas = '<tr><td colspan="4" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum aluno ativo cadastrado nessa turma.</td></tr>'
+
+    opts_trimestre = "".join(f'<option value="{t}"{" selected" if t==trimestre else ""}>{t}º Trimestre</option>' for t in (1, 2, 3))
+    aviso_salvo = '<div class="tip" style="background:var(--green-bg); border-color:var(--green); margin-bottom:14px;">✓ Salvo com sucesso.</div>' if salvo else ""
+
+    content = f"""
+        <div class="page-header">
+            <h1>📝 {turma["nome"]} — {disciplina["nome"]}</h1>
+            <p class="subtitle">Ano letivo {turma["ano_letivo"]}. Preencha só a Nota Final e as Faltas do trimestre — pode deixar em branco quem você ainda não for lançar agora.</p>
+        </div>
+        {aviso_salvo}
+        <form method="get" action="/boletim/lancamento-manual/{turma_id}/{disciplina_id}" style="margin-bottom:14px;">
+            <label style="max-width:220px;">Trimestre
+                <select name="trimestre" onchange="this.form.submit();">{opts_trimestre}</select>
+            </label>
+        </form>
+        <form method="post" action="/boletim/lancamento-manual/{turma_id}/{disciplina_id}">
+            <input type="hidden" name="trimestre" value="{trimestre}">
+            <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:8px; text-align:left;">Nº</th>
+                    <th style="padding:8px; text-align:left;">Aluno</th>
+                    <th style="padding:8px; text-align:left;">Nota Final</th>
+                    <th style="padding:8px; text-align:left;">Faltas</th>
+                </tr></thead>
+                <tbody>{linhas}</tbody>
+            </table>
+            </div>
+            <div class="page-actions" style="margin-top:16px;">
+                <button type="submit" class="btn btn-primary">💾 Salvar</button>
+                <a href="/boletim/lancamento-manual" class="btn">Voltar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page(f"{turma['nome']} — {disciplina['nome']}", content, active="lancamento-manual"))
+
+
+@app.post("/boletim/lancamento-manual/{turma_id}/{disciplina_id}")
+async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_id: int):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    sou_gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
+
+    conn = get_db()
+    if not sou_gestao:
+        vinculo = conn.execute(
+            "SELECT 1 FROM boletim_professor_turma WHERE professor_id=? AND turma_id=? AND disciplina_id=?",
+            (prof["id"], turma_id, disciplina_id)
+        ).fetchone()
+        if not vinculo:
+            conn.close()
+            return RedirectResponse("/boletim/lancamento-manual", status_code=303)
+
+    turma = conn.execute("SELECT ano_letivo FROM turmas WHERE id=?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return RedirectResponse("/boletim/lancamento-manual", status_code=303)
+    ano_letivo = turma["ano_letivo"]
+
+    form = await request.form()
+    trimestre = int(form.get("trimestre") or 2)
+    alunos = conn.execute("SELECT id FROM alunos WHERE turma_id=? AND status='ativo'", (turma_id,)).fetchall()
+
+    for a in alunos:
+        aluno_id = a["id"]
+        nota_raw = (form.get(f"nota_{aluno_id}") or "").strip().replace(",", ".")
+        faltas_raw = (form.get(f"faltas_{aluno_id}") or "").strip()
+
+        if nota_raw:
+            try:
+                nota_val = float(nota_raw)
+            except ValueError:
+                nota_val = None
+            if nota_val is not None:
+                conn.execute("""
+                    INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                    VALUES (?, ?, ?, ?, ?, NULL)
+                    ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota=excluded.nota, nota_texto=NULL
+                """, (aluno_id, disciplina_id, trimestre, ano_letivo, nota_val))
+
+        if faltas_raw:
+            try:
+                faltas_val = int(faltas_raw)
+            except ValueError:
+                faltas_val = None
+            if faltas_val is not None:
+                conn.execute("""
+                    INSERT INTO boletim_faltas (aluno_id, disciplina_id, trimestre, ano, faltas)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET faltas=excluded.faltas
+                """, (aluno_id, disciplina_id, trimestre, ano_letivo, faltas_val))
+
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/boletim/lancamento-manual/{turma_id}/{disciplina_id}?trimestre={trimestre}&salvo=1", status_code=303)
 
 
 @app.get("/boletim/importar-ecidade", response_class=HTMLResponse)
