@@ -11145,9 +11145,12 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
 
         {panorama_turma_html}
 
-        {ranking_frequencia_html}
-
-        {repetentes_html}
+        <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-top:0;">📐 Desempenho por Disciplina</h3>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:-6px;">Maior → menor · cor = nível SAEB</p>
+            <div style="height:220px; position:relative; margin-bottom:12px;"><canvas id="ch-disc"></canvas></div>
+            {ranking_disc_html}
+        </div>
 
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:18px;">
             <div class="card">
@@ -11166,13 +11169,6 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </div>
         </div>
 
-        <div class="card" style="margin-bottom:18px;">
-            <h3 style="margin-top:0;">📐 Desempenho por Disciplina</h3>
-            <p style="font-size:12px; color:var(--text-muted); margin-top:-6px;">Maior → menor · cor = nível SAEB</p>
-            <div style="height:220px; position:relative; margin-bottom:12px;"><canvas id="ch-disc"></canvas></div>
-            {ranking_disc_html}
-        </div>
-
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-bottom:18px;">
             <div class="card">
                 <h3 style="margin-top:0;">🚫 Faltosos ({n_faltosos_lista})</h3>
@@ -11188,11 +11184,13 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </div>
         </div>
 
-        {comentarios_card_html}
+        {repetentes_html}
 
         {gap_racial_html}
         {gap_genero_html}
         {gap_anos_html}
+
+        {ranking_frequencia_html}
 
         <div class="card" style="margin-bottom:18px;">
             <h3 style="margin-top:0;">⚠️ Estudantes que Precisam de Atenção ({len(alertas_alunos)})</h3>
@@ -11201,6 +11199,8 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </div>
             {extra_alertas}
         </div>
+
+        {comentarios_card_html}
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
