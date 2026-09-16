@@ -6257,6 +6257,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
     link_disciplinas = nav_item("/disciplinas", "disciplinas", "📚", "Disciplinas") if is_admin_view else ''
     link_habilidades = nav_item("/habilidades", "habilidades", "🎯", "Habilidades BNCC") if is_admin_view else ''
     link_turmas = nav_item("/turmas", "turmas", "👥", "Turmas") if is_admin_view else ''
+    link_professor_turma = nav_item("/admin/professor-turma", "professor-turma", "🔗", "Professor × Turma") if is_admin_view else ''
 
     # Apoio Educacional (Cuidadores/Agentes/Biblioteca/Apoio) só vê Início + Administrativo
     # no menu — nenhuma outra área (25/08/2026, a pedido).
@@ -6300,7 +6301,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
         # "Configurações" reúne o que era cadastro estrutural espalhado (Habilidades BNCC
         # e Turmas saíram de onde estavam) — admin apenas, mesma regra de antes (25/08/2026).
         secao_configuracoes = (
-            '<div class="sidebar-section">Configurações</div>' + link_disciplinas + link_habilidades + link_turmas
+            '<div class="sidebar-section">Configurações</div>' + link_disciplinas + link_habilidades + link_turmas + link_professor_turma
         ) if is_admin_view else ""
 
         nav_body = f"""
@@ -8886,6 +8887,212 @@ async def importar_excel(request: Request, arquivo: UploadFile = File(...)):
         </div>
     """
     return HTMLResponse(render_page("Importação concluída", content, active="turmas"))
+
+
+# ==========================================
+#  PROFESSOR × TURMA × DISCIPLINA (vínculos usados no Boletim)
+# ==========================================
+
+@app.get("/admin/professor-turma", response_class=HTMLResponse)
+def listar_professor_turma(request: Request, professor_id: Optional[int] = None, turma_id: Optional[int] = None):
+    """Tela pra gerenciar quem leciona o quê — a tabela boletim_professor_turma decide
+    quais combinações aparecem no Lançamento Manual, no card 'Alunos que precisam de
+    atenção' de cada docente etc., mas não tinha NENHUMA tela pra editar (só existia via
+    inserção direta no banco) — criado em 11/09/2026, a pedido de Felipe."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+
+    conn = get_db()
+    sql = """
+        SELECT bpt.id, p.nome AS professor_nome, t.nome AS turma_nome, t.ano_letivo,
+               d.nome AS disciplina_nome, bpt.professor_id, bpt.turma_id, bpt.disciplina_id
+        FROM boletim_professor_turma bpt
+        JOIN professores p ON p.id = bpt.professor_id
+        JOIN turmas t ON t.id = bpt.turma_id
+        JOIN disciplinas d ON d.id = bpt.disciplina_id
+        WHERE 1=1
+    """
+    params = []
+    if professor_id:
+        sql += " AND bpt.professor_id = ?"
+        params.append(professor_id)
+    if turma_id:
+        sql += " AND bpt.turma_id = ?"
+        params.append(turma_id)
+    sql += " ORDER BY p.nome, t.nome, d.nome"
+    vinculos = conn.execute(sql, params).fetchall()
+
+    professores_opts = conn.execute("SELECT id, nome FROM professores WHERE status='ativo' ORDER BY nome").fetchall()
+    turmas_opts = conn.execute("SELECT id, nome FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    conn.close()
+
+    filtro_prof_html = '<option value="">Todos</option>' + "".join(
+        f'<option value="{p["id"]}"{" selected" if professor_id==p["id"] else ""}>{p["nome"]}</option>' for p in professores_opts
+    )
+    filtro_turma_html = '<option value="">Todas</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>{t["nome"]}</option>' for t in turmas_opts
+    )
+
+    linhas = ""
+    for v in vinculos:
+        linhas += f"""<tr>
+            <td style="padding:8px;">{v["professor_nome"]}</td>
+            <td style="padding:8px;">{v["turma_nome"]} <span style="color:var(--text-muted); font-size:11px;">({v["ano_letivo"]})</span></td>
+            <td style="padding:8px;">{v["disciplina_nome"]}</td>
+            <td style="padding:8px; white-space:nowrap;">
+                <a href="/admin/professor-turma/{v['id']}/editar" class="btn" style="padding:2px 8px; font-size:11px;">✏️</a>
+                <form method="post" action="/admin/professor-turma/{v['id']}/excluir" style="display:inline;" onsubmit="return confirm('Remover esse vínculo? O professor deixa de ver essa turma/disciplina em tudo que depende disso (lançamento de nota, dashboards etc.).');">
+                    <button type="submit" class="btn" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button>
+                </form>
+            </td>
+        </tr>"""
+    if not linhas:
+        linhas = '<tr><td colspan="4" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum vínculo encontrado com os filtros selecionados.</td></tr>'
+
+    content = f"""
+        <div class="page-header">
+            <h1>🔗 Professor × Turma</h1>
+            <p class="subtitle">Define quem leciona o quê — usado no Lançamento Manual de notas, dashboards e nos cards de acompanhamento de cada professor. {len(vinculos)} vínculo(s) encontrados.</p>
+        </div>
+        <div class="page-actions" style="margin-bottom:14px;">
+            <a href="/admin/professor-turma/novo" class="btn btn-primary">+ Novo vínculo</a>
+        </div>
+        <form method="get" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; background:var(--bg-subtle); padding:12px 14px; border-radius:8px; margin-bottom:16px;">
+            <label style="margin:0; flex:1 1 200px;">Professor<select name="professor_id" onchange="this.form.submit();">{filtro_prof_html}</select></label>
+            <label style="margin:0; flex:1 1 160px;">Turma<select name="turma_id" onchange="this.form.submit();">{filtro_turma_html}</select></label>
+            <a href="/admin/professor-turma" class="btn" style="margin:0;">Limpar</a>
+        </form>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left;">Professor</th>
+                <th style="padding:8px; text-align:left;">Turma</th>
+                <th style="padding:8px; text-align:left;">Disciplina</th>
+                <th style="padding:8px;"></th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+    """
+    return HTMLResponse(render_page("Professor × Turma", content, active="professor-turma"))
+
+
+def _form_professor_turma_html(action, professor_id="", turma_id="", disciplina_id="", erro=""):
+    conn = get_db()
+    professores_opts = conn.execute("SELECT id, nome FROM professores WHERE status='ativo' ORDER BY nome").fetchall()
+    turmas_opts = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
+    disciplinas_opts = conn.execute("SELECT id, nome FROM disciplinas ORDER BY nome").fetchall()
+    conn.close()
+
+    opts_prof = '<option value="">— selecione —</option>' + "".join(
+        f'<option value="{p["id"]}"{" selected" if str(professor_id)==str(p["id"]) else ""}>{p["nome"]}</option>' for p in professores_opts
+    )
+    opts_turma = '<option value="">— selecione —</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if str(turma_id)==str(t["id"]) else ""}>{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas_opts
+    )
+    opts_disc = '<option value="">— selecione —</option>' + "".join(
+        f'<option value="{d["id"]}"{" selected" if str(disciplina_id)==str(d["id"]) else ""}>{d["nome"]}</option>' for d in disciplinas_opts
+    )
+    erro_html = f'<div class="tip" style="background:var(--red-bg); border-color:var(--red); color:var(--red); margin-bottom:14px;">{erro}</div>' if erro else ""
+
+    return f"""
+        {erro_html}
+        <form method="post" action="{action}">
+            <label>Professor<select name="professor_id" required>{opts_prof}</select></label>
+            <label>Turma<select name="turma_id" required>{opts_turma}</select></label>
+            <label>Disciplina<select name="disciplina_id" required>{opts_disc}</select></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar</button>
+                <a href="/admin/professor-turma" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+
+
+@app.get("/admin/professor-turma/novo", response_class=HTMLResponse)
+def form_novo_professor_turma(request: Request):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    content = f"""
+        <div class="page-header"><h1>+ Novo vínculo Professor × Turma</h1></div>
+        {_form_professor_turma_html("/admin/professor-turma/novo")}
+    """
+    return HTMLResponse(render_page("Novo vínculo", content, active="professor-turma"))
+
+
+@app.post("/admin/professor-turma/novo")
+def criar_professor_turma(request: Request, professor_id: int = Form(...), turma_id: int = Form(...), disciplina_id: int = Form(...)):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    existe = conn.execute(
+        "SELECT 1 FROM boletim_professor_turma WHERE professor_id=? AND turma_id=? AND disciplina_id=?",
+        (professor_id, turma_id, disciplina_id)
+    ).fetchone()
+    if existe:
+        conn.close()
+        content = f"""
+            <div class="page-header"><h1>+ Novo vínculo Professor × Turma</h1></div>
+            {_form_professor_turma_html("/admin/professor-turma/novo", professor_id, turma_id, disciplina_id, erro="Esse vínculo já existe.")}
+        """
+        return HTMLResponse(render_page("Novo vínculo", content, active="professor-turma"))
+    conn.execute(
+        "INSERT INTO boletim_professor_turma (professor_id, turma_id, disciplina_id) VALUES (?, ?, ?)",
+        (professor_id, turma_id, disciplina_id)
+    )
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/professor-turma", status_code=303)
+
+
+@app.get("/admin/professor-turma/{vinculo_id}/editar", response_class=HTMLResponse)
+def form_editar_professor_turma(request: Request, vinculo_id: int):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    v = conn.execute("SELECT * FROM boletim_professor_turma WHERE id=?", (vinculo_id,)).fetchone()
+    conn.close()
+    if not v:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Vínculo não encontrado.</div>', active="professor-turma"))
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar vínculo</h1></div>
+        {_form_professor_turma_html(f"/admin/professor-turma/{vinculo_id}/editar", v["professor_id"], v["turma_id"], v["disciplina_id"])}
+    """
+    return HTMLResponse(render_page("Editar vínculo", content, active="professor-turma"))
+
+
+@app.post("/admin/professor-turma/{vinculo_id}/editar")
+def salvar_edicao_professor_turma(request: Request, vinculo_id: int, professor_id: int = Form(...), turma_id: int = Form(...), disciplina_id: int = Form(...)):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    existe = conn.execute(
+        "SELECT 1 FROM boletim_professor_turma WHERE professor_id=? AND turma_id=? AND disciplina_id=? AND id != ?",
+        (professor_id, turma_id, disciplina_id, vinculo_id)
+    ).fetchone()
+    if existe:
+        conn.close()
+        content = f"""
+            <div class="page-header"><h1>✏️ Editar vínculo</h1></div>
+            {_form_professor_turma_html(f"/admin/professor-turma/{vinculo_id}/editar", professor_id, turma_id, disciplina_id, erro="Já existe outro vínculo igual a esse.")}
+        """
+        return HTMLResponse(render_page("Editar vínculo", content, active="professor-turma"))
+    conn.execute(
+        "UPDATE boletim_professor_turma SET professor_id=?, turma_id=?, disciplina_id=? WHERE id=?",
+        (professor_id, turma_id, disciplina_id, vinculo_id)
+    )
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/professor-turma", status_code=303)
+
+
+@app.post("/admin/professor-turma/{vinculo_id}/excluir")
+def excluir_professor_turma(request: Request, vinculo_id: int):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    conn.execute("DELETE FROM boletim_professor_turma WHERE id=?", (vinculo_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/professor-turma", status_code=303)
 
 
 # ==========================================
