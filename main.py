@@ -2103,6 +2103,13 @@ def init_db():
         conn.execute("ALTER TABLE alunos ADD COLUMN data_saida TEXT")
         conn.execute("ALTER TABLE alunos ADD COLUMN motivo_saida TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alunos_status ON alunos(status)")
+    if "educacao_especial" not in cols:
+        # Marca alunos de Educação Especial (AEE) — 11/09/2026, a pedido de Felipe. Esse
+        # dado NÃO existia em lugar nenhum do sistema antes (busquei no código todo e não
+        # achei nada equivalente — o campo "apoio" do Conselho de Classe é outra coisa,
+        # apoio pedagógico geral, não Educação Especial especificamente). Usado pra
+        # bloquear o campo de nota numérica no Lançamento Manual pra esses alunos.
+        conn.execute("ALTER TABLE alunos ADD COLUMN educacao_especial INTEGER NOT NULL DEFAULT 0")
 
     cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
     if "papel" not in cols_prof:
@@ -9402,7 +9409,14 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
         nota_val, nota_texto_val = notas.get(a["id"], (None, None))
         faltas_val = faltas.get(a["id"])
         faltas_str = "" if faltas_val is None else str(faltas_val)
-        if eh_conceito:
+        # Aluno de Educação Especial (AEE) sem nota lançada ainda pro trimestre: bloqueia
+        # o campo de nota nesse lançamento rápido (a avaliação dele não é numérica aqui)
+        # — 11/09/2026, a pedido de Felipe. Se já existe uma nota registrada (de antes
+        # dessa marcação, por exemplo), mostra normalmente em vez de esconder o dado.
+        bloqueado_aee = bool(a["educacao_especial"]) and nota_val is None and not nota_texto_val
+        if bloqueado_aee:
+            campo_nota_html = '<input type="text" disabled value="Educação Especial — sem nota aqui" style="width:220px; margin:0; color:var(--text-muted); font-size:12px;">'
+        elif eh_conceito:
             opts = '<option value="">— selecione —</option>' + "".join(
                 f'<option value="{o}"{" selected" if nota_texto_val == o else ""}>{o}</option>' for o in opcoes_conceito
             )
@@ -9410,10 +9424,11 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
         else:
             nota_str = "" if nota_val is None else (str(int(nota_val)) if float(nota_val).is_integer() else str(nota_val))
             campo_nota_html = f'<input type="number" name="nota_{a["id"]}" step="0.1" min="0" max="10" value="{nota_str}" style="width:80px; margin:0;" placeholder="0,0">'
+        selo_aee = ' <span style="background:var(--purple-bg); color:var(--purple); font-size:10px; padding:1px 6px; border-radius:8px; font-weight:600;">AEE</span>' if a["educacao_especial"] else ""
         linhas += f"""
         <tr>
             <td style="padding:8px; font-weight:600;">{a["numero"] or "—"}</td>
-            <td style="padding:8px;">{a["nome"]}</td>
+            <td style="padding:8px;">{a["nome"]}{selo_aee}</td>
             <td style="padding:8px;">{campo_nota_html}</td>
             <td style="padding:8px;"><input type="number" name="faltas_{a['id']}" step="1" min="0" value="{faltas_str}" style="width:80px; margin:0;" placeholder="0"></td>
         </tr>"""
@@ -9485,11 +9500,22 @@ async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_i
 
     form = await request.form()
     trimestre = int(form.get("trimestre") or 2)
-    alunos = conn.execute("SELECT id FROM alunos WHERE turma_id=? AND status='ativo'", (turma_id,)).fetchall()
+    alunos = conn.execute("SELECT id, educacao_especial FROM alunos WHERE turma_id=? AND status='ativo'", (turma_id,)).fetchall()
 
     for a in alunos:
         aluno_id = a["id"]
         nota_raw = (form.get(f"nota_{aluno_id}") or "").strip()
+
+        if nota_raw and a["educacao_especial"]:
+            # Defesa em profundidade: o campo vem desabilitado na tela pra aluno AEE sem
+            # nota ainda, mas confere de novo aqui — se por algum motivo o valor chegou
+            # (campo manipulado), ignora e não regrava por cima do que já pode existir.
+            existe_nota = conn.execute(
+                "SELECT 1 FROM boletim_medias WHERE aluno_id=? AND disciplina_id=? AND trimestre=? AND ano=?",
+                (aluno_id, disciplina_id, trimestre, ano_letivo)
+            ).fetchone()
+            if not existe_nota:
+                nota_raw = ""
 
         if nota_raw and eh_conceito:
             # Educação Digital é conceito (PA/PS/PI), não número — grava em nota_texto,
@@ -9575,9 +9601,27 @@ def painel_lancamentos(request: Request, trimestre: int = 2):
             WHERE a.turma_id=? AND a.status='ativo' AND bm.disciplina_id=? AND bm.trimestre=? AND bm.ano=?
             AND (bm.nota IS NOT NULL OR bm.nota_texto IS NOT NULL)
         """, (combo["turma_id"], combo["disciplina_id"], trimestre, combo["ano_letivo"])).fetchone()["c"]
+        # Alunos de Educação Especial (AEE) ainda sem nota não entram no total esperado —
+        # eles não são avaliados por nota numérica aqui, então não devem contar como
+        # "pendente" (11/09/2026, a pedido de Felipe).
+        aee_sem_nota = conn.execute("""
+            SELECT COUNT(*) c FROM alunos a
+            WHERE a.turma_id=? AND a.status='ativo' AND a.educacao_especial=1
+            AND NOT EXISTS (
+                SELECT 1 FROM boletim_medias bm WHERE bm.aluno_id=a.id AND bm.disciplina_id=? AND bm.trimestre=? AND bm.ano=?
+                AND (bm.nota IS NOT NULL OR bm.nota_texto IS NOT NULL)
+            )
+        """, (combo["turma_id"], combo["disciplina_id"], trimestre, combo["ano_letivo"])).fetchone()["c"]
+        total_esperado = max(total_alunos - aee_sem_nota, 0)
         combo["lancados"] = lancados
-        combo["total"] = total_alunos
-        combo["completo"] = lancados >= total_alunos
+        combo["total"] = total_esperado
+        combo["total_turma"] = total_alunos
+        # Regra combinada: 100% do esperado (já sem contar AEE sem nota) é completo. Como
+        # rede de segurança pra quando ainda sobra 1-2 nota de aluno não avaliado por
+        # outro motivo que não ficou marcado como AEE, mais de 50% lançado também conta
+        # como completo (11/09/2026, a pedido de Felipe — evita ficar "pendente" pra
+        # sempre por causa de 1-2 alunos que realmente não serão avaliados).
+        combo["completo"] = total_esperado > 0 and (lancados >= total_esperado or lancados / total_esperado > 0.5)
         resultado.append(combo)
     conn.close()
 
@@ -9592,12 +9636,13 @@ def painel_lancamentos(request: Request, trimestre: int = 2):
         profs = ", ".join(c["professores"]) or "— sem professor vinculado —"
         status_label = "✅ Completo" if c["completo"] else "⚠️ Pendente"
         status_cor = "var(--green)" if c["completo"] else "var(--orange)"
+        nota_aee = f' <span style="color:var(--purple); font-size:11px;" title="Alunos AEE sem nota, não contam no total">({c["total_turma"] - c["total"]} AEE)</span>' if c["total_turma"] > c["total"] else ""
         linhas += f"""
         <tr>
             <td style="padding:8px;">{c["turma_nome"]}</td>
             <td style="padding:8px;">{c["disciplina_nome"]}</td>
             <td style="padding:8px; font-size:12px; color:var(--text-muted);">{profs}</td>
-            <td style="padding:8px; text-align:center;">{c["lancados"]}/{c["total"]}</td>
+            <td style="padding:8px; text-align:center;">{c["lancados"]}/{c["total"]}{nota_aee}</td>
             <td style="padding:8px; color:{status_cor}; font-weight:600;">{status_label}</td>
             <td style="padding:8px;"><a href="/boletim/lancamento-manual/{c['turma_id']}/{c['disciplina_id']}?trimestre={trimestre}" class="btn" style="padding:3px 10px; font-size:11px;">Abrir</a></td>
         </tr>"""
@@ -16904,6 +16949,11 @@ def form_editar_aluno(request: Request, aluno_id: int):
                 <label>E-mail<input type="email" name="email" value="{aluno["email"] or ''}"></label>
                 <label>Data de nascimento<input type="date" name="data_nascimento" value="{aluno["data_nascimento"] or ''}"></label>
             </div>
+            <label style="display:flex; align-items:center; gap:8px; font-weight:400;">
+                <input type="checkbox" name="educacao_especial" style="width:auto; margin:0;"{' checked' if aluno['educacao_especial'] else ''}>
+                Aluno de Educação Especial (AEE)
+            </label>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:-6px;">Marcando isso, o campo de nota numérica desse aluno fica bloqueado no Lançamento Manual (a avaliação dele não é feita por nota numérica ali).</p>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar alterações</button>
                 <a href="/turmas/{aluno['turma_id_atual']}" class="btn">Cancelar</a>
@@ -16921,6 +16971,7 @@ def atualizar_aluno(
     raca: str = Form(""),
     email: str = Form(""),
     data_nascimento: str = Form(""),
+    educacao_especial: Optional[str] = Form(None),
 ):
     conn = get_db()
     aluno = conn.execute("SELECT turma_id FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
@@ -16928,8 +16979,8 @@ def atualizar_aluno(
         conn.close()
         return RedirectResponse("/turmas", status_code=303)
     conn.execute(
-        "UPDATE alunos SET nome = ?, numero = ?, raca = ?, email = ?, data_nascimento = ? WHERE id = ?",
-        (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None, aluno_id),
+        "UPDATE alunos SET nome = ?, numero = ?, raca = ?, email = ?, data_nascimento = ?, educacao_especial = ? WHERE id = ?",
+        (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None, 1 if educacao_especial else 0, aluno_id),
     )
     conn.commit()
     turma_id = aluno["turma_id"]
