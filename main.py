@@ -10764,6 +10764,44 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </table>
         </div>"""
 
+    # --- Panorama por Turma (individual, não agrupado por ano) — com soma das médias
+    # dos alunos marcados como faltosos, pra dar uma ideia de gravidade além da simples
+    # contagem (12/09/2026, a pedido de Felipe).
+    panorama_turma_html = ""
+    if not turma_id:
+        from collections import defaultdict as _dd_turma
+        por_turma_ind = _dd_turma(list)
+        for e in enriquecidos:
+            por_turma_ind[e["turma"]].append(e)
+        linhas_pt = ""
+        for nome_turma in sorted(por_turma_ind.keys()):
+            grupo = por_turma_ind[nome_turma]
+            medias_g = [e["media"] for e in grupo if e["media"] is not None]
+            media_g = sum(medias_g) / len(medias_g) if medias_g else None
+            saeb_g = _boletim_saeb_nivel(media_g)
+            cor_g = saeb_g["color"] if saeb_g else "var(--text-muted)"
+            faltosos_g = [e for e in grupo if e["faltoso"]]
+            soma_faltas_faltosos = sum(e.get("faltas_total") or 0 for e in faltosos_g)
+            linhas_pt += f"""<tr>
+                <td style="padding:8px 10px;"><strong>Turma {nome_turma}</strong> <span style="font-size:11px; color:var(--text-muted);">{len(grupo)} alunos</span></td>
+                <td style="padding:8px 10px; text-align:center; font-weight:700; color:{cor_g};">{(f"{media_g:.1f}" if media_g is not None else "—")}</td>
+                <td style="padding:8px 10px; text-align:center; color:var(--orange); font-weight:700;">{len(faltosos_g)}</td>
+                <td style="padding:8px 10px; text-align:center; font-weight:700;">{soma_faltas_faltosos}</td>
+            </tr>"""
+        panorama_turma_html = f"""
+        <div class="card" style="margin-bottom:18px; padding:0; overflow:hidden;">
+            <div style="padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; font-size:14px;">📊 Panorama por Turma</div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:8px 10px; text-align:left;">Turma</th>
+                    <th style="padding:8px 10px;">Média</th>
+                    <th style="padding:8px 10px;">Faltosos</th>
+                    <th style="padding:8px 10px;" title="Soma do total de faltas (todas as disciplinas) dos alunos marcados como faltosos pelos professores no Conselho de Classe">Soma de faltas dos faltosos</th>
+                </tr></thead>
+                <tbody>{linhas_pt if linhas_pt else '<tr><td colspan="4" style="padding:12px; text-align:center; color:var(--text-muted);">Sem dados.</td></tr>'}</tbody>
+            </table>
+        </div>"""
+
     # --- Possíveis repetentes: qualquer disciplina com média (T1+T2)/2 < 5,0 ---
     # Só faz sentido ver isso a partir do 2º trimestre (24/08/2026).
     repetentes_html = ""
@@ -10910,6 +10948,23 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
     ) if alertas_alunos else '<p style="color:var(--text-muted);">Nenhum estudante com alertas nesse recorte. 🎉</p>'
     extra_alertas = f'<p style="font-size:12px; color:var(--text-muted); margin-top:8px;">+{len(alertas_alunos)-60} outro(s) — refine o filtro pra ver todos.</p>' if len(alertas_alunos) > 60 else ""
 
+    # --- Comentários dos professores no Conselho de Classe (12/09/2026, a pedido de
+    # Felipe) — o texto já vinha sendo importado (campo "observacao" do e-cidade) e usado
+    # em outros relatórios, mas nunca tinha aparecido no Dashboard.
+    comentarios_lista = [(e["nome"], e["turma"], e["observacoes"]) for e in enriquecidos if e.get("observacoes")]
+    comentarios_lista.sort(key=lambda x: (x[1], x[0]))
+    comentarios_html = "".join(
+        f'<div style="padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px;">'
+        f'<strong>{nome}</strong> <span style="color:var(--text-muted);">· {turma}</span>'
+        f'<div style="margin-top:2px; color:var(--text);">{html.escape(obs)}</div></div>'
+        for nome, turma, obs in comentarios_lista
+    ) if comentarios_lista else '<p style="font-size:12px; color:var(--text-muted); padding:10px;">Nenhum comentário registrado nesse recorte.</p>'
+    comentarios_card_html = f"""
+    <div class="card" style="margin-bottom:18px; padding:0; overflow:hidden;">
+        <div style="padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; font-size:14px;">💬 Comentários dos Professores — Conselho de Classe ({len(comentarios_lista)})</div>
+        <div style="max-height:400px; overflow-y:auto;">{comentarios_html}</div>
+    </div>"""
+
     # --- Diferença de Médias por Disciplina — Negro × Branco ---
     def _media_disc_grupo(grupo, disc):
         vs = [e["notas"].get(disc) for e in grupo if e["notas"].get(disc) is not None]
@@ -11049,6 +11104,8 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
 
         {panorama_html}
 
+        {panorama_turma_html}
+
         {repetentes_html}
 
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:18px;">
@@ -11090,6 +11147,12 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </div>
         </div>
 
+        {comentarios_card_html}
+
+        {gap_racial_html}
+        {gap_genero_html}
+        {gap_anos_html}
+
         <div class="card" style="margin-bottom:18px;">
             <h3 style="margin-top:0;">⚠️ Estudantes que Precisam de Atenção ({len(alertas_alunos)})</h3>
             <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px;">
@@ -11097,10 +11160,6 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </div>
             {extra_alertas}
         </div>
-
-        {gap_racial_html}
-        {gap_genero_html}
-        {gap_anos_html}
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
         <script>
