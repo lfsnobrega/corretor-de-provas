@@ -10802,6 +10802,45 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
             </table>
         </div>"""
 
+    # --- 10 Mais Faltosos / 10 Mais Frequentes (12/09/2026, a pedido de Felipe —
+    # reproduz uma visualização que existia no Dashboard antigo). Respeita o filtro de
+    # turma já existente: mostra da escola toda quando "Todas as turmas" está
+    # selecionado, ou só daquela turma quando uma específica é escolhida.
+    conn_freq = get_db()
+    ranking_freq = _boletim_ranking_frequencia(conn_freq, ano, turma_id=turma_id)
+    conn_freq.close()
+    mais_faltosos = ranking_freq[:10]
+    mais_frequentes = sorted(ranking_freq, key=lambda r: r["total_faltas"])[:10]
+
+    def _linha_ranking_freq(r, i, cor_bg, cor_texto):
+        return (
+            f'<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 10px; '
+            f'background:var(--bg-subtle); border-radius:6px; margin-bottom:4px; font-size:12px;">'
+            f'<span>{i+1}. {r["nome"]} <span style="color:var(--text-muted);">· {r["turma_nome"]}</span></span>'
+            f'<span class="badge" style="background:{cor_bg}; color:{cor_texto};">{r["total_faltas"]} falta(s)</span></div>'
+        )
+
+    mais_faltosos_html = "".join(
+        _linha_ranking_freq(r, i, "var(--red-bg)", "var(--red)") for i, r in enumerate(mais_faltosos)
+    ) if mais_faltosos else '<p style="font-size:12px; color:var(--text-muted);">Sem dados.</p>'
+    mais_frequentes_html = "".join(
+        _linha_ranking_freq(r, i, "var(--green-bg)", "var(--green)") for i, r in enumerate(mais_frequentes)
+    ) if mais_frequentes else '<p style="font-size:12px; color:var(--text-muted);">Sem dados.</p>'
+
+    ranking_frequencia_html = f"""
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:18px;">
+        <div class="card">
+            <h3 style="margin-top:0;">🚫 10 Mais Faltosos</h3>
+            <p style="font-size:11px; color:var(--text-muted); margin-top:-6px;">Soma de faltas do 1º + 2º trimestre de {ano}</p>
+            {mais_faltosos_html}
+        </div>
+        <div class="card">
+            <h3 style="margin-top:0;">✅ 10 Mais Frequentes</h3>
+            <p style="font-size:11px; color:var(--text-muted); margin-top:-6px;">Soma de faltas do 1º + 2º trimestre de {ano}</p>
+            {mais_frequentes_html}
+        </div>
+    </div>"""
+
     # --- Possíveis repetentes: qualquer disciplina com média (T1+T2)/2 < 5,0 ---
     # Só faz sentido ver isso a partir do 2º trimestre (24/08/2026).
     repetentes_html = ""
@@ -11106,6 +11145,8 @@ def boletim_dashboard(request: Request, trimestre: Optional[int] = None, ano: Op
 
         {panorama_turma_html}
 
+        {ranking_frequencia_html}
+
         {repetentes_html}
 
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:18px;">
@@ -11312,6 +11353,28 @@ def _boletim_turma_medias_disciplina(dados_turma):
         vals = [e["medias_finais"].get(disc) for e in dados_turma if e["medias_finais"].get(disc) is not None]
         medias_turma[disc] = sum(vals) / len(vals) if vals else None
     return medias_turma
+
+
+def _boletim_ranking_frequencia(conn, ano, turma_id=None):
+    """Ranking de frequência somando faltas do 1º e 2º trimestre juntos (todas as
+    disciplinas), independente do trimestre selecionado no filtro do Dashboard — usado
+    nos rankings de 10 Mais Faltosos / 10 Mais Frequentes (12/09/2026, a pedido de
+    Felipe, reproduzindo uma visualização que existia no Dashboard antigo). Alunos sem
+    nenhum registro de falta entram com 0 (LEFT JOIN), pra não sumirem do ranking de
+    mais frequentes."""
+    sql = """
+        SELECT a.id, a.nome, t.nome AS turma_nome, COALESCE(SUM(bf.faltas), 0) AS total_faltas
+        FROM alunos a
+        JOIN turmas t ON t.id = a.turma_id
+        LEFT JOIN boletim_faltas bf ON bf.aluno_id = a.id AND bf.trimestre IN (1, 2) AND bf.ano = ?
+        WHERE t.ano_letivo = ? AND a.status = 'ativo'
+    """
+    params = [ano, ano]
+    if turma_id:
+        sql += " AND a.turma_id = ?"
+        params.append(turma_id)
+    sql += " GROUP BY a.id ORDER BY total_faltas DESC"
+    return conn.execute(sql, params).fetchall()
 
 
 def _boletim_ranking_faltas(dados_turma):
