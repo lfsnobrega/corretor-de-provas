@@ -128,6 +128,14 @@ NATUREZA_ATO = {
     "grave": "Grave (Art. 77)",
     "infracional": "Ato infracional (Art. 78/79)",
 }
+# Cargos possíveis de um profissional da escola — usado no documento de
+# Ocorrência/Atendimento, mostrado junto com o nome de quem assina (12/09/2026, a
+# pedido de Felipe). Lista exata que ele passou.
+CARGOS_PROFISSIONAIS = [
+    "Diretor Geral", "Diretor Adjunto", "Supervisor Educacional", "Orientador Educacional",
+    "Cuidador", "Docente", "Agente Escolar", "Auxiliar de Biblioteca",
+]
+
 MEDIDAS_DISCIPLINARES = {
     "leve": [
         "Advertência verbal",
@@ -2116,6 +2124,13 @@ def init_db():
         # 'docente', 'gestao' ou 'apoio' (Apoio Educacional) — preenchido no onboarding
         # obrigatório do primeiro acesso (admin nunca precisa, já vê a escola toda) — 24/08/2026.
         conn.execute("ALTER TABLE professores ADD COLUMN papel TEXT")
+    if "cargo" not in cols_prof:
+        # Cargo do profissional (Diretor Geral, Diretor Adjunto, Supervisor Educacional,
+        # Orientador Educacional, Cuidador, Docente, Agente Escolar, Auxiliar de
+        # Biblioteca) — usado no documento de Ocorrência/Atendimento, mostrado junto com
+        # o nome de quem assina (12/09/2026, a pedido de Felipe). Não existia antes — só
+        # tinha o "papel" (categoria ampla usada pra restringir menus).
+        conn.execute("ALTER TABLE professores ADD COLUMN cargo TEXT")
 
     if "tipo_login" not in cols_prof:
         # 'google' (padrão, via OAuth institucional) ou 'local' (usuário/senha, pra quem
@@ -3748,6 +3763,9 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
                         <option value="">— selecione a turma primeiro —</option>
                     </select>
                 </label>
+                <label style="flex:1 1 180px; margin:0;">Data
+                    <input type="date" name="data_ocorrencia" required>
+                </label>
                 <a id="btn-carometro-ocorrencia" href="/carometro" target="_blank" rel="noopener" class="btn" style="display:none;">🖼️ Carômetro</a>
             </div>
 
@@ -3758,9 +3776,6 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
                             <option value="">— selecione —</option>
                             {opts_tipo}
                         </select>
-                    </label>
-                    <label style="flex:1 1 180px;">Data
-                        <input type="date" name="data_ocorrencia" required>
                     </label>
                 </div>
                 <div id="bloco-outro-aluno" style="display:none;">
@@ -3841,6 +3856,7 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
             }}
         }}
         {pre_selecao_js}
+        _toggleNaturezaRegistro('ocorrencia');
         </script>
     """
     return HTMLResponse(render_page("Nova Ocorrência", content, active="ocorrencias-novo"))
@@ -4031,7 +4047,7 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
 
     conn = get_db()
     r = conn.execute("""
-        SELECT oc.*, al.nome AS aluno_nome, t.nome AS turma_nome, p.nome AS registrado_por
+        SELECT oc.*, al.nome AS aluno_nome, t.nome AS turma_nome, p.nome AS registrado_por, p.cargo AS cargo_registrado_por
         FROM ocorrencias_alunos oc
         JOIN alunos al ON al.id = oc.aluno_id
         JOIN turmas t ON t.id = al.turma_id
@@ -4052,11 +4068,15 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
     natureza_registro = r["natureza_registro"] if "natureza_registro" in r.keys() else "ocorrencia"
     titulo_doc = "REGISTRO DE OCORRÊNCIA DISCIPLINAR" if natureza_registro == "ocorrencia" else "REGISTRO DE ATENDIMENTO"
 
+    responsavel_com_cargo = r["registrado_por"] or "—"
+    if r["registrado_por"] and ("cargo_registrado_por" in r.keys()) and r["cargo_registrado_por"]:
+        responsavel_com_cargo += f' — {r["cargo_registrado_por"]}'
+
     linhas_tabela = f"""
         <tr><td style="width:150px; color:#555; padding:3px 0;">Aluno</td><td style="font-weight:700;">{r["aluno_nome"]}</td></tr>
         <tr><td style="color:#555; padding:3px 0;">Turma</td><td>{r["turma_nome"]}</td></tr>
         <tr><td style="color:#555; padding:3px 0;">Data</td><td>{_fmt_data_br(r["data_ocorrencia"])}</td></tr>
-        <tr><td style="color:#555; padding:3px 0;">Responsável pelo registro</td><td>{r["registrado_por"] or "—"}</td></tr>
+        <tr><td style="color:#555; padding:3px 0;">Responsável pelo registro</td><td>{responsavel_com_cargo}</td></tr>
     """
     if r["tipo"]:
         linhas_tabela += f'<tr><td style="color:#555; padding:3px 0;">Tipo</td><td>{TIPOS_OCORRENCIA.get(r["tipo"], r["tipo"])}</td></tr>'
@@ -4066,6 +4086,11 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
         linhas_tabela += f'<tr><td style="color:#555; padding:3px 0;">Natureza do ato</td><td>{NATUREZA_ATO.get(r["natureza_ato"], r["natureza_ato"])}</td></tr>'
     if "medida_disciplinar" in r.keys() and r["medida_disciplinar"]:
         linhas_tabela += f'<tr><td style="color:#555; padding:3px 0;">Medida disciplinar aplicada</td><td>{r["medida_disciplinar"]}</td></tr>'
+
+    nome_assinatura = r["registrado_por"] or "Orientação Educacional"
+    cargo_assinatura_html = ""
+    if r["registrado_por"] and ("cargo_registrado_por" in r.keys()) and r["cargo_registrado_por"]:
+        cargo_assinatura_html = f'<div style="font-size:10px; color:#666; margin-top:2px;">{r["cargo_registrado_por"]}</div>'
 
     html_completo = f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
@@ -4094,7 +4119,7 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
     {encaminhamento_html}
 
     <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px; flex-wrap:wrap; gap:16px;">
-        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Orientação Educacional</div>
+        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">{nome_assinatura}{cargo_assinatura_html}</div>
         <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Assinatura do Aluno</div>
         <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Responsável pelo aluno</div>
     </div>
@@ -12792,7 +12817,7 @@ def admin_usuarios(request: Request):
         return HTMLResponse(render_page("Acesso negado", '<div class="empty">Apenas administradores.</div>', active=""), status_code=403)
     conn = get_db()
     usuarios = conn.execute(
-        "SELECT id, email, nome, is_admin, is_gestor, status, criado_em, ultimo_acesso FROM professores ORDER BY CASE COALESCE(status,'ativo') WHEN 'pendente' THEN 0 WHEN 'ativo' THEN 1 ELSE 2 END, nome"
+        "SELECT id, email, nome, is_admin, is_gestor, status, criado_em, ultimo_acesso, cargo FROM professores ORDER BY CASE COALESCE(status,'ativo') WHEN 'pendente' THEN 0 WHEN 'ativo' THEN 1 ELSE 2 END, nome"
     ).fetchall()
     conn.close()
     pendentes = [u for u in usuarios if (u["status"] if "status" in u.keys() else "ativo") == "pendente"]
@@ -12810,6 +12835,7 @@ def admin_usuarios(request: Request):
         acesso = (u["ultimo_acesso"] or "")[:16].replace("T", " ")
         is_eu = u["id"] == prof["id"]
         acoes = f'<a href="/admin/usuarios/{u["id"]}/editar-nome" class="btn" style="padding:4px 10px; font-size:11px;">✏️ Nome</a>'
+        acoes += f' <a href="/admin/usuarios/{u["id"]}/editar-cargo" class="btn" style="padding:4px 10px; font-size:11px;">🎓 Cargo</a>'
         if not is_eu:
             if us == "pendente":
                 acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Aprovar</button></form>'
@@ -12824,7 +12850,8 @@ def admin_usuarios(request: Request):
                 elif us == "bloqueado":
                     acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Desbloquear</button></form>'
         rb = ' style="background:var(--orange-bg);"' if us == "pendente" else ""
-        rows += f'''<tr{rb}><td style="padding:10px 8px;">{u["nome"]}{"&nbsp;<em style=\'font-size:11px; color:var(--text-muted);\'>( você)</em>" if is_eu else ""}</td>
+        cargo_linha = f'<div style="font-size:11px; color:var(--text-muted);">{u["cargo"]}</div>' if ("cargo" in u.keys() and u["cargo"]) else ""
+        rows += f'''<tr{rb}><td style="padding:10px 8px;">{u["nome"]}{"&nbsp;<em style=\'font-size:11px; color:var(--text-muted);\'>( você)</em>" if is_eu else ""}{cargo_linha}</td>
             <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{u["email"]}</td>
             <td style="padding:10px 8px;">{" ".join(perfil)}</td>
             <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{acesso}</td>
@@ -12882,6 +12909,51 @@ def salvar_edicao_nome_usuario(request: Request, usuario_id: int, nome: str = Fo
         return RedirectResponse(f"/admin/usuarios/{usuario_id}/editar-nome", status_code=303)
     conn = get_db()
     conn.execute("UPDATE professores SET nome = ? WHERE id = ?", (nome, usuario_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/usuarios", status_code=303)
+
+
+@app.get("/admin/usuarios/{usuario_id}/editar-cargo", response_class=HTMLResponse)
+def form_editar_cargo_usuario(request: Request, usuario_id: int):
+    """Cargo do profissional — usado no documento de Ocorrência/Atendimento, mostrado
+    junto com o nome de quem assina (12/09/2026, a pedido de Felipe)."""
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return HTMLResponse(render_page("Acesso negado", '<div class="empty">Apenas administradores.</div>', active=""), status_code=403)
+    conn = get_db()
+    u = conn.execute("SELECT id, nome, email, cargo FROM professores WHERE id = ?", (usuario_id,)).fetchone()
+    conn.close()
+    if not u:
+        return HTMLResponse(render_page("Erro", '<div class="empty">Usuário não encontrado.</div>', active=""))
+    opts_cargo = '<option value="">— nenhum —</option>' + "".join(
+        f'<option value="{c}"{" selected" if u["cargo"]==c else ""}>{c}</option>' for c in CARGOS_PROFISSIONAIS
+    )
+    body = f"""
+        <div class="page-header">
+            <h1>🎓 Editar cargo — {u["nome"]}</h1>
+            <p class="subtitle">{u["email"] or "sem e-mail (login local)"}</p>
+        </div>
+        <div class="tip">Aparece junto com o nome na assinatura dos documentos de Ocorrência/Atendimento gerados pra impressão.</div>
+        <form method="post" action="/admin/usuarios/{usuario_id}/editar-cargo">
+            <label>Cargo<select name="cargo">{opts_cargo}</select></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Salvar</button>
+                <a href="/admin/usuarios" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return render_page("Editar cargo", body, active="")
+
+
+@app.post("/admin/usuarios/{usuario_id}/editar-cargo")
+def salvar_edicao_cargo_usuario(request: Request, usuario_id: int, cargo: str = Form("")):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/", status_code=303)
+    cargo = cargo.strip()
+    conn = get_db()
+    conn.execute("UPDATE professores SET cargo = ? WHERE id = ?", (cargo if cargo in CARGOS_PROFISSIONAIS else None, usuario_id))
     conn.commit()
     conn.close()
     return RedirectResponse("/admin/usuarios", status_code=303)
