@@ -8901,13 +8901,21 @@ async def importar_excel(request: Request, arquivo: UploadFile = File(...)):
 # ==========================================
 
 @app.get("/admin/professor-turma", response_class=HTMLResponse)
-def listar_professor_turma(request: Request, professor_id: Optional[int] = None, turma_id: Optional[int] = None):
+def listar_professor_turma(request: Request, professor_id: str = "", turma_id: str = ""):
     """Tela pra gerenciar quem leciona o quê — a tabela boletim_professor_turma decide
     quais combinações aparecem no Lançamento Manual, no card 'Alunos que precisam de
     atenção' de cada docente etc., mas não tinha NENHUMA tela pra editar (só existia via
-    inserção direta no banco) — criado em 11/09/2026, a pedido de Felipe."""
+    inserção direta no banco) — criado em 11/09/2026, a pedido de Felipe.
+    professor_id/turma_id chegam como string (não Optional[int]) de propósito: quando um
+    dos dois filtros fica em branco, o formulário ainda manda ele na URL como string
+    vazia, e o FastAPI rejeitava isso tentando converter "" pra int direto na assinatura
+    da rota (erro 422) — foi o bug relatado por Felipe (12/09/2026). Convertido na mão
+    logo abaixo, só quando não está vazio.
+    """
     _r = _require_admin_or_403(request)
     if _r is not None: return _r
+    professor_id_int = int(professor_id) if professor_id.strip().isdigit() else None
+    turma_id_int = int(turma_id) if turma_id.strip().isdigit() else None
 
     conn = get_db()
     sql = """
@@ -8920,12 +8928,12 @@ def listar_professor_turma(request: Request, professor_id: Optional[int] = None,
         WHERE 1=1
     """
     params = []
-    if professor_id:
+    if professor_id_int:
         sql += " AND bpt.professor_id = ?"
-        params.append(professor_id)
-    if turma_id:
+        params.append(professor_id_int)
+    if turma_id_int:
         sql += " AND bpt.turma_id = ?"
-        params.append(turma_id)
+        params.append(turma_id_int)
     sql += " ORDER BY p.nome, t.nome, d.nome"
     vinculos = conn.execute(sql, params).fetchall()
 
@@ -8934,27 +8942,25 @@ def listar_professor_turma(request: Request, professor_id: Optional[int] = None,
     conn.close()
 
     filtro_prof_html = '<option value="">Todos</option>' + "".join(
-        f'<option value="{p["id"]}"{" selected" if professor_id==p["id"] else ""}>{p["nome"]}</option>' for p in professores_opts
+        f'<option value="{p["id"]}"{" selected" if professor_id_int==p["id"] else ""}>{p["nome"]}</option>' for p in professores_opts
     )
     filtro_turma_html = '<option value="">Todas</option>' + "".join(
-        f'<option value="{t["id"]}"{" selected" if turma_id==t["id"] else ""}>{t["nome"]}</option>' for t in turmas_opts
+        f'<option value="{t["id"]}"{" selected" if turma_id_int==t["id"] else ""}>{t["nome"]}</option>' for t in turmas_opts
     )
 
     linhas = ""
     for v in vinculos:
         linhas += f"""<tr>
+            <td style="padding:8px;"><input type="checkbox" class="chk-vinculo" name="ids" value="{v['id']}" style="width:auto; margin:0;"></td>
             <td style="padding:8px;">{v["professor_nome"]}</td>
             <td style="padding:8px;">{v["turma_nome"]} <span style="color:var(--text-muted); font-size:11px;">({v["ano_letivo"]})</span></td>
             <td style="padding:8px;">{v["disciplina_nome"]}</td>
             <td style="padding:8px; white-space:nowrap;">
                 <a href="/admin/professor-turma/{v['id']}/editar" class="btn" style="padding:2px 8px; font-size:11px;">✏️</a>
-                <form method="post" action="/admin/professor-turma/{v['id']}/excluir" style="display:inline;" onsubmit="return confirm('Remover esse vínculo? O professor deixa de ver essa turma/disciplina em tudo que depende disso (lançamento de nota, dashboards etc.).');">
-                    <button type="submit" class="btn" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button>
-                </form>
             </td>
         </tr>"""
     if not linhas:
-        linhas = '<tr><td colspan="4" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum vínculo encontrado com os filtros selecionados.</td></tr>'
+        linhas = '<tr><td colspan="5" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum vínculo encontrado com os filtros selecionados.</td></tr>'
 
     content = f"""
         <div class="page-header">
@@ -8969,8 +8975,11 @@ def listar_professor_turma(request: Request, professor_id: Optional[int] = None,
             <label style="margin:0; flex:1 1 160px;">Turma<select name="turma_id" onchange="this.form.submit();">{filtro_turma_html}</select></label>
             <a href="/admin/professor-turma" class="btn" style="margin:0;">Limpar</a>
         </form>
+        <form method="post" action="/admin/professor-turma/excluir-varios"
+              onsubmit="if(!document.querySelector('.chk-vinculo:checked')){{alert('Selecione pelo menos um vínculo.'); return false;}} return confirm('Remover os vínculos selecionados? Os professores deixam de ver essas turmas/disciplinas em tudo que depende disso (lançamento de nota, dashboards etc.).');">
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
             <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px;"><input type="checkbox" style="width:auto; margin:0;" onclick="document.querySelectorAll('.chk-vinculo').forEach(function(c){{c.checked=this.checked;}}, this)" title="Selecionar todos"></th>
                 <th style="padding:8px; text-align:left;">Professor</th>
                 <th style="padding:8px; text-align:left;">Turma</th>
                 <th style="padding:8px; text-align:left;">Disciplina</th>
@@ -8978,6 +8987,10 @@ def listar_professor_turma(request: Request, professor_id: Optional[int] = None,
             </tr></thead>
             <tbody>{linhas}</tbody>
         </table>
+        <div class="page-actions" style="margin-top:14px;">
+            <button type="submit" class="btn" style="color:var(--red); border-color:var(--red);">🗑️ Excluir selecionados</button>
+        </div>
+        </form>
     """
     return HTMLResponse(render_page("Professor × Turma", content, active="professor-turma"))
 
@@ -9097,6 +9110,22 @@ def excluir_professor_turma(request: Request, vinculo_id: int):
     if _r is not None: return _r
     conn = get_db()
     conn.execute("DELETE FROM boletim_professor_turma WHERE id=?", (vinculo_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/admin/professor-turma", status_code=303)
+
+
+@app.post("/admin/professor-turma/excluir-varios")
+def excluir_varios_professor_turma(request: Request, ids: Optional[List[int]] = Form(None)):
+    """Exclusão em lote — pra tirar um professor de várias turmas de uma vez, em vez de
+    clicar excluir uma a uma (12/09/2026, a pedido de Felipe)."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    if not ids:
+        return RedirectResponse("/admin/professor-turma", status_code=303)
+    conn = get_db()
+    for vid in ids:
+        conn.execute("DELETE FROM boletim_professor_turma WHERE id=?", (vid,))
     conn.commit()
     conn.close()
     return RedirectResponse("/admin/professor-turma", status_code=303)
