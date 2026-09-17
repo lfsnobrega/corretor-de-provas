@@ -9856,21 +9856,29 @@ async def importar_ecidade(request: Request, trimestre: int = Form(...), ano: in
         if aluno_csv["pd"]:
             n_pd += 1
 
-        for disciplina, valor in aluno_csv["notas"].items():
-            did = disc_ids.get(disciplina)
-            if not did or valor is None:
-                continue
-            if isinstance(valor, (int, float)):
-                conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
-                                 VALUES (?,?,?,?,?,NULL)
-                                 ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = excluded.nota, nota_texto = NULL""",
-                             (aid, did, trimestre, ano, float(valor)))
-            else:
-                conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
-                                 VALUES (?,?,?,?,NULL,?)
-                                 ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = NULL, nota_texto = excluded.nota_texto""",
-                             (aid, did, trimestre, ano, str(valor).strip()))
-            n_medias += 1
+        aluno_eh_aee = conn.execute("SELECT educacao_especial FROM alunos WHERE id=?", (aid,)).fetchone()
+        aluno_eh_aee = bool(aluno_eh_aee["educacao_especial"]) if aluno_eh_aee else False
+
+        if not aluno_eh_aee:
+            # Aluno de Educação Especial (AEE) não recebe nota numérica — só falta. Se
+            # já foi marcado como AEE no sistema, a importação do e-cidade não volta a
+            # inserir nota pra ele, mesmo que a planilha traga um valor (12/09/2026, a
+            # pedido de Felipe).
+            for disciplina, valor in aluno_csv["notas"].items():
+                did = disc_ids.get(disciplina)
+                if not did or valor is None:
+                    continue
+                if isinstance(valor, (int, float)):
+                    conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                                     VALUES (?,?,?,?,?,NULL)
+                                     ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = excluded.nota, nota_texto = NULL""",
+                                 (aid, did, trimestre, ano, float(valor)))
+                else:
+                    conn.execute("""INSERT INTO boletim_medias (aluno_id, disciplina_id, trimestre, ano, nota, nota_texto)
+                                     VALUES (?,?,?,?,NULL,?)
+                                     ON CONFLICT(aluno_id, disciplina_id, trimestre, ano) DO UPDATE SET nota = NULL, nota_texto = excluded.nota_texto""",
+                                 (aid, did, trimestre, ano, str(valor).strip()))
+                n_medias += 1
 
         for disciplina, faltas_val in aluno_csv["faltas"].items():
             did = disc_ids.get(disciplina)
@@ -10048,6 +10056,12 @@ async def importar_boletim(request: Request, trimestre: int = Form(...), ano: in
             continue
         aid = buscar_aluno_id(row[0], row[1])
         if not aid:
+            continue
+        aluno_eh_aee = conn.execute("SELECT educacao_especial FROM alunos WHERE id=?", (aid,)).fetchone()
+        aluno_eh_aee = bool(aluno_eh_aee["educacao_especial"]) if aluno_eh_aee else False
+        if aluno_eh_aee:
+            # Aluno de Educação Especial (AEE) não recebe nota numérica — só falta —
+            # mesmo que a planilha traga um valor pra ele (12/09/2026, a pedido de Felipe).
             continue
         for col_idx in range(2, min(len(header_m), len(row))):
             valor = row[col_idx]
@@ -17173,10 +17187,19 @@ def form_editar_aluno(request: Request, aluno_id: int):
                 <label>Data de nascimento<input type="date" name="data_nascimento" value="{aluno["data_nascimento"] or ''}"></label>
             </div>
             <label style="display:flex; align-items:center; gap:8px; font-weight:400;">
-                <input type="checkbox" name="educacao_especial" style="width:auto; margin:0;"{' checked' if aluno['educacao_especial'] else ''}>
+                <input type="checkbox" name="educacao_especial" id="chk-aee" data-estava-marcado="{'1' if aluno['educacao_especial'] else '0'}" style="width:auto; margin:0;"{' checked' if aluno['educacao_especial'] else ''} onchange="_avisarAee(this)">
                 Aluno de Educação Especial (AEE)
             </label>
-            <p style="font-size:12px; color:var(--text-muted); margin-top:-6px;">Marcando isso, o campo de nota numérica desse aluno fica bloqueado no Lançamento Manual (a avaliação dele não é feita por nota numérica ali).</p>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:-6px;">Marcando isso, o campo de nota numérica desse aluno fica bloqueado no Lançamento Manual (a avaliação dele não é feita por nota numérica ali). <strong style="color:var(--red);">Atenção: ao marcar e salvar, TODAS as notas já lançadas pra esse aluno (qualquer disciplina, qualquer trimestre) são apagadas permanentemente do sistema — só as faltas continuam sendo registradas normalmente.</strong></p>
+            <script>
+            function _avisarAee(chk) {{
+                if (chk.checked && chk.dataset.estavaMarcado === '0') {{
+                    if (!confirm('Ao marcar este aluno como Educação Especial (AEE) e salvar, TODAS as notas dele (qualquer disciplina, qualquer trimestre) serão apagadas permanentemente do sistema. Só as faltas continuam sendo registradas. Essa ação NÃO pode ser desfeita depois de salva.\\n\\nTem certeza que quer marcar?')) {{
+                        chk.checked = false;
+                    }}
+                }}
+            }}
+            </script>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar alterações</button>
                 <a href="/turmas/{aluno['turma_id_atual']}" class="btn">Cancelar</a>
@@ -17197,14 +17220,22 @@ def atualizar_aluno(
     educacao_especial: Optional[str] = Form(None),
 ):
     conn = get_db()
-    aluno = conn.execute("SELECT turma_id FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    aluno = conn.execute("SELECT turma_id, educacao_especial FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
     if not aluno:
         conn.close()
         return RedirectResponse("/turmas", status_code=303)
+    era_aee = bool(aluno["educacao_especial"])
+    agora_aee = bool(educacao_especial)
     conn.execute(
         "UPDATE alunos SET nome = ?, numero = ?, raca = ?, email = ?, data_nascimento = ?, educacao_especial = ? WHERE id = ?",
-        (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None, 1 if educacao_especial else 0, aluno_id),
+        (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None, 1 if agora_aee else 0, aluno_id),
     )
+    if agora_aee and not era_aee:
+        # Aluno passou a ser marcado como Educação Especial (AEE) agora — apaga TODAS as
+        # notas dele no sistema (todas as disciplinas, todos os trimestres, todos os
+        # anos), já que ele passa a ser avaliado só por falta, não por nota numérica
+        # (12/09/2026, a pedido de Felipe). Faltas não são tocadas.
+        conn.execute("DELETE FROM boletim_medias WHERE aluno_id = ?", (aluno_id,))
     conn.commit()
     turma_id = aluno["turma_id"]
     conn.close()
