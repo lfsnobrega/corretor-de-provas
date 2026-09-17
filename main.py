@@ -3536,6 +3536,16 @@ async def criar_atestado_aluno(request: Request, aluno_id: int = Form(...), data
         conn.close()
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Aluno não encontrado.</p><a href="/administrativo/atestados-alunos/novo" class="btn">Voltar</a>', active="atestados-alunos-novo"))
 
+    # Confere as datas ANTES de gravar — um atestado com data vazia/inválida derrubava a
+    # tela inteira de listagem pra todo mundo depois (12/09/2026, corrigindo bug
+    # relatado por Felipe).
+    try:
+        if date.fromisoformat(data_inicio) > date.fromisoformat(data_fim):
+            raise ValueError("data_inicio depois de data_fim")
+    except ValueError:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Data de início e término precisam ser válidas, e a data de início não pode ser depois da data de término.</p><a href="/administrativo/atestados-alunos/novo" class="btn">Voltar</a>', active="atestados-alunos-novo"))
+
     # Sem anexo — só os dados (28/08/2026, a pedido). Fica sem status_upload/arquivo,
     # já que não há mais upload pro Drive nesse fluxo.
     conn.execute("""
@@ -3587,7 +3597,14 @@ def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
     else:
         linhas = ""
         for r in registros:
-            dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
+            # Um único registro com data ausente/mal formada não pode derrubar a página
+            # inteira pra todo mundo — 12/09/2026, corrigindo o erro relatado por Felipe
+            # (a tela toda ficava fora do ar por causa de 1 registro incompleto).
+            try:
+                dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
+                dias_str = str(dias)
+            except (ValueError, TypeError):
+                dias_str = "—"
             acoes_html = ""
             if pode_editar:
                 acoes_html = (
@@ -3599,7 +3616,7 @@ def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
                 <td style="padding:8px;">{r["aluno_nome"]}</td>
                 <td style="padding:8px;">{r["turma_nome"]}</td>
                 <td style="padding:8px;">{_fmt_data_br(r["data_inicio"])} a {_fmt_data_br(r["data_fim"])}</td>
-                <td style="padding:8px; text-align:center;">{dias}</td>
+                <td style="padding:8px; text-align:center;">{dias_str}</td>
                 <td style="padding:8px; font-size:12px; color:var(--text-muted);">{r["observacao"] or "—"}</td>
                 {f'<td style="padding:8px; white-space:nowrap;">{acoes_html}</td>' if pode_editar else ""}
             </tr>"""
@@ -3666,6 +3683,11 @@ async def salvar_edicao_atestado_aluno(request: Request, atestado_id: int, data_
     prof = get_current_professor(request)
     if not _pode_editar_atestados_alunos(prof):
         return RedirectResponse("/", status_code=303)
+    try:
+        if date.fromisoformat(data_inicio) > date.fromisoformat(data_fim):
+            raise ValueError("data_inicio depois de data_fim")
+    except ValueError:
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Data de início e término precisam ser válidas, e a data de início não pode ser depois da data de término.</p><a href="/administrativo/atestados-alunos" class="btn">Voltar</a>', active="atestados-alunos"))
     conn = get_db()
     conn.execute("""UPDATE atestados_alunos SET data_inicio=?, data_fim=?, observacao=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
                  (data_inicio, data_fim, observacao.strip() or None, atestado_id))
@@ -17230,11 +17252,14 @@ def atualizar_aluno(
         "UPDATE alunos SET nome = ?, numero = ?, raca = ?, email = ?, data_nascimento = ?, educacao_especial = ? WHERE id = ?",
         (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None, 1 if agora_aee else 0, aluno_id),
     )
-    if agora_aee and not era_aee:
-        # Aluno passou a ser marcado como Educação Especial (AEE) agora — apaga TODAS as
-        # notas dele no sistema (todas as disciplinas, todos os trimestres, todos os
-        # anos), já que ele passa a ser avaliado só por falta, não por nota numérica
-        # (12/09/2026, a pedido de Felipe). Faltas não são tocadas.
+    if agora_aee:
+        # Sempre que o aluno estiver marcado como AEE ao salvar (não só na primeira vez
+        # que a marcação é feita), apaga qualquer nota que porventura exista pra ele —
+        # cobre tanto a marcação nova quanto uma nota lançada por engano depois (ex: por
+        # outra tela, ou de antes da marcação existir). Basta reabrir e salvar o cadastro
+        # do aluno de novo pra "consertar" isso quando acontecer (12/09/2026, a pedido de
+        # Felipe: "a nota lançada errada ainda aparece no sistema"). Faltas não são
+        # tocadas.
         conn.execute("DELETE FROM boletim_medias WHERE aluno_id = ?", (aluno_id,))
     conn.commit()
     turma_id = aluno["turma_id"]
