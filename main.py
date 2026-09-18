@@ -12671,6 +12671,7 @@ def ver_turma(request: Request, turma_id: int):
         <div class="page-header">
             <h1>{turma["nome"]}</h1>
             <p class="subtitle">Ano letivo {turma["ano_letivo"]} · {len(alunos)} alunos</p>
+            {f'<a href="/turmas/{turma_id}/reordenar" class="btn" style="margin-top:6px;">🔀 Reordenar alunos</a>' if is_admin and len(alunos) > 1 else ""}
             {excluir_turma_btn}
         </div>
 
@@ -12681,6 +12682,121 @@ def ver_turma(request: Request, turma_id: int):
         {form_adicionar}
     """
     return render_page(f"Turma {turma['nome']}", content, active="turmas")
+
+
+@app.get("/turmas/{turma_id}/reordenar", response_class=HTMLResponse)
+def form_reordenar_alunos(request: Request, turma_id: int):
+    """Tela pra reordenar todos os alunos de uma turma de uma vez (arrastando ou
+    digitando o número direto), em vez de editar um aluno por vez — 12/09/2026, a
+    pedido de Felipe. A ordem usada em TODO o resto do sistema (Lançamento Manual,
+    Dashboard, boletim etc.) vem sempre do campo "número" de cada aluno — então
+    reordenar aqui já reflete em todo lugar automaticamente, sem precisar mexer em
+    mais nada."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
+    if not turma:
+        conn.close()
+        return HTMLResponse(render_page("Não encontrada", '<h1>Turma não encontrada</h1><p><a href="/turmas">← Voltar</a></p>', active="turmas"), status_code=404)
+    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? AND status='ativo' ORDER BY numero, nome", (turma_id,)).fetchall()
+    conn.close()
+
+    linhas = ""
+    for i, a in enumerate(alunos):
+        linhas += f"""
+        <tr class="linha-reordenar" draggable="true" data-aluno-id="{a['id']}" style="cursor:grab; background:var(--card);">
+            <td style="padding:8px; width:28px; color:var(--text-muted); font-size:16px; text-align:center;">⋮⋮</td>
+            <td style="padding:8px;">{a["nome"]}</td>
+            <td style="padding:8px; width:90px;">
+                <input type="number" name="numero_{a['id']}" class="input-numero-reordenar" value="{a['numero'] if a['numero'] else i + 1}" min="1" style="width:70px; margin:0;">
+            </td>
+        </tr>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>🔀 Reordenar Alunos — {turma["nome"]}</h1>
+            <p class="subtitle">Arraste pelo ⋮⋮ pra reordenar rápido, ou digite o número direto em qualquer aluno — os dois funcionam juntos. Essa ordem é a mesma usada em todo o sistema (Lançamento Manual, Dashboard, boletim etc.).</p>
+        </div>
+        <div class="tip">Ao arrastar um aluno pra uma nova posição, os números da coluna à direita se ajustam sozinhos (1, 2, 3...). Se preferir, edite os números diretamente em vez de arrastar — o que estiver escrito nos campos é o que vale ao salvar.</div>
+        <form method="post" action="/turmas/{turma_id}/reordenar">
+            <table id="tabela-reordenar" style="width:100%; border-collapse:collapse; font-size:13px; margin-top:14px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:8px;"></th>
+                    <th style="padding:8px; text-align:left;">Aluno</th>
+                    <th style="padding:8px; text-align:left;">Número</th>
+                </tr></thead>
+                <tbody id="corpo-reordenar">{linhas if linhas else '<tr><td colspan="3" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum aluno ativo nessa turma.</td></tr>'}</tbody>
+            </table>
+            <div class="page-actions" style="margin-top:16px;">
+                <button type="submit" class="btn btn-primary">💾 Salvar nova ordem</button>
+                <a href="/turmas/{turma_id}" class="btn">Cancelar</a>
+            </div>
+        </form>
+        <script>
+        (function() {{
+            var corpo = document.getElementById('corpo-reordenar');
+            var arrastando = null;
+            corpo.querySelectorAll('.linha-reordenar').forEach(function(linha) {{
+                linha.addEventListener('dragstart', function() {{
+                    arrastando = linha;
+                    linha.style.opacity = '0.4';
+                }});
+                linha.addEventListener('dragend', function() {{
+                    linha.style.opacity = '1';
+                    _renumerarReordenar();
+                }});
+                linha.addEventListener('dragover', function(e) {{
+                    e.preventDefault();
+                    var depois = _posicaoDepoisReordenar(corpo, e.clientY);
+                    if (!arrastando) return;
+                    if (depois == null) {{
+                        corpo.appendChild(arrastando);
+                    }} else {{
+                        corpo.insertBefore(arrastando, depois);
+                    }}
+                }});
+            }});
+            function _posicaoDepoisReordenar(container, y) {{
+                var linhas = [].slice.call(container.querySelectorAll('.linha-reordenar')).filter(function(l) {{ return l !== arrastando; }});
+                var maisProxima = null, menorDistancia = -Infinity;
+                linhas.forEach(function(linha) {{
+                    var box = linha.getBoundingClientRect();
+                    var offset = y - box.top - box.height / 2;
+                    if (offset < 0 && offset > menorDistancia) {{
+                        menorDistancia = offset;
+                        maisProxima = linha;
+                    }}
+                }});
+                return maisProxima;
+            }}
+            function _renumerarReordenar() {{
+                var linhas = corpo.querySelectorAll('.linha-reordenar');
+                linhas.forEach(function(linha, i) {{
+                    var input = linha.querySelector('.input-numero-reordenar');
+                    input.value = i + 1;
+                }});
+            }}
+        }})();
+        </script>
+    """
+    return render_page(f"Reordenar — {turma['nome']}", content, active="turmas")
+
+
+@app.post("/turmas/{turma_id}/reordenar")
+async def salvar_reordenar_alunos(request: Request, turma_id: int):
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    alunos = conn.execute("SELECT id FROM alunos WHERE turma_id = ? AND status='ativo'", (turma_id,)).fetchall()
+    form = await request.form()
+    for a in alunos:
+        valor = (form.get(f"numero_{a['id']}") or "").strip()
+        if valor.isdigit():
+            conn.execute("UPDATE alunos SET numero = ? WHERE id = ?", (int(valor), a["id"]))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/turmas/{turma_id}", status_code=303)
 
 
 @app.post("/turmas/{turma_id}/alunos")
