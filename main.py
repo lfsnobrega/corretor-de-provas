@@ -2118,6 +2118,18 @@ def init_db():
         # apoio pedagógico geral, não Educação Especial especificamente). Usado pra
         # bloquear o campo de nota numérica no Lançamento Manual pra esses alunos.
         conn.execute("ALTER TABLE alunos ADD COLUMN educacao_especial INTEGER NOT NULL DEFAULT 0")
+    if "remanejado" not in cols:
+        # Marca aluno como remanejado/transferido de turma — 12/09/2026, a pedido de
+        # Felipe (correção de uma tentativa anterior que MOVIA o aluno de turma de
+        # verdade; ele pediu a mesma lógica simples do AEE: só uma marcação que trava a
+        # edição, sem tirar o aluno do lugar onde já está na lista). Não mexe em
+        # turma_id nenhuma — só bloqueia o cadastro.
+        conn.execute("ALTER TABLE alunos ADD COLUMN remanejado INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE alunos ADD COLUMN nota_remanejamento TEXT")
+    if "data_remanejamento" not in cols:
+        # Data do remanejamento — 12/09/2026, a pedido de Felipe (planilha de referência
+        # mostra "Rem. p/ 901 - 14/09", precisa da data pra bater com esse formato).
+        conn.execute("ALTER TABLE alunos ADD COLUMN data_remanejamento TEXT")
 
     cols_prof = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
     if "papel" not in cols_prof:
@@ -12574,67 +12586,81 @@ def ver_turma(request: Request, turma_id: int):
     if not turma:
         conn.close()
         return HTMLResponse(render_page("Não encontrada", '<h1>Turma não encontrada</h1><p><a href="/turmas">← Voltar</a></p>', active="turmas"), status_code=404)
-    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? AND status='ativo' ORDER BY numero, nome", (turma_id,)).fetchall()
-    alunos_saida = conn.execute("SELECT * FROM alunos WHERE turma_id = ? AND status != 'ativo' ORDER BY data_saida DESC", (turma_id,)).fetchall()
+    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)).fetchall()
     proximo_numero = conn.execute("SELECT COALESCE(MAX(numero), 0) + 1 AS n FROM alunos WHERE turma_id = ?", (turma_id,)).fetchone()["n"]
     conn.close()
+    n_ativos = sum(1 for a in alunos if a["status"] == "ativo")
 
+    # Lista única, seguindo a lógica da planilha oficial da rede que Felipe mandou de
+    # referência (12/09/2026): quem saiu da escola ou foi remanejado NÃO some pra uma
+    # seção separada — continua na MESMA linha, na MESMA posição da lista, só com uma
+    # anotação destacada (vermelho "Transf. DD/MM" pra saída, negrito "Rem. p/ X -
+    # DD/MM" pra remanejamento) e fundo acinzentado, igual a planilha mostrava.
     if alunos:
         alunos_html = ""
         for a in alunos:
             num = a["numero"] if a["numero"] else "—"
+            bloqueado = a["status"] != "ativo" or a["remanejado"]
             extras = []
             if a["raca"]: extras.append(a["raca"])
             if a["email"]: extras.append(a["email"])
             if a["data_nascimento"]: extras.append(f'nasc. {format_data_br(a["data_nascimento"])}')
             extra_line = f'<div style="font-size:12px; color:var(--text-muted); margin-top:2px;">{" · ".join(extras)}</div>' if extras else ""
+
+            anotacao = ""
+            if a["status"] != "ativo":
+                data_fmt = format_data_br(a["data_saida"]) if a["data_saida"] else "—"
+                motivo_str = f' — {a["motivo_saida"]}' if a["motivo_saida"] else ""
+                anotacao = f' <span style="color:var(--red); font-weight:700; font-size:12px;">Transf. {data_fmt}{motivo_str}</span>'
+            elif a["remanejado"]:
+                data_fmt = format_data_br(a["data_remanejamento"]) if a["data_remanejamento"] else "—"
+                nota_str = f' p/ {a["nota_remanejamento"]}' if a["nota_remanejamento"] else ""
+                anotacao = f' <span style="font-weight:700; font-size:12px;">Rem.{nota_str} - {data_fmt}</span>'
+
+            selo_aee = ' <span style="background:var(--purple-bg); color:var(--purple); font-size:10px; padding:1px 6px; border-radius:8px; font-weight:600;">AEE</span>' if a["educacao_especial"] else ""
+
             if is_admin:
                 nome_escapado = a["nome"].replace("'", "\\'")
-                acoes = (
-                    f'<div style="font-size:11px; margin-top:6px;">'
-                    f'<a href="/alunos/{a["id"]}/editar" style="color:var(--text-muted);">Editar</a>'
-                    f'<span style="color:var(--text-subtle);"> · </span>'
-                    f'<a href="/alunos/{a["id"]}/transferir" style="color:var(--text-muted);">Transferir de turma</a>'
-                    f'<span style="color:var(--text-subtle);"> · </span>'
-                    f'<a href="/alunos/{a["id"]}/marcar-saida" style="color:var(--text-muted);">Saiu da escola</a>'
-                    f'<span style="color:var(--text-subtle);"> · </span>'
-                    f'<form action="/alunos/{a["id"]}/deletar" method="post" style="display:inline; margin:0;" '
-                    f"onsubmit=\"return confirm('Excluir {nome_escapado}? Se o aluno tiver entregas registradas, você poderá forçar a exclusão na próxima tela.');\">"
-                    f'<button type="submit" style="background:none; border:none; padding:0; color:var(--red); cursor:pointer; font-size:inherit; font-family:inherit;">Excluir</button>'
-                    f'</form>'
-                    f'</div>'
-                )
+                if not bloqueado:
+                    acoes = (
+                        f'<div style="font-size:11px; margin-top:6px;">'
+                        f'<a href="/alunos/{a["id"]}/editar" style="color:var(--text-muted);">Editar</a>'
+                        f'<span style="color:var(--text-subtle);"> · </span>'
+                        f'<a href="/alunos/{a["id"]}/transferir" style="color:var(--text-muted);">Transferir de turma</a>'
+                        f'<span style="color:var(--text-subtle);"> · </span>'
+                        f'<a href="/alunos/{a["id"]}/marcar-saida" style="color:var(--text-muted);">Saiu da escola</a>'
+                        f'<span style="color:var(--text-subtle);"> · </span>'
+                        f'<form action="/alunos/{a["id"]}/deletar" method="post" style="display:inline; margin:0;" '
+                        f"onsubmit=\"return confirm('Excluir {nome_escapado}? Se o aluno tiver entregas registradas, você poderá forçar a exclusão na próxima tela.');\">"
+                        f'<button type="submit" style="background:none; border:none; padding:0; color:var(--red); cursor:pointer; font-size:inherit; font-family:inherit;">Excluir</button>'
+                        f'</form>'
+                        f'</div>'
+                    )
+                elif a["status"] != "ativo":
+                    acoes = (
+                        f'<div style="font-size:11px; margin-top:6px;">'
+                        f'<a href="/alunos/{a["id"]}/editar" style="color:var(--text-muted);">Ver</a>'
+                        f'<span style="color:var(--text-subtle);"> · </span>'
+                        f'<form action="/alunos/{a["id"]}/reativar" method="post" style="display:inline;" onsubmit="return confirm(\'Reativar {nome_escapado}? Ele volta a ficar ativo normalmente.\');">'
+                        f'<button type="submit" style="background:none; border:none; padding:0; color:var(--accent); cursor:pointer; font-size:inherit; font-family:inherit;">Reativar</button>'
+                        f'</form></div>'
+                    )
+                else:
+                    acoes = (
+                        f'<div style="font-size:11px; margin-top:6px;">'
+                        f'<a href="/alunos/{a["id"]}/editar" style="color:var(--text-muted);">Ver</a>'
+                        f'<span style="color:var(--text-subtle);"> · </span>'
+                        f'<form action="/alunos/{a["id"]}/desmarcar-remanejamento" method="post" style="display:inline;" onsubmit="return confirm(\'Desmarcar remanejamento de {nome_escapado}?\');">'
+                        f'<button type="submit" style="background:none; border:none; padding:0; color:var(--accent); cursor:pointer; font-size:inherit; font-family:inherit;">Desmarcar remanejamento</button>'
+                        f'</form></div>'
+                    )
             else:
                 acoes = ""
-            alunos_html += f'<div class="student-row"><div class="numero">{num}</div><div>{a["nome"]}{extra_line}{acoes}</div><div class="codigo">{a["codigo_unico"]}</div></div>'
-    else:
-        alunos_html = '<div class="empty">Nenhum aluno ativo cadastrado nesta turma ainda.</div>'
 
-    # Alunos que saíram da escola (06/09/2026): não aparecem na lista ativa acima, mas
-    # continuam com todo o histórico intacto — ficam listados aqui, com opção de
-    # reverter caso tenha sido engano.
-    alunos_saida_html = ""
-    if alunos_saida:
-        linhas_saida = ""
-        for a in alunos_saida:
-            data_saida_fmt = format_data_br(a["data_saida"]) if a["data_saida"] else "—"
-            reverter_btn = (
-                f'<form action="/alunos/{a["id"]}/reativar" method="post" style="display:inline; margin-left:8px;" '
-                f'onsubmit="return confirm(\'Reativar {a["nome"].replace("\'", "\\\'")}? Ele volta pra lista ativa desta turma.\');">'
-                f'<button type="submit" style="background:none; border:none; padding:0; color:var(--accent); cursor:pointer; font-size:11px; text-decoration:underline;">Reativar</button>'
-                f'</form>'
-            ) if is_admin else ""
-            linhas_saida += f"""
-            <div style="padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;">
-                <strong>{a["nome"]}</strong>
-                <span style="color:var(--text-muted); font-size:12px;"> — saiu em {data_saida_fmt}, motivo: {a["motivo_saida"] or "—"}</span>
-                {reverter_btn}
-            </div>"""
-        alunos_saida_html = f"""
-        <details style="margin-top:20px;">
-            <summary style="cursor:pointer; font-weight:600; color:var(--text-muted);">👋 Alunos que saíram desta turma ({len(alunos_saida)})</summary>
-            <div style="margin-top:10px;">{linhas_saida}</div>
-        </details>"""
+            linha_style = ' style="background:var(--bg-subtle);"' if bloqueado else ""
+            alunos_html += f'<div class="student-row"{linha_style}><div class="numero">{num}</div><div>{a["nome"]}{anotacao}{selo_aee}{extra_line}{acoes}</div><div class="codigo">{a["codigo_unico"]}</div></div>'
+    else:
+        alunos_html = '<div class="empty">Nenhum aluno cadastrado nesta turma ainda.</div>'
 
     racas_options = '<option value="">Não informada</option>' + "".join(f'<option value="{r}">{r}</option>' for r in RACAS)
 
@@ -12670,14 +12696,13 @@ def ver_turma(request: Request, turma_id: int):
     content = f"""
         <div class="page-header">
             <h1>{turma["nome"]}</h1>
-            <p class="subtitle">Ano letivo {turma["ano_letivo"]} · {len(alunos)} alunos</p>
-            {f'<a href="/turmas/{turma_id}/reordenar" class="btn" style="margin-top:6px;">🔀 Reordenar alunos</a>' if is_admin and len(alunos) > 1 else ""}
+            <p class="subtitle">Ano letivo {turma["ano_letivo"]} · {n_ativos} aluno(s) ativo(s){f' · {len(alunos) - n_ativos} travado(s)/saída' if len(alunos) > n_ativos else ''}</p>
+            {f'<a href="/turmas/{turma_id}/reordenar" class="btn" style="margin-top:6px;">🔀 Reordenar alunos</a>' if is_admin and n_ativos > 1 else ""}
             {excluir_turma_btn}
         </div>
 
         <h2>Alunos</h2>
         {alunos_html}
-        {alunos_saida_html}
 
         {form_adicionar}
     """
@@ -17303,6 +17328,38 @@ def form_editar_aluno(request: Request, aluno_id: int):
         return RedirectResponse("/turmas", status_code=303)
     conn.close()
 
+    if aluno["status"] != "ativo" or aluno["remanejado"]:
+        # Aluno transferido/cancelado (saiu da escola) OU remanejado de turma — registro
+        # travado pra edição, faz parte da escrituração de enturmação (12/09/2026, a
+        # pedido de Felipe). "Remanejado" usa a mesma lógica simples do AEE: só uma
+        # marcação que trava, sem tirar o aluno do lugar onde já está na lista — ele
+        # continua na mesma turma, mesma posição, só não dá mais pra editar o cadastro.
+        if aluno["status"] != "ativo":
+            motivo_bloqueio = f'marcado como <strong>saída da escola</strong> (motivo: {aluno["motivo_saida"] or "—"})'
+            botao_destravar = f'<a href="/turmas/{aluno["turma_id_atual"]}" class="btn btn-primary">Ir pra turma e clicar em "Reativar"</a>'
+        else:
+            nota_html = f' — {aluno["nota_remanejamento"]}' if aluno["nota_remanejamento"] else ""
+            motivo_bloqueio = f'marcado como <strong>remanejado</strong>{nota_html}'
+            botao_destravar = f"""
+                <form action="/alunos/{aluno_id}/desmarcar-remanejamento" method="post" style="display:inline;" onsubmit="return confirm('Desmarcar o remanejamento desse aluno? O cadastro volta a ficar editável normalmente.');">
+                    <button type="submit" class="btn btn-primary">🔓 Desmarcar remanejamento</button>
+                </form>
+            """
+        content = f"""
+            <div class="page-header">
+                <h1>🔒 {aluno["nome"]}</h1>
+                <p class="subtitle">Turma: <strong>{aluno["turma_nome"]}</strong> · Código único: <code>{aluno["codigo_unico"]}</code></p>
+            </div>
+            <div class="tip" style="background:var(--orange-bg); border-color:var(--orange);">
+                Esse aluno está {motivo_bloqueio} e o cadastro fica travado pra edição a partir daí, pra preservar o histórico.
+            </div>
+            <div class="page-actions">
+                {botao_destravar}
+                <a href="/turmas/{aluno['turma_id_atual']}" class="btn">Voltar pra turma</a>
+            </div>
+        """
+        return render_page("Cadastro travado", content, active="turmas")
+
     racas_opts = '<option value="">Não informada</option>' + "".join(
         f'<option value="{r}"{(" selected" if aluno["raca"] == r else "")}>{r}</option>' for r in RACAS
     )
@@ -17338,6 +17395,14 @@ def form_editar_aluno(request: Request, aluno_id: int):
                 }}
             }}
             </script>
+            <label style="display:flex; align-items:center; gap:8px; font-weight:400;">
+                <input type="checkbox" name="remanejado" id="chk-remanejado" style="width:auto; margin:0;" onchange="document.getElementById('campo-nota-remanejamento').style.display = this.checked ? 'block' : 'none';">
+                Aluno Remanejado
+            </label>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:-6px;">Marcando isso e salvando, o cadastro desse aluno fica travado pra edição (nome, número etc.) — ele continua no mesmo lugar da lista da turma, só não dá mais pra editar. Pra editar de novo depois, tem um botão "Desmarcar remanejamento" na tela que aparece no lugar do formulário.</p>
+            <div id="campo-nota-remanejamento" style="display:none;">
+                <label>Observação (opcional — ex: para qual turma/escola foi)<input type="text" name="nota_remanejamento" placeholder="Ex: remanejado para a turma 802"></label>
+            </div>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar alterações</button>
                 <a href="/turmas/{aluno['turma_id_atual']}" class="btn">Cancelar</a>
@@ -17356,17 +17421,27 @@ def atualizar_aluno(
     email: str = Form(""),
     data_nascimento: str = Form(""),
     educacao_especial: Optional[str] = Form(None),
+    remanejado: Optional[str] = Form(None),
+    nota_remanejamento: str = Form(""),
 ):
     conn = get_db()
-    aluno = conn.execute("SELECT turma_id, educacao_especial FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    aluno = conn.execute("SELECT turma_id, educacao_especial, status, remanejado FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
     if not aluno:
         conn.close()
         return RedirectResponse("/turmas", status_code=303)
+    if aluno["status"] != "ativo" or aluno["remanejado"]:
+        # Defesa em profundidade — o formulário nem chega a aparecer pra aluno
+        # transferido/cancelado/remanejado, mas confere de novo aqui (12/09/2026).
+        conn.close()
+        return RedirectResponse(f"/alunos/{aluno_id}/editar", status_code=303)
     era_aee = bool(aluno["educacao_especial"])
     agora_aee = bool(educacao_especial)
+    agora_remanejado = bool(remanejado)
+    data_remanejamento = date.today().isoformat() if agora_remanejado else None
     conn.execute(
-        "UPDATE alunos SET nome = ?, numero = ?, raca = ?, email = ?, data_nascimento = ?, educacao_especial = ? WHERE id = ?",
-        (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None, 1 if agora_aee else 0, aluno_id),
+        "UPDATE alunos SET nome = ?, numero = ?, raca = ?, email = ?, data_nascimento = ?, educacao_especial = ?, remanejado = ?, nota_remanejamento = ?, data_remanejamento = ? WHERE id = ?",
+        (nome.strip(), numero, raca.strip() or None, email.strip() or None, data_nascimento.strip() or None,
+         1 if agora_aee else 0, 1 if agora_remanejado else 0, nota_remanejamento.strip() or None, data_remanejamento, aluno_id),
     )
     if agora_aee:
         # Sempre que o aluno estiver marcado como AEE ao salvar (não só na primeira vez
@@ -17377,6 +17452,25 @@ def atualizar_aluno(
         # Felipe: "a nota lançada errada ainda aparece no sistema"). Faltas não são
         # tocadas.
         conn.execute("DELETE FROM boletim_medias WHERE aluno_id = ?", (aluno_id,))
+    conn.commit()
+    turma_id = aluno["turma_id"]
+    conn.close()
+    return RedirectResponse(f"/turmas/{turma_id}", status_code=303)
+
+
+@app.post("/alunos/{aluno_id}/desmarcar-remanejamento")
+def desmarcar_remanejamento(request: Request, aluno_id: int):
+    """Tira a marcação de 'remanejado' de um aluno, destravando o cadastro de novo
+    (12/09/2026) — ação separada e simples, pra não deixar o admin sem saída depois
+    de marcar (o formulário de edição fica travado enquanto remanejado=1)."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    aluno = conn.execute("SELECT turma_id FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        conn.close()
+        return RedirectResponse("/turmas", status_code=303)
+    conn.execute("UPDATE alunos SET remanejado = 0, nota_remanejamento = NULL, data_remanejamento = NULL WHERE id = ?", (aluno_id,))
     conn.commit()
     turma_id = aluno["turma_id"]
     conn.close()
