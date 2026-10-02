@@ -8050,9 +8050,46 @@ def _extrair_imagem_do_paragrafo_docx(doc, paragrafo):
         return None
 
 
+def _iter_blocos_docx(doc):
+    """Percorre o corpo do documento NA ORDEM REAL em que as coisas aparecem (parágrafos
+    E tabelas intercalados) — por padrão o python-docx separa `doc.paragraphs` de
+    `doc.tables` em duas listas, perdendo a posição relativa de cada uma, o que faz
+    tabela de dados (ex: uma tabela que uma questão manda "observar") ficar com a
+    sequência errada. Usado na importação de questões via Word (14/09/2026)."""
+    from docx.oxml.ns import qn as _qn
+    from docx.text.paragraph import Paragraph as _Paragraph
+    from docx.table import Table as _Table
+    for child in doc.element.body.iterchildren():
+        if child.tag == _qn("w:p"):
+            yield ("p", _Paragraph(child, doc))
+        elif child.tag == _qn("w:tbl"):
+            yield ("tbl", _Table(child, doc))
+
+
+def _tabela_para_texto_docx(tabela):
+    """Converte uma tabela do Word numa grade de texto simples, legível no enunciado."""
+    linhas = []
+    for row in tabela.rows:
+        celulas = [c.text.strip() for c in row.cells]
+        if any(celulas):
+            linhas.append(" | ".join(celulas))
+    return "\n".join(linhas)
+
+
 def _parse_docx_questoes(file_bytes: bytes):
-    """Lê um .docx no formato de banco de questões de Felipe e devolve uma lista de
-    dicts: {enunciado, alternativas: {A,B,C,D}, correta, ambiguo, imagem_bytes}."""
+    """Lê um .docx de banco de questões/prova e devolve uma lista de dicts:
+    {enunciado, alternativas: {A,B,C,D}, correta, ambiguo, imagem_bytes}. Reconhece,
+    ao mesmo tempo, os formatos que Felipe já mandou (14/09/2026):
+    - Questões separadas por uma linha de travessões ("---...") e o gabarito marcado
+      com o texto da alternativa certa em vermelho (formato "banco de questões já
+      corrigido").
+    - Questões separadas por uma tabela de 1 linha tipo "D | Questão | 01" (formato
+      de prova pronta pra imprimir, sem gabarito nenhum marcado — nesse caso toda
+      questão fica como "ambíguo", pra Felipe escolher o gabarito na prévia).
+    Em qualquer um dos dois, se nenhum separador explícito aparecer, também fecha a
+    questão assim que as 4 alternativas (A-D) já tiverem sido lidas e o próximo
+    parágrafo não for mais alternativa — como rede de segurança. Tabelas de dado real
+    (não o marcador "Questão NN") viram texto dentro do enunciado da questão."""
     import docx as _docx
     import io as _io
 
@@ -8060,58 +8097,62 @@ def _parse_docx_questoes(file_bytes: bytes):
     padrao_alt = re.compile(r'^\(?([A-E])\)\s*(.*)$')
     padrao_separador = re.compile(r'^-{10,}$')
 
-    blocos = []
-    atual = []
-    for p in doc.paragraphs:
-        if padrao_separador.match(p.text.strip()):
-            if atual:
-                blocos.append(atual)
-            atual = []
-        else:
-            atual.append(p)
-    if atual:
-        blocos.append(atual)
-
     questoes = []
-    for bloco in blocos:
-        if not any(p.text.strip() for p in bloco):
-            continue  # bloco vazio (ex: só o cabeçalho antes do primeiro separador)
+    enunciado_linhas, alternativas, correta, imagem_bytes, ambiguo = [], {}, None, None, False
 
-        enunciado_linhas = []
-        alternativas = {}
-        correta = None
-        imagem_bytes = None
-        ambiguo = False
+    def _fechar_questao_atual():
+        nonlocal enunciado_linhas, alternativas, correta, imagem_bytes, ambiguo
+        if alternativas:
+            questoes.append({
+                "enunciado": "\n".join(enunciado_linhas),
+                "alternativas": alternativas,
+                "correta": correta,
+                "ambiguo": ambiguo or correta is None,
+                "imagem_bytes": imagem_bytes,
+            })
+        enunciado_linhas, alternativas, correta, imagem_bytes, ambiguo = [], {}, None, None, False
 
-        for p in bloco:
-            texto = p.text.strip()
-            m = padrao_alt.match(texto)
-            if m and m.group(1) in ("A", "B", "C", "D"):
-                letra, resto = m.group(1), m.group(2).strip()
-                alternativas[letra] = resto
-                for run in p.runs:
-                    cor = run.font.color
-                    if cor is not None and cor.type is not None and cor.type.name == "RGB" and cor.rgb == _docx.shared.RGBColor(0xFF, 0, 0):
-                        if correta is not None and correta != letra:
-                            ambiguo = True
-                        correta = letra
+    for tipo, item in _iter_blocos_docx(doc):
+        if tipo == "tbl":
+            linhas_tabela = [[c.text.strip() for c in row.cells] for row in item.rows]
+            eh_marcador_questao = len(linhas_tabela) == 1 and any("questão" in (cel or "").lower() for cel in linhas_tabela[0])
+            if eh_marcador_questao:
+                _fechar_questao_atual()
             else:
-                if texto:
-                    enunciado_linhas.append(texto)
-                img = _extrair_imagem_do_paragrafo_docx(doc, p)
-                if img and imagem_bytes is None:
-                    imagem_bytes = img
+                texto_tabela = _tabela_para_texto_docx(item)
+                if texto_tabela:
+                    enunciado_linhas.append(texto_tabela)
+            continue
 
-        if not alternativas:
-            continue  # sem nenhuma alternativa não é uma questão (ex: instrução solta)
+        # parágrafo
+        texto = item.text.strip()
+        if padrao_separador.match(texto):
+            _fechar_questao_atual()
+            continue
 
-        questoes.append({
-            "enunciado": "\n".join(enunciado_linhas),
-            "alternativas": alternativas,
-            "correta": correta,
-            "ambiguo": ambiguo or correta is None,
-            "imagem_bytes": imagem_bytes,
-        })
+        m = padrao_alt.match(texto)
+        if m and m.group(1) in ("A", "B", "C", "D"):
+            letra, resto = m.group(1), m.group(2).strip()
+            alternativas[letra] = resto
+            for run in item.runs:
+                cor = run.font.color
+                if cor is not None and cor.type is not None and cor.type.name == "RGB" and cor.rgb == _docx.shared.RGBColor(0xFF, 0, 0):
+                    if correta is not None and correta != letra:
+                        ambiguo = True
+                    correta = letra
+        else:
+            # Rede de segurança: se já tínhamos as 4 alternativas da questão anterior e
+            # chegou um parágrafo de conteúdo novo, a questão anterior acabou — fecha
+            # antes de começar a acumular esse texto na próxima.
+            if texto and len(alternativas) >= 4:
+                _fechar_questao_atual()
+            if texto:
+                enunciado_linhas.append(texto)
+            img = _extrair_imagem_do_paragrafo_docx(doc, item)
+            if img and imagem_bytes is None:
+                imagem_bytes = img
+
+    _fechar_questao_atual()
     return questoes
 
 
