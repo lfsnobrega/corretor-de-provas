@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Form, UploadFile, File, Request, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional, List
 from datetime import datetime, date, timedelta
@@ -13,6 +13,7 @@ import sqlite3
 import os
 import re
 import uuid
+import shutil
 import asyncio
 import time
 import math
@@ -7748,7 +7749,7 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
     content = (
         f'<div class="page-header"><h1>Banco de questões</h1>'
         f'<p class="subtitle">{subtitle}</p>'
-        f'<div class="page-actions"><a href="/questoes/nova" class="btn btn-primary">+ Nova questão</a></div></div>'
+        f'<div class="page-actions"><a href="/questoes/nova" class="btn btn-primary">+ Nova questão</a> <a href="/questoes/importar-docx" class="btn">📄 Importar de Word</a></div></div>'
         f'{matriz_html}{filtros_html}{cards}{toggle_js}'
     )
     return render_page("Questões", content, active="questoes", head_extra=MATHJAX)
@@ -8016,6 +8017,338 @@ def form_nova_questao_passo2(
         </form>
     """
     return render_page("Nova questão · Passo 2", content, active="questoes", head_extra=MATHJAX_EDIT)
+
+
+# ==========================================
+#  IMPORTAÇÃO EM LOTE DE QUESTÕES VIA WORD (.docx) — 14/09/2026, a pedido de Felipe
+# ==========================================
+# Formato esperado do arquivo (o mesmo que ele já usa pra organizar bancos de questão
+# prontos): cada questão separada por uma linha de travessões ("---...---"), com 4
+# alternativas (A/B/C/D, com ou sem parênteses) e a alternativa CORRETA com o texto
+# pintado de vermelho no Word — isso vira o gabarito automaticamente. Imagem dentro do
+# bloco da questão é associada a ela. Depois de ler o arquivo, mostra uma PRÉVIA de
+# tudo (com o gabarito já marcado) antes de gravar qualquer coisa no banco — dá pra
+# desmarcar questões, corrigir o gabarito manualmente se o arquivo não tiver vindo
+# com a cor certa, e só depois confirmar.
+
+IMPORT_DOCX_TMP_DIR = "tmp_importacoes_questoes"
+os.makedirs(IMPORT_DOCX_TMP_DIR, exist_ok=True)
+
+
+def _extrair_imagem_do_paragrafo_docx(doc, paragrafo):
+    """Se o parágrafo tem uma imagem embutida, devolve os bytes dela (ou None)."""
+    xml = paragrafo._element.xml
+    if "blipFill" not in xml and "<pic:pic" not in xml:
+        return None
+    m = re.search(r'r:embed="([^"]+)"', xml)
+    if not m:
+        return None
+    try:
+        image_part = doc.part.related_parts[m.group(1)]
+        return image_part.blob
+    except Exception:
+        return None
+
+
+def _parse_docx_questoes(file_bytes: bytes):
+    """Lê um .docx no formato de banco de questões de Felipe e devolve uma lista de
+    dicts: {enunciado, alternativas: {A,B,C,D}, correta, ambiguo, imagem_bytes}."""
+    import docx as _docx
+    import io as _io
+
+    doc = _docx.Document(_io.BytesIO(file_bytes))
+    padrao_alt = re.compile(r'^\(?([A-E])\)\s*(.*)$')
+    padrao_separador = re.compile(r'^-{10,}$')
+
+    blocos = []
+    atual = []
+    for p in doc.paragraphs:
+        if padrao_separador.match(p.text.strip()):
+            if atual:
+                blocos.append(atual)
+            atual = []
+        else:
+            atual.append(p)
+    if atual:
+        blocos.append(atual)
+
+    questoes = []
+    for bloco in blocos:
+        if not any(p.text.strip() for p in bloco):
+            continue  # bloco vazio (ex: só o cabeçalho antes do primeiro separador)
+
+        enunciado_linhas = []
+        alternativas = {}
+        correta = None
+        imagem_bytes = None
+        ambiguo = False
+
+        for p in bloco:
+            texto = p.text.strip()
+            m = padrao_alt.match(texto)
+            if m and m.group(1) in ("A", "B", "C", "D"):
+                letra, resto = m.group(1), m.group(2).strip()
+                alternativas[letra] = resto
+                for run in p.runs:
+                    cor = run.font.color
+                    if cor is not None and cor.type is not None and cor.type.name == "RGB" and cor.rgb == _docx.shared.RGBColor(0xFF, 0, 0):
+                        if correta is not None and correta != letra:
+                            ambiguo = True
+                        correta = letra
+            else:
+                if texto:
+                    enunciado_linhas.append(texto)
+                img = _extrair_imagem_do_paragrafo_docx(doc, p)
+                if img and imagem_bytes is None:
+                    imagem_bytes = img
+
+        if not alternativas:
+            continue  # sem nenhuma alternativa não é uma questão (ex: instrução solta)
+
+        questoes.append({
+            "enunciado": "\n".join(enunciado_linhas),
+            "alternativas": alternativas,
+            "correta": correta,
+            "ambiguo": ambiguo or correta is None,
+            "imagem_bytes": imagem_bytes,
+        })
+    return questoes
+
+
+@app.get("/questoes/importar-docx", response_class=HTMLResponse)
+def form_importar_docx_questoes(request: Request):
+    conn = get_db()
+    disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    conn.close()
+    if not disciplinas:
+        return HTMLResponse(render_page("Importar questões", '<div class="page-header"><h1>📄 Importar Questões de Word</h1></div><div class="empty"><p>Cadastre pelo menos uma disciplina antes.</p></div>', active="questoes"))
+
+    opts_disc = "".join(f'<option value="{d["id"]}">{d["nome"]}</option>' for d in disciplinas)
+    opts_ano = '<option value="">— Não definido —</option>' + "".join(f'<option value="{a}">{a}</option>' for a in ANOS)
+
+    content = f"""
+        <div class="page-header">
+            <h1>📄 Importar Questões de Word</h1>
+            <p class="subtitle">Sobe um arquivo .docx com várias questões de uma vez — o sistema separa cada uma, acha as 4 alternativas e identifica o gabarito automaticamente.</p>
+        </div>
+        <div class="tip">
+            Formato esperado: cada questão separada por uma linha de travessões (<code>---...</code>), com 4 alternativas começando com "A)", "B)", "C)", "D)" (ou "(A)", "(B)"...), e a alternativa correta com o texto em <strong style="color:red;">vermelho</strong>. Depois de subir, você vê uma prévia de tudo antes de confirmar — nada é salvo automaticamente nesse passo.
+        </div>
+        <form action="/questoes/importar-docx" method="post" enctype="multipart/form-data">
+            <label>Disciplina<select name="disciplina_id" required>{opts_disc}</select></label>
+            <label>Ano de escolaridade (aplicado a todas as questões do arquivo)<select name="ano">{opts_ano}</select></label>
+            <label>Habilidades BNCC (opcional, aplicadas a todas as questões do arquivo — separe por vírgula)<input type="text" name="habilidades_codigos" placeholder="Ex: EF06MA01, EF06MA02"></label>
+            <label>Arquivo (.docx)<input type="file" name="arquivo" accept=".docx" required></label>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">Ler arquivo e mostrar prévia</button>
+                <a href="/questoes" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Importar questões de Word", content, active="questoes"))
+
+
+@app.post("/questoes/importar-docx", response_class=HTMLResponse)
+async def processar_importar_docx_questoes(
+    request: Request,
+    disciplina_id: int = Form(...),
+    ano: str = Form(""),
+    habilidades_codigos: str = Form(""),
+    arquivo: UploadFile = File(...),
+):
+    try:
+        import docx  # noqa: F401 — só confere que está instalado antes de seguir
+    except ImportError:
+        content = (
+            '<div class="page-header"><h1>Falta uma dependência no servidor</h1></div>'
+            '<div class="tip" style="background:var(--red-bg); border-color:var(--red); color:var(--red);">'
+            'O pacote <code>python-docx</code> não está instalado. Na VM, via SSH, rode:<br>'
+            '<code>cd ~/corretor && source venv/bin/activate && pip install python-docx</code><br>'
+            'Depois reinicie o serviço (<code>sudo systemctl restart corretor</code>) e tente de novo.'
+            '</div>'
+            '<a href="/questoes/importar-docx" class="btn">← Voltar</a>'
+        )
+        return HTMLResponse(render_page("Falta dependência", content, active="questoes"))
+
+    file_bytes = await arquivo.read()
+    try:
+        questoes_parseadas = _parse_docx_questoes(file_bytes)
+    except Exception as e:
+        content = f'<div class="page-header"><h1>Erro ao ler o arquivo</h1></div><div class="tip" style="background:var(--red-bg); border-color:var(--red); color:var(--red);">Não consegui ler esse arquivo: {html.escape(str(e))}. Confira se é um .docx válido.</div><a href="/questoes/importar-docx" class="btn">← Voltar</a>'
+        return HTMLResponse(render_page("Erro", content, active="questoes"))
+
+    if not questoes_parseadas:
+        content = '<div class="page-header"><h1>Nenhuma questão encontrada</h1></div><div class="tip">Não encontrei nenhum bloco de questão nesse arquivo (esperava linhas tracejadas separando cada questão, com alternativas A/B/C/D). Confira o formato do arquivo.</div><a href="/questoes/importar-docx" class="btn">← Voltar</a>'
+        return HTMLResponse(render_page("Nenhuma questão encontrada", content, active="questoes"))
+
+    importacao_id = uuid.uuid4().hex
+    pasta = os.path.join(IMPORT_DOCX_TMP_DIR, importacao_id)
+    os.makedirs(pasta, exist_ok=True)
+
+    dados_salvos = []
+    for i, q in enumerate(questoes_parseadas):
+        entrada = {
+            "enunciado": q["enunciado"],
+            "alternativas": q["alternativas"],
+            "correta": q["correta"],
+            "ambiguo": q["ambiguo"],
+            "tem_imagem": False,
+        }
+        if q["imagem_bytes"]:
+            img_redim = _redimensionar_imagem(q["imagem_bytes"], max_width=800)
+            with open(os.path.join(pasta, f"img_{i}.jpg"), "wb") as f:
+                f.write(img_redim)
+            entrada["tem_imagem"] = True
+        dados_salvos.append(entrada)
+
+    with open(os.path.join(pasta, "dados.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "disciplina_id": disciplina_id,
+            "ano": ano.strip() or None,
+            "habilidades_codigos": habilidades_codigos.strip(),
+            "questoes": dados_salvos,
+            "nome_arquivo": arquivo.filename,
+        }, f, ensure_ascii=False)
+
+    return RedirectResponse(f"/questoes/importar-docx/{importacao_id}/preview", status_code=303)
+
+
+@app.get("/questoes/importar-docx/{importacao_id}/preview", response_class=HTMLResponse)
+def preview_importar_docx_questoes(request: Request, importacao_id: str):
+    pasta = os.path.join(IMPORT_DOCX_TMP_DIR, importacao_id)
+    caminho_json = os.path.join(pasta, "dados.json")
+    if not os.path.exists(caminho_json):
+        return HTMLResponse(render_page("Não encontrada", '<div class="empty">Essa importação expirou ou não existe mais. Suba o arquivo de novo.</div><a href="/questoes/importar-docx" class="btn">← Nova importação</a>', active="questoes"))
+    with open(caminho_json, encoding="utf-8") as f:
+        dados = json.load(f)
+
+    conn = get_db()
+    disciplina = conn.execute("SELECT nome FROM disciplinas WHERE id=?", (dados["disciplina_id"],)).fetchone()
+    conn.close()
+
+    linhas = ""
+    for i, q in enumerate(dados["questoes"]):
+        opts_letra = "".join(
+            f'<option value="{l}"{" selected" if q["correta"]==l else ""}>{l}</option>'
+            for l in ("A", "B", "C", "D")
+        )
+        alt_html = ""
+        for letra in ("A", "B", "C", "D"):
+            texto_alt = q["alternativas"].get(letra, "")
+            estilo = "color:var(--green); font-weight:700;" if q["correta"] == letra else ""
+            marca = " ✅" if q["correta"] == letra else ""
+            alt_html += f'<div style="padding:3px 0; {estilo}">{letra}) {html.escape(texto_alt)}{marca}</div>'
+        aviso_ambiguo = (
+            '<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin:6px 0; font-size:12px;">'
+            '⚠️ Não consegui identificar o gabarito com certeza nessa questão — confira/corrija no campo abaixo antes de confirmar.</div>'
+        ) if q["ambiguo"] else ""
+        imagem_html = f'<img src="/questoes/importar-docx/{importacao_id}/imagem/{i}" style="max-width:300px; margin:8px 0; display:block; border-radius:6px;">' if q["tem_imagem"] else ""
+        linhas += f"""
+        <div class="card" style="margin-bottom:14px;">
+            <label style="display:flex; align-items:center; gap:8px; font-weight:600;">
+                <input type="checkbox" name="incluir_{i}" checked style="width:auto; margin:0;"> Questão {i+1}
+            </label>
+            <p style="white-space:pre-wrap; margin:8px 0;">{html.escape(q["enunciado"])}</p>
+            {imagem_html}
+            {alt_html}
+            {aviso_ambiguo}
+            <label style="margin-top:8px; max-width:160px;">Gabarito<select name="gabarito_{i}">{opts_letra}</select></label>
+        </div>"""
+
+    content = f"""
+        <div class="page-header">
+            <h1>👀 Prévia da importação</h1>
+            <p class="subtitle">{len(dados['questoes'])} questão(ões) encontradas em "{dados['nome_arquivo']}" · Disciplina: <strong>{disciplina['nome'] if disciplina else '—'}</strong>{f" · Ano: {dados['ano']}" if dados['ano'] else ""}</p>
+        </div>
+        <div class="tip">Desmarque qualquer questão que você não queira importar. Pras questões com aviso ⚠️, confira e corrija o gabarito antes de confirmar. Nada foi salvo ainda.</div>
+        <form action="/questoes/importar-docx/{importacao_id}/confirmar" method="post">
+            {linhas}
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">✅ Confirmar e importar</button>
+                <a href="/questoes/importar-docx" class="btn">Cancelar</a>
+            </div>
+        </form>
+    """
+    return HTMLResponse(render_page("Prévia da importação", content, active="questoes"))
+
+
+@app.get("/questoes/importar-docx/{importacao_id}/imagem/{indice}")
+def imagem_preview_importar_docx(importacao_id: str, indice: int):
+    caminho = os.path.join(IMPORT_DOCX_TMP_DIR, importacao_id, f"img_{indice}.jpg")
+    if not os.path.exists(caminho):
+        raise HTTPException(status_code=404)
+    return FileResponse(caminho, media_type="image/jpeg")
+
+
+@app.post("/questoes/importar-docx/{importacao_id}/confirmar", response_class=HTMLResponse)
+async def confirmar_importar_docx_questoes(request: Request, importacao_id: str):
+    pasta = os.path.join(IMPORT_DOCX_TMP_DIR, importacao_id)
+    caminho_json = os.path.join(pasta, "dados.json")
+    if not os.path.exists(caminho_json):
+        return RedirectResponse("/questoes/importar-docx", status_code=303)
+    with open(caminho_json, encoding="utf-8") as f:
+        dados = json.load(f)
+
+    form = await request.form()
+    prof = get_current_professor(request)
+    prof_id = prof["id"] if prof else None
+
+    conn = get_db()
+    habilidade_ids = []
+    for parte in dados["habilidades_codigos"].replace("\n", ",").split(","):
+        codigo = parte.strip().upper()
+        if not codigo:
+            continue
+        existing = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+        hid = existing["id"] if existing else conn.execute("INSERT INTO habilidades_bncc (codigo) VALUES (?)", (codigo,)).lastrowid
+        habilidade_ids.append(hid)
+
+    criadas = 0
+    for i, q in enumerate(dados["questoes"]):
+        if not form.get(f"incluir_{i}"):
+            continue
+        gabarito = (form.get(f"gabarito_{i}") or q["correta"] or "A").strip().upper()
+        cursor = conn.execute(
+            "INSERT INTO questoes (disciplina_id, enunciado, ano, criada_por_professor_id, tipo) VALUES (?, ?, ?, ?, 'multipla_escolha')",
+            (dados["disciplina_id"], _sanitizar_html_enunciado(q["enunciado"]), dados["ano"], prof_id)
+        )
+        questao_id = cursor.lastrowid
+        for letra in ("A", "B", "C", "D"):
+            texto_alt = q["alternativas"].get(letra, "")
+            conn.execute(
+                "INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?, ?, ?, ?)",
+                (questao_id, letra, _sanitizar_html_enunciado(texto_alt), 1 if letra == gabarito else 0)
+            )
+        for hid in habilidade_ids:
+            try:
+                conn.execute("INSERT INTO questao_habilidades (questao_id, habilidade_id) VALUES (?, ?)", (questao_id, hid))
+            except sqlite3.IntegrityError:
+                pass
+        if q["tem_imagem"]:
+            origem_img = os.path.join(pasta, f"img_{i}.jpg")
+            if os.path.exists(origem_img):
+                unique_name = f"{uuid.uuid4().hex}.jpg"
+                destino = os.path.join(UPLOAD_DIR, unique_name)
+                shutil.copy(origem_img, destino)
+                conn.execute(
+                    "INSERT INTO imagens (questao_id, caminho, ordem) VALUES (?, ?, 0)",
+                    (questao_id, f"static/imagens/{unique_name}")
+                )
+        criadas += 1
+
+    conn.commit()
+    conn.close()
+    shutil.rmtree(pasta, ignore_errors=True)
+
+    content = f"""
+        <div class="page-header"><h1>✅ Importação concluída</h1></div>
+        <div class="tip" style="background:var(--green-bg); border-color:var(--green);">{criadas} questão(ões) criada(s) com sucesso no banco de questões.</div>
+        <div class="page-actions">
+            <a href="/questoes" class="btn btn-primary">Ver banco de questões</a>
+            <a href="/questoes/importar-docx" class="btn">Importar outro arquivo</a>
+        </div>
+    """
+    return HTMLResponse(render_page("Importação concluída", content, active="questoes"))
 
 
 @app.post("/questoes/criar")
