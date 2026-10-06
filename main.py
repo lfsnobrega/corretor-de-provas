@@ -1680,7 +1680,7 @@ def _pode_editar_questao(prof: Optional[dict], questao_criador_id: Optional[int]
     return prof["id"] == questao_criador_id
 
 
-def _redimensionar_imagem(data: bytes, max_width: int = 800) -> bytes:
+def _redimensionar_imagem(data: bytes, max_width: int = 1200) -> bytes:
     """Redimensiona imagem para no máximo max_width px de largura, convertendo para JPEG."""
     try:
         from PIL import Image as _PilImage
@@ -7563,7 +7563,7 @@ async def upload_imagem_inline(arquivo: UploadFile = File(...)):
     """Endpoint para upload de imagem colada nas alternativas. Retorna o caminho público."""
     try:
         data = await arquivo.read()
-        data = _redimensionar_imagem(data, max_width=600)
+        data = _redimensionar_imagem(data, max_width=1200)
         unique_name = f"{uuid.uuid4().hex}.jpg"
         file_path = os.path.join(UPLOAD_DIR, unique_name)
         with open(file_path, "wb") as f:
@@ -8236,7 +8236,7 @@ async def processar_importar_docx_questoes(
             "tem_imagem": False,
         }
         if q["imagem_bytes"]:
-            img_redim = _redimensionar_imagem(q["imagem_bytes"], max_width=800)
+            img_redim = _redimensionar_imagem(q["imagem_bytes"], max_width=1200)
             with open(os.path.join(pasta, f"img_{i}.jpg"), "wb") as f:
                 f.write(img_redim)
             entrada["tem_imagem"] = True
@@ -8426,7 +8426,7 @@ async def criar_questao(
     for ordem, (img, legenda, fonte) in enumerate([(imagem1, imagem1_legenda, imagem1_fonte), (imagem2, imagem2_legenda, imagem2_fonte)]):
         if img and img.filename:
             content_bytes = await img.read()
-            content_bytes = _redimensionar_imagem(content_bytes, max_width=800)
+            content_bytes = _redimensionar_imagem(content_bytes, max_width=1200)
             unique_name = f"{uuid.uuid4().hex}.jpg"
             file_path = os.path.join(UPLOAD_DIR, unique_name)
             with open(file_path, "wb") as f:
@@ -15304,7 +15304,7 @@ async def atualizar_questao(
     for offset, (img, legenda, fonte) in enumerate([(imagem1, imagem1_legenda, imagem1_fonte), (imagem2, imagem2_legenda, imagem2_fonte)]):
         if img and img.filename:
             content_bytes = await img.read()
-            content_bytes = _redimensionar_imagem(content_bytes, max_width=800)
+            content_bytes = _redimensionar_imagem(content_bytes, max_width=1200)
             unique_name = f"{uuid.uuid4().hex}.jpg"
             file_path = os.path.join(UPLOAD_DIR, unique_name)
             with open(file_path, "wb") as f:
@@ -16382,7 +16382,7 @@ def imprimir_prova(prova_id: int):
         blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 8px 0; color: #333; font-style: italic; background: #fafafa; font-size: 11px; }}
         blockquote footer {{ font-size: 9px; margin-top: 4px; font-style: normal; }}
         figure {{ margin: 8px 0; }}
-        figure img {{ max-width: 100%; max-height: 220px; }}
+        figure img {{ width: 10cm; max-width: 100%; height: auto; max-height: 10cm; object-fit: contain; display: block; }}
         figcaption {{ font-size: 9px; color: #666; margin-top: 2px; }}
         .q-enunciado {{ margin: 6px 0 8px; line-height: 1.5; }}
         .q-alts {{ list-style: none; padding-left: 8px; margin: 6px 0; }}
@@ -21640,7 +21640,7 @@ window.MathJax = {{
   blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 0 0 8px; color: #333; font-style: italic; font-size: 11px; background: #fafafa; }}
   blockquote footer {{ font-size: 9px; font-style: normal; margin-top: 3px; }}
   figure {{ margin: 8px 0; }}
-  figure img {{ max-width: 100%; max-height: 180px; }}
+  figure img {{ width: 10cm; max-width: 100%; height: auto; max-height: 10cm; object-fit: contain; display: block; }}
   figcaption {{ font-size: 9px; color: #666; }}
   table {{ border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 11px; }}
   th, td {{ border: 1px solid #999; padding: 4px 8px; }}
@@ -21984,7 +21984,7 @@ def preview_simulado(sim_id: int):
                 (q["id"],)
             ).fetchall()
             imgs_html = "".join(
-                f'<figure style="margin:8px 0;"><img src="/{img["caminho"]}" style="max-width:100%;max-height:180px;" alt=""><figcaption style="font-size:10px;color:#666;">{img["legenda"] or ""}</figcaption></figure>'
+                f'<figure style="margin:8px 0;"><img src="/{img["caminho"]}" style="width:10cm;max-width:100%;height:auto;max-height:10cm;object-fit:contain;display:block;" alt=""><figcaption style="font-size:10px;color:#666;">{img["legenda"] or ""}</figcaption></figure>'
                 for img in imgs
             )
             # Habilidades BNCC
