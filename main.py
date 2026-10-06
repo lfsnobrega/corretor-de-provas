@@ -21493,8 +21493,8 @@ def imprimir_simulado(sim_id: int):
             ORDER BY sq.ordem
         """, (bloco["id"],)).fetchall()
 
-        # PÁGINA DE PAUSA (antes de cada bloco)
-        blocos_html += f"""
+        # PÁGINA DE PAUSA (antes de cada bloco) — frente da folha; o verso é o rascunho do gabarito
+        pausa_html = f"""
         <div class="pagina-pausa page-break">
             <div class="pausa-bloco">BLOCO {bloco['numero']:02d}</div>
             <div class="pausa-disciplina">{bloco['disciplina_nome'].upper()}</div>
@@ -21511,6 +21511,7 @@ def imprimir_simulado(sim_id: int):
 
         # QUESTÕES DO BLOCO
         questoes_html = ""
+        nums_bloco = []  # (numero global, letras disponíveis) para o rascunho do verso
         for q in questoes_bloco:
             num_global += 1
             alts = conn.execute(
@@ -21519,6 +21520,7 @@ def imprimir_simulado(sim_id: int):
             ).fetchall()
             correta = next((a["letra"] for a in alts if a["correta"]), "?")
             gabarito_data.append((num_global, correta, bloco["numero"]))
+            nums_bloco.append((num_global, [a["letra"] for a in alts]))
 
             alts_html = "".join(
                 f'<div class="q-alt"><strong>{a["letra"]})</strong> {a["texto"]}</div>'
@@ -21568,6 +21570,19 @@ def imprimir_simulado(sim_id: int):
                 </div>
             </div>"""
 
+        # RASCUNHO DO GABARITO (verso da página de pausa): mesma numeração do gabarito oficial
+        letras_rasc = sorted({l for _, ls in nums_bloco for l in ls} | set("ABCD"))
+        linhas_rasc = ""
+        for n, _ls in nums_bloco:
+            bolhas = "".join(f'<span class="rasc-bolha">{l}</span>' for l in letras_rasc)
+            linhas_rasc += f'<div class="rasc-linha"><span class="rasc-num">{n:02d}</span>{bolhas}</div>'
+        rascunho_html = f"""
+        <div class="pagina-rascunho page-break">
+            <div class="rasc-titulo">RASCUNHO — BLOCO {bloco['numero']:02d} · {bloco['disciplina_nome'].upper()}</div>
+            <div class="rasc-aviso">Use este espaço para marcar suas respostas enquanto resolve. Ele <strong>não substitui</strong> o cartão de respostas oficial.</div>
+            <div class="rasc-grid">{linhas_rasc}</div>
+        </div>"""
+        blocos_html += pausa_html + rascunho_html
         blocos_html += f"""
         <div class="bloco-questoes page-break">
             <div class="bloco-header">Bloco {bloco['numero']} — {bloco['disciplina_nome']}</div>
@@ -21628,6 +21643,15 @@ window.MathJax = {{
   .pausa-octogono {{ width: 220px; height: 220px; background: #555; clip-path: polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%); display: flex; align-items: center; justify-content: center; margin: 0 auto 50px; }}
   .oct-inner {{ color: white; font-size: 18px; font-weight: 700; line-height: 1.6; }}
   .pausa-tempo {{ font-size: 16px; font-weight: 700; }}
+
+  /* RASCUNHO DO GABARITO (verso da página de pausa) */
+  .pagina-rascunho {{ padding: 40px 50px; }}
+  .rasc-titulo {{ font-size: 16px; font-weight: 800; text-align: center; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 10px; letter-spacing: 1px; }}
+  .rasc-aviso {{ font-size: 11px; color: #444; text-align: center; margin-bottom: 22px; }}
+  .rasc-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 40px; row-gap: 10px; max-width: 520px; margin: 0 auto; }}
+  .rasc-linha {{ display: flex; align-items: center; gap: 8px; page-break-inside: avoid; }}
+  .rasc-num {{ font-weight: 800; font-size: 14px; min-width: 28px; }}
+  .rasc-bolha {{ display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 1.5px solid #000; border-radius: 50%; font-size: 11px; font-weight: 600; color: #444; }}
 
   /* QUESTÕES */
   .bloco-header {{ font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 16px; color: #333; }}
