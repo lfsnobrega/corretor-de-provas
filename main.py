@@ -2475,6 +2475,10 @@ def init_db():
         FOREIGN KEY (questao_id) REFERENCES questoes(id)
     )""")
 
+    # Limpeza: remove vínculos de simulado que apontam para questões que não existem mais
+    # (a exclusão de questão antiga não limpava esses vínculos e eles "ocupavam vaga" no bloco).
+    conn.execute("DELETE FROM simulado_questoes WHERE questao_id NOT IN (SELECT id FROM questoes)")
+
     # ── BOLETIM / CONSELHO DE CLASSE (incorporado 05/08/2026) ──────────────
     # Reaproveita alunos/turmas/disciplinas/professores já existentes. As 3
     # tabelas abaixo guardam os dados por TRIMESTRE+ANO desde o início, pra
@@ -15348,6 +15352,19 @@ def deletar_questao(id: int, request: Request):
         """
         return render_page("Erro ao Excluir Questão", content, active="questoes")
 
+    em_simulado = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE questao_id = ?", (id,)).fetchone()["c"]
+    if em_simulado > 0:
+        conn.close()
+        content = """
+        <div style="border: 1px solid var(--red); background: var(--red-bg); padding: 20px; border-radius: 6px; margin-top:20px; color:var(--red);">
+            <h3 style="color:var(--red); margin-top:0;">Operação Impedida</h3>
+            <p>Não é possível excluir esta questão porque ela está sendo usada em um ou mais <strong>simulados</strong>.</p>
+            <p>Remova-a primeiro do bloco do simulado (botão ✕ na tela do bloco) e depois exclua.</p>
+            <a href="/questoes" class="btn" style="margin-top:10px;">Voltar para Questões</a>
+        </div>
+        """
+        return render_page("Erro ao Excluir Questão", content, active="questoes")
+
     imagens = conn.execute("SELECT caminho FROM imagens WHERE questao_id = ?", (id,)).fetchall()
     for img in imagens:
         try:
@@ -20536,6 +20553,8 @@ def ver_simulado(sim_id: int):
         conn.close()
         return RedirectResponse("/simulados", status_code=303)
 
+    for _b in conn.execute("SELECT id FROM simulado_blocos WHERE simulado_id = ?", (sim_id,)).fetchall():
+        _sanear_bloco_simulado(conn, _b["id"])
     blocos = conn.execute("""
         SELECT b.*, d.nome AS disciplina_nome, p.nome AS professor_nome,
                (SELECT COUNT(*) FROM simulado_questoes WHERE bloco_id = b.id) AS n_questoes_adicionadas
@@ -21190,8 +21209,33 @@ def _enunciado_expand(enunciado: str, max_chars: int = 400) -> str:
     return texto
 
 
+def _sanear_bloco_simulado(conn, bloco_id: int):
+    """Mantém o bloco do simulado consistente antes de contar/adicionar questões:
+    - remove vínculos órfãos (questão excluída do banco) que ocupavam vaga sem aparecer na tela;
+    - remove duplicatas da mesma questão no bloco;
+    - renumera a ordem 0..n-1 (sem buracos nem repetições);
+    - ajusta o status (completo <-> em_contribuicao) conforme a contagem real.
+    Retorna a quantidade real de questões válidas no bloco."""
+    conn.execute("DELETE FROM simulado_questoes WHERE bloco_id = ? AND questao_id NOT IN (SELECT id FROM questoes)", (bloco_id,))
+    conn.execute("""DELETE FROM simulado_questoes WHERE bloco_id = ? AND id NOT IN (
+                        SELECT MIN(id) FROM simulado_questoes WHERE bloco_id = ? GROUP BY questao_id)""", (bloco_id, bloco_id))
+    linhas = conn.execute("SELECT id, ordem FROM simulado_questoes WHERE bloco_id = ? ORDER BY ordem, id", (bloco_id,)).fetchall()
+    for novo, ln in enumerate(linhas):
+        if ln["ordem"] != novo:
+            conn.execute("UPDATE simulado_questoes SET ordem = ? WHERE id = ?", (novo, ln["id"]))
+    n = len(linhas)
+    bloco = conn.execute("SELECT n_questoes, status FROM simulado_blocos WHERE id = ?", (bloco_id,)).fetchone()
+    if bloco:
+        if n >= bloco["n_questoes"] and bloco["status"] == "em_contribuicao":
+            conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
+        elif n < bloco["n_questoes"] and bloco["status"] == "completo":
+            conn.execute("UPDATE simulado_blocos SET status = 'em_contribuicao' WHERE id = ?", (bloco_id,))
+    conn.commit()
+    return n
+
+
 @app.get("/simulados/{sim_id}/blocos/{bloco_id}/contribuir", response_class=HTMLResponse)
-def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = None, q: Optional[str] = None):
+def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = None, q: Optional[str] = None, aviso: Optional[str] = None):
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
@@ -21206,6 +21250,13 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     if not sim or not bloco:
         conn.close()
         return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+    _sanear_bloco_simulado(conn, bloco_id)
+    bloco = conn.execute("""
+        SELECT b.*, d.nome AS disciplina_nome
+        FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
+        WHERE b.id = ? AND b.simulado_id = ?
+    """, (bloco_id, sim_id)).fetchone()
 
     # Questões já no bloco
     questoes_bloco = conn.execute("""
@@ -21305,7 +21356,6 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     if not bloco_items:
         bloco_items = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">Nenhuma questão adicionada ainda.</div>'
     conn.close()
-    conn.close()
     # Lista do banco
     banco_items = ""
     for bq in questoes_banco:
@@ -21341,7 +21391,16 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             </form>
         </div>'''
 
+    avisos_txt = {
+        "cheio": "⚠️ Este bloco já está com todas as questões. Remova uma (✕) para poder adicionar outra.",
+        "repetida": "⚠️ Essa questão já está neste bloco.",
+        "inexistente": "⚠️ Essa questão não existe mais no banco (foi excluída). Atualize a lista.",
+    }
+    aviso_html = (f'<div style="background:var(--orange-bg);border:1px solid var(--orange);color:var(--orange);'
+                  f'padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:13px;">{avisos_txt[aviso]}</div>'
+                  if aviso in avisos_txt else "")
     content = f"""
+        {aviso_html}
         <div class="page-header">
             <h1>✏️ Bloco {bloco['numero']} — {bloco['disciplina_nome']}</h1>
             <p class="subtitle">{sim['nome']} · {n_add}/{n_tot} questões adicionadas</p>
@@ -21392,19 +21451,27 @@ def adicionar_questao_bloco(sim_id: int, bloco_id: int, questao_id: int = Form(.
     if not prof:
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
+    aviso = ""
     bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id)).fetchone()
     if bloco:
-        n_atual = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
-        if n_atual < bloco["n_questoes"]:
-            ja = conn.execute("SELECT id FROM simulado_questoes WHERE bloco_id = ? AND questao_id = ?", (bloco_id, questao_id)).fetchone()
-            if not ja:
-                conn.execute("INSERT INTO simulado_questoes (bloco_id, questao_id, ordem) VALUES (?,?,?)", (bloco_id, questao_id, n_atual))
-                n_novo = n_atual + 1
-                if n_novo >= bloco["n_questoes"] and bloco["status"] == "em_contribuicao":
-                    conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
-                conn.commit()
+        # Conta só questões que realmente existem (ignora vínculos órfãos) e corrige a ordem
+        n_atual = _sanear_bloco_simulado(conn, bloco_id)
+        existe = conn.execute("SELECT id FROM questoes WHERE id = ?", (questao_id,)).fetchone()
+        ja = conn.execute("SELECT id FROM simulado_questoes WHERE bloco_id = ? AND questao_id = ?", (bloco_id, questao_id)).fetchone()
+        if not existe:
+            aviso = "inexistente"
+        elif ja:
+            aviso = "repetida"
+        elif n_atual >= bloco["n_questoes"]:
+            aviso = "cheio"
+        else:
+            prox = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS o FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["o"]
+            conn.execute("INSERT INTO simulado_questoes (bloco_id, questao_id, ordem) VALUES (?,?,?)", (bloco_id, questao_id, prox))
+            conn.commit()
+            _sanear_bloco_simulado(conn, bloco_id)  # marca como 'completo' ao atingir o total
     conn.close()
-    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
+    sufixo = f"?aviso={aviso}" if aviso else ""
+    return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir{sufixo}", status_code=303)
 
 
 @app.post("/simulados/{sim_id}/blocos/{bloco_id}/remover/{sq_id}")
@@ -21414,11 +21481,9 @@ def remover_questao_bloco(sim_id: int, bloco_id: int, sq_id: int):
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
     conn.execute("DELETE FROM simulado_questoes WHERE id = ? AND bloco_id = ?", (sq_id, bloco_id))
-    n_atual = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
-    bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ?", (bloco_id,)).fetchone()
-    if bloco and n_atual < bloco["n_questoes"] and bloco["status"] == "completo":
-        conn.execute("UPDATE simulado_blocos SET status = 'em_contribuicao' WHERE id = ?", (bloco_id,))
-    conn.commit(); conn.close()
+    conn.commit()
+    _sanear_bloco_simulado(conn, bloco_id)
+    conn.close()
     return RedirectResponse(f"/simulados/{sim_id}/blocos/{bloco_id}/contribuir", status_code=303)
 
 
@@ -21435,7 +21500,7 @@ def finalizar_bloco(sim_id: int, bloco_id: int):
     """, (bloco_id, sim_id)).fetchone()
     entregue = False
     if bloco:
-        n = conn.execute("SELECT COUNT(*) AS c FROM simulado_questoes WHERE bloco_id = ?", (bloco_id,)).fetchone()["c"]
+        n = _sanear_bloco_simulado(conn, bloco_id)
         if n >= bloco["n_questoes"]:
             conn.execute("UPDATE simulado_blocos SET status = 'completo' WHERE id = ?", (bloco_id,))
             conn.commit()
