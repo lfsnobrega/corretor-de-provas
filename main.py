@@ -21093,6 +21093,12 @@ def auditoria_calibracao_global():
     return render_page("Auditoria de calibração", content, active="analises-pedagogicas")
 
 
+@app.get("/simulados/{sim_id}/aplicacoes/criar-lote")
+def criar_aplicacoes_lote_get(sim_id: int):
+    return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+
+
+@app.post("/simulados/{sim_id}/aplicacoes/criar-lote")
 def criar_aplicacoes_lote(sim_id: int):
 
     prof = _current_prof_ctx.get()
