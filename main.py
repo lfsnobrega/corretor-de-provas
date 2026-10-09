@@ -6393,6 +6393,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 <div class="sidebar-section">Análises pedagógicas</div>
                 {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
                 {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Mapa de notas") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma")) if professor else ""}
+                {nav_item("/boletim/produtividade", "boletim-produtividade", "📈", "Produtividade SME") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
                 {secao_boletim}
                 {secao_configuracoes}
@@ -11819,6 +11820,266 @@ def _boletim_ranking_faltas(dados_turma):
             valor_anterior = total_faltas
         ranking[aid] = (pos_atual, total)
     return ranking
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRODUTIVIDADE SME — Rendimento por Turma (09/10/2026)
+# Trazido do sistema original (Conselho de Classe): para cada turma, quantos alunos
+# estão ACIMA de 5,0 em cada disciplina, % com semáforo (🟢 ≥70% | 🟡 ≥50% | 🔴 <50%),
+# média da disciplina e quantos alunos estão acima de 5,0 em TODAS as disciplinas.
+# Regras (iguais às do original):
+#  - "acima de 5,0" é estritamente maior que 5,0;
+#  - só as 8 disciplinas numéricas entram (Educação Digital é conceito PA/PS/PI);
+#  - alunos AEE (relatório descritivo) não entram nas contagens, só são avisados;
+#  - transferidos/cancelados e remanejados para outra turma não entram.
+# ═══════════════════════════════════════════════════════════════════════════
+PRODUTIVIDADE_CORTE = 5.0
+
+
+def _produtividade_stats_turma(conn, trimestre, ano, turma_id):
+    alunos = conn.execute("""
+        SELECT id, nome, COALESCE(educacao_especial, 0) AS aee
+        FROM alunos
+        WHERE turma_id = ? AND COALESCE(status, 'ativo') = 'ativo' AND COALESCE(remanejado, 0) = 0
+    """, (turma_id,)).fetchall()
+    total = len(alunos)
+    descritivos = sum(1 for a in alunos if a["aee"])
+    com_nota_ids = [a["id"] for a in alunos if not a["aee"]]
+    notas = {}
+    if com_nota_ids:
+        ph = ",".join("?" * len(com_nota_ids))
+        rows = conn.execute(f"""
+            SELECT bm.aluno_id, d.nome AS disc, bm.nota FROM boletim_medias bm
+            JOIN disciplinas d ON d.id = bm.disciplina_id
+            WHERE bm.trimestre = ? AND bm.ano = ? AND bm.nota IS NOT NULL AND bm.aluno_id IN ({ph})
+        """, [trimestre, ano] + com_nota_ids).fetchall()
+        for r in rows:
+            notas.setdefault(r["aluno_id"], {})[r["disc"]] = r["nota"]
+    disc_stats = {}
+    for disc in BOLETIM_DISC_NUMERICAS:
+        vals = [notas[i][disc] for i in com_nota_ids if disc in notas.get(i, {})]
+        acima = sum(1 for v in vals if v > PRODUTIVIDADE_CORTE)
+        disc_stats[disc] = {
+            "acima": acima, "com_nota": len(vals),
+            "pct": round(acima / len(vals) * 100) if vals else 0,
+            "media": (sum(vals) / len(vals)) if vals else None,
+        }
+    todas_acima = 0
+    for i in com_nota_ids:
+        vals = [notas.get(i, {}).get(d) for d in BOLETIM_DISC_NUMERICAS]
+        vals = [v for v in vals if v is not None]
+        if vals and all(v > PRODUTIVIDADE_CORTE for v in vals):
+            todas_acima += 1
+    com_nota = total - descritivos
+    return {
+        "total": total, "descritivos": descritivos, "com_nota": com_nota,
+        "todas_acima": todas_acima,
+        "pct_todas": round(todas_acima / com_nota * 100) if com_nota else 0,
+        "disc": disc_stats,
+    }
+
+
+def _produtividade_cores(pct):
+    """(cor do texto, fundo, borda) — mesmos limiares do original: ≥70 verde, ≥50 amarelo, senão vermelho."""
+    if pct >= 70:
+        return ("#16a34a", "rgba(22,163,74,.10)", "rgba(22,163,74,.45)")
+    if pct >= 50:
+        return ("#d97706", "rgba(217,119,6,.10)", "rgba(217,119,6,.45)")
+    return ("#dc2626", "rgba(220,38,38,.10)", "rgba(220,38,38,.45)")
+
+
+@app.get("/boletim/produtividade", response_class=HTMLResponse)
+def boletim_produtividade(request: Request, trimestre: Optional[int] = None, ano: Optional[int] = None,
+                          turma_id: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    if not (prof["is_admin"] or ("is_gestor" in prof.keys() and prof["is_gestor"])):
+        return HTMLResponse(render_page(
+            "Acesso restrito",
+            '<div class="page-header"><h1>🔒 Acesso restrito</h1></div>'
+            '<div style="background:var(--red-bg); color:var(--red); border:1px solid var(--red); padding:16px; border-radius:6px;">'
+            '<p>A Produtividade SME é uma área restrita à <strong>equipe gestora</strong>.</p></div>',
+            active="boletim-produtividade"
+        ), status_code=403)
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
+    conn = get_db()
+    combinacoes = conn.execute(
+        "SELECT trimestre, ano FROM boletim_medias GROUP BY trimestre, ano ORDER BY ano DESC, trimestre DESC"
+    ).fetchall()
+    if not combinacoes:
+        conn.close()
+        return render_page("Produtividade SME",
+            '<div class="page-header"><h1>📈 Produtividade SME</h1></div>'
+            '<div class="empty">Nenhuma nota importada ainda. <a href="/boletim/importar">Importar planilha</a></div>',
+            active="boletim-produtividade")
+    if trimestre is None or ano is None:
+        trimestre, ano = combinacoes[0]["trimestre"], combinacoes[0]["ano"]
+    turmas = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
+
+    trimestre_opts = "".join(
+        f'<option value="{c["trimestre"]}:{c["ano"]}"{" selected" if c["trimestre"] == trimestre and c["ano"] == ano else ""}>{c["trimestre"]}º Trimestre {c["ano"]}</option>'
+        for c in combinacoes
+    )
+    turma_opts = '<option value="">— visão de todas as turmas —</option>' + "".join(
+        f'<option value="{t["id"]}"{" selected" if turma_id == t["id"] else ""}>Turma {t["nome"]}</option>' for t in turmas
+    )
+
+    legenda = ('<span style="font-size:11px;color:var(--text-muted);">🟢 ≥70% &nbsp; 🟡 ≥50% &nbsp; 🔴 &lt;50%</span>')
+
+    if turma_id:
+        turma = next((t for t in turmas if t["id"] == turma_id), None)
+        if not turma:
+            conn.close()
+            return RedirectResponse(f"/boletim/produtividade?trimestre={trimestre}&ano={ano}", status_code=303)
+        st = _produtividade_stats_turma(conn, trimestre, ano, turma_id)
+        conn.close()
+        if st["total"] == 0:
+            corpo = '<div class="empty">Sem alunos nesta turma.</div>'
+        else:
+            c_todas = _produtividade_cores(st["pct_todas"])[0]
+            cards = [
+                ("👥", st["total"], "Total de alunos", "var(--accent)"),
+                ("📋", st["descritivos"], "Avaliados por relatório descritivo (AEE)", "#818cf8"),
+                ("📊", st["com_nota"], "Com nota", "var(--text-muted)"),
+                ("✅", f'{st["todas_acima"]} ({st["pct_todas"]}%)', "Acima de 5,0 em todas as disciplinas", c_todas),
+            ]
+            cards_html = "".join(
+                f'<div style="background:var(--bg-subtle);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;align-items:center;gap:12px;">'
+                f'<div style="font-size:24px;">{ico}</div><div><div style="font-size:22px;font-weight:800;color:{cor};">{val}</div>'
+                f'<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">{lbl}</div></div></div>'
+                for ico, val, lbl, cor in cards
+            )
+            badges = ""
+            for disc in BOLETIM_DISC_NUMERICAS:
+                d = st["disc"][disc]
+                c, bg, bd = _produtividade_cores(d["pct"])
+                media_str = f'{d["media"]:.1f}'.replace(".", ",") if d["media"] is not None else "—"
+                badges += (
+                    f'<div style="background:{bg};border:1px solid {bd};border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:4px;-webkit-print-color-adjust:exact;print-color-adjust:exact;">'
+                    f'<div style="font-size:11px;font-weight:700;color:{c};text-transform:uppercase;letter-spacing:.05em;">{disc}</div>'
+                    f'<div style="display:flex;align-items:baseline;gap:6px;margin-top:4px;">'
+                    f'<span style="font-size:32px;font-weight:800;color:{c};line-height:1;">{d["acima"]}</span>'
+                    f'<span style="font-size:13px;color:var(--text-muted);">/ {d["com_nota"]}</span></div>'
+                    f'<div style="font-size:11px;color:var(--text-muted);">alunos acima de 5,0</div>'
+                    f'<div style="height:6px;background:var(--border);border-radius:3px;margin-top:8px;overflow:hidden;">'
+                    f'<div style="width:{d["pct"]}%;height:100%;background:{c};border-radius:3px;"></div></div>'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">'
+                    f'<span style="font-size:20px;font-weight:800;color:{c};">{d["pct"]}%</span>'
+                    f'<span style="font-size:10px;color:var(--text-muted);background:var(--card);padding:2px 8px;border-radius:6px;">x̄ {media_str}</span>'
+                    f'</div></div>'
+                )
+            aviso_desc = ""
+            if st["descritivos"] > 0:
+                aviso_desc = (
+                    f'<div style="margin-top:14px;background:rgba(99,102,241,.10);border:1px solid rgba(99,102,241,.4);border-radius:8px;padding:10px 14px;'
+                    f'display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">'
+                    f'<span style="font-size:16px;">📋</span><span><strong>{st["descritivos"]} aluno(s) com adaptação curricular (AEE)</strong> '
+                    f'não são computados nas contagens acima por serem avaliados por relatório descritivo.</span></div>'
+                )
+            corpo = (
+                f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:20px;">{cards_html}</div>'
+                f'<div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;display:flex;align-items:center;gap:8px;">'
+                f'Rendimento por Disciplina<span style="flex:1;height:1px;background:var(--border);display:block;"></span>{legenda}</div>'
+                f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;">{badges}</div>'
+                f'{aviso_desc}'
+            )
+        titulo_card = f'Turma {turma["nome"]}'
+    else:
+        # Visão geral: uma linha por turma, com o % de alunos acima de 5,0 em cada disciplina
+        cab = "".join(f'<th style="padding:8px 6px;text-align:center;font-size:11px;">{d}</th>' for d in BOLETIM_DISC_NUMERICAS)
+        linhas = ""
+        for t in turmas:
+            st = _produtividade_stats_turma(conn, trimestre, ano, t["id"])
+            if st["total"] == 0:
+                continue
+            cels = ""
+            for disc in BOLETIM_DISC_NUMERICAS:
+                d = st["disc"][disc]
+                if d["com_nota"] == 0:
+                    cels += '<td style="padding:8px 6px;text-align:center;color:var(--text-muted);">—</td>'
+                else:
+                    c, bg, bd = _produtividade_cores(d["pct"])
+                    cels += (f'<td style="padding:8px 6px;text-align:center;background:{bg};color:{c};font-weight:700;-webkit-print-color-adjust:exact;print-color-adjust:exact;">'
+                             f'{d["pct"]}%<div style="font-size:10px;font-weight:400;color:var(--text-muted);">{d["acima"]}/{d["com_nota"]}</div></td>')
+            c_t = _produtividade_cores(st["pct_todas"])[0]
+            aee_txt = " · " + str(st["descritivos"]) + " AEE" if st["descritivos"] else ""
+            linhas += (
+                f'<tr style="border-top:1px solid var(--border);">'
+                f'<td style="padding:8px 10px;font-weight:700;"><a href="/boletim/produtividade?trimestre={trimestre}&ano={ano}&turma_id={t["id"]}" style="color:var(--accent);text-decoration:none;">{t["nome"]}</a>'
+                f'<div style="font-size:10px;color:var(--text-muted);font-weight:400;">{st["total"]} alunos{aee_txt}</div></td>'
+                f'{cels}'
+                f'<td style="padding:8px 6px;text-align:center;font-weight:800;color:{c_t};">{st["todas_acima"]} <span style="font-size:10px;font-weight:400;">({st["pct_todas"]}%)</span></td>'
+                f'</tr>'
+            )
+        conn.close()
+        if not linhas:
+            corpo = '<div class="empty">Sem turmas com alunos neste período.</div>'
+        else:
+            corpo = (
+                f'<div style="margin-bottom:10px;">{legenda}</div>'
+                f'<div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;"><table style="width:100%;border-collapse:collapse;font-size:12px;">'
+                f'<thead><tr style="background:var(--bg-subtle);"><th style="padding:8px 10px;text-align:left;">Turma</th>{cab}'
+                f'<th style="padding:8px 6px;text-align:center;font-size:11px;">Acima de 5,0 em todas</th></tr></thead>'
+                f'<tbody>{linhas}</tbody></table></div>'
+                f'<p style="font-size:11px;color:var(--text-muted);margin-top:10px;">Clique no nome da turma para ver o detalhe por disciplina (com a média x̄). '
+                f'Percentual = alunos com nota acima de 5,0 ÷ alunos com nota na disciplina. Alunos AEE, transferidos e remanejados não entram.</p>'
+            )
+        titulo_card = "Todas as turmas"
+
+    content = f"""
+    <style>
+      @media print {{
+        .sidebar, .no-print, .sidebar-toggle, .mobile-topbar {{ display: none !important; }}
+        .main {{ margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: 100% !important; }}
+        .print-only {{ display: block !important; }}
+        @page {{ size: A4 landscape; margin: 12mm; }}
+        body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+      }}
+      .print-only {{ display: none; }}
+    </style>
+    <div class="print-only" style="padding:6px 0 12px;border-bottom:2px solid #1B4F8A;margin-bottom:14px;">
+        <div style="font-size:18px;font-weight:800;color:#1B4F8A;">E.M Walmir de Freitas Monteiro</div>
+        <div style="font-size:13px;color:#555;margin-top:2px;">Produtividade SME — Rendimento por Turma · {trimestre}º Trimestre {ano} · {titulo_card}</div>
+    </div>
+    <div class="page-header no-print">
+        <h1>📈 Produtividade SME</h1>
+        <p class="subtitle">Rendimento por turma — alunos acima de 5,0 em cada disciplina</p>
+    </div>
+    <div style="background:rgba(99,102,241,.10);border:1px solid rgba(99,102,241,.4);border-radius:10px;padding:10px 16px;margin-bottom:14px;display:flex;align-items:center;gap:10px;" class="no-print">
+        <span style="font-size:16px;">🔐</span>
+        <span style="font-size:12px;font-weight:600;">Área restrita à equipe gestora</span>
+    </div>
+    <form method="get" class="no-print" id="form-prod" style="background:var(--bg-subtle);padding:12px 16px;border-radius:8px;margin-bottom:16px;">
+        <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+            <label style="margin:0;">Período
+                <select id="sel-periodo" style="margin:0;">{trimestre_opts}</select>
+            </label>
+            <label style="margin:0;">Turma
+                <select name="turma_id" style="margin:0;" onchange="this.form.submit()">{turma_opts}</select>
+            </label>
+            <input type="hidden" name="trimestre" id="inp-tri" value="{trimestre}">
+            <input type="hidden" name="ano" id="inp-ano" value="{ano}">
+            <button type="button" class="btn" onclick="window.print()" style="margin:0 0 0 auto;">🖨️ Imprimir</button>
+        </div>
+    </form>
+    <div class="card" style="padding:16px;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+            <div style="background:linear-gradient(135deg,#34d399,#38bdf8);padding:4px 14px;border-radius:7px;font-size:12px;font-weight:700;color:#fff;letter-spacing:.05em;-webkit-print-color-adjust:exact;print-color-adjust:exact;">PRODUTIVIDADE SME</div>
+            <div style="font-size:12px;color:var(--text-muted);">Síntese de rendimento por turma — alunos acima de 5,0 · {titulo_card}</div>
+        </div>
+        {corpo}
+    </div>
+    <script>
+    document.getElementById('sel-periodo').addEventListener('change', function() {{
+        var p = this.value.split(':');
+        document.getElementById('inp-tri').value = p[0];
+        document.getElementById('inp-ano').value = p[1];
+        document.getElementById('form-prod').submit();
+    }});
+    </script>
+    """
+    return render_page("Produtividade SME", content, active="boletim-produtividade")
 
 
 @app.get("/boletim/boletim-individual", response_class=HTMLResponse)
