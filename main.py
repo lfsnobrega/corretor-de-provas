@@ -2475,6 +2475,24 @@ def init_db():
         FOREIGN KEY (questao_id) REFERENCES questoes(id)
     )""")
 
+    # Texto-base compartilhado por várias questões (13/10/2026)
+    conn.execute("""CREATE TABLE IF NOT EXISTS textos_compartilhados (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        titulo TEXT,
+        conteudo TEXT NOT NULL,
+        fonte TEXT,
+        imagem_caminho TEXT,
+        imagem_legenda TEXT,
+        imagem_fonte TEXT,
+        disciplina_id INTEGER,
+        ano TEXT,
+        criado_por_professor_id INTEGER,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+    cols_q_tc = {row[1] for row in conn.execute("PRAGMA table_info(questoes)").fetchall()}
+    if "texto_compartilhado_id" not in cols_q_tc:
+        conn.execute("ALTER TABLE questoes ADD COLUMN texto_compartilhado_id INTEGER")
+
     # Limpeza: remove vínculos de simulado que apontam para questões que não existem mais
     # (a exclusão de questão antiga não limpava esses vínculos e eles "ocupavam vaga" no bloco).
     conn.execute("DELETE FROM simulado_questoes WHERE questao_id NOT IN (SELECT id FROM questoes)")
@@ -6511,6 +6529,122 @@ def _preview_enunciado(enunciado: str, max_chars: int = 160) -> str:
     return _html.escape(texto[:max_chars]) + ("..." if len(texto) > max_chars else "")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# TEXTO-BASE COMPARTILHADO (13/10/2026): 1 texto (e/ou imagem) para várias questões.
+# O texto fica numa tabela própria (textos_compartilhados) e cada questão aponta para
+# ele por questoes.texto_compartilhado_id. Nas provas/simulados o texto aparece UMA vez
+# (na 1ª questão do conjunto que estiver no documento) e as demais só remetem a ele.
+# ═══════════════════════════════════════════════════════════════════════════
+def _texto_simples_para_html(s: str) -> str:
+    """Texto digitado numa caixa simples -> HTML básico: linha em branco separa parágrafos.
+    Se o professor já digitou tags HTML, passa pelo sanitizador padrão."""
+    import re as _re, html as _h
+    s = (s or "").replace("\r", "").strip()
+    if not s:
+        return ""
+    if "<" in s and ">" in s:
+        return _sanitizar_html_enunciado(s)
+    paras = [p.strip() for p in _re.split(r"\n\s*\n", s) if p.strip()]
+    return "".join("<p>" + _h.escape(p).replace("\n", "<br>") + "</p>" for p in paras)
+
+
+def _fmt_lista_questoes(nums) -> str:
+    nums = sorted(nums)
+    if len(nums) == 1:
+        return str(nums[0])
+    if len(nums) >= 3 and nums == list(range(nums[0], nums[0] + len(nums))):
+        return f"{nums[0]} a {nums[-1]}"
+    if len(nums) == 2:
+        return f"{nums[0]} e {nums[1]}"
+    return ", ".join(str(n) for n in nums[:-1]) + f" e {nums[-1]}"
+
+
+def _ctx_textos_compartilhados(conn, questao_ids):
+    """questao_ids = ids das questões NA ORDEM em que aparecem no documento (a posição
+    1, 2, 3... é o número da questão). Devolve o contexto usado para não repetir o texto."""
+    ids = list(questao_ids)
+    tid_por_q = {}
+    if ids:
+        ph = ",".join("?" * len(ids))
+        for r in conn.execute(f"SELECT id, texto_compartilhado_id AS tid FROM questoes WHERE id IN ({ph}) AND texto_compartilhado_id IS NOT NULL", ids).fetchall():
+            tid_por_q[r["id"]] = r["tid"]
+    grupos = {}
+    for n, qid in enumerate(ids, start=1):
+        t = tid_por_q.get(qid)
+        if t:
+            grupos.setdefault(t, []).append(n)
+    return {"tid": tid_por_q, "grupos": grupos, "vistos": {}}
+
+
+def _bloco_html_texto_compartilhado(t, cabecalho: str) -> str:
+    """HTML (com estilos embutidos, funciona em qualquer página/impressão) do texto-base."""
+    titulo = f'<div style="font-weight:700;margin-bottom:6px;">{t["titulo"]}</div>' if t["titulo"] else ""
+    fonte = f'<div style="font-size:10px;color:#555;margin-top:6px;font-style:normal;">Fonte: {t["fonte"]}</div>' if t["fonte"] else ""
+    img = ""
+    if t["imagem_caminho"]:
+        leg = f'<div style="font-size:10px;color:#555;">{t["imagem_legenda"]}</div>' if t["imagem_legenda"] else ""
+        fimg = f'<div style="font-size:10px;color:#555;">Fonte: {t["imagem_fonte"]}</div>' if t["imagem_fonte"] else ""
+        img = (f'<div style="margin-top:8px;"><img src="/{t["imagem_caminho"]}" alt="" '
+               f'style="width:10cm;max-width:100%;height:auto;max-height:10cm;object-fit:contain;display:block;">{leg}{fimg}</div>')
+    return (
+        '<div class="texto-compartilhado" style="border:1.5px solid #888;border-radius:6px;padding:10px 14px;margin:0 0 12px;'
+        'background:#fafafa;color:#111;line-height:1.5;">'
+        f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#555;margin-bottom:6px;">{cabecalho}</div>'
+        f'{titulo}<div>{t["conteudo"]}</div>{fonte}{img}</div>'
+    )
+
+
+def _html_texto_compartilhado(conn, qid, numero, ctx) -> str:
+    """Usado nas impressões/prova online: mostra o texto na 1ª questão do conjunto que
+    aparece no documento e, nas seguintes, só uma remissão ('use o texto da questão N')."""
+    tid = ctx["tid"].get(qid)
+    if not tid:
+        return ""
+    if tid in ctx["vistos"]:
+        return (f'<div style="font-size:11px;font-style:italic;color:#666;margin:0 0 8px;">'
+                f'Use o texto apresentado na questão {ctx["vistos"][tid]}.</div>')
+    t = conn.execute("SELECT * FROM textos_compartilhados WHERE id = ?", (tid,)).fetchone()
+    if not t:
+        return ""
+    ctx["vistos"][tid] = numero
+    nums = ctx["grupos"].get(tid, [numero])
+    if len(nums) > 1:
+        cab = f"Texto para as questões {_fmt_lista_questoes(nums)}"
+    else:
+        cab = "Texto-base"
+    return _bloco_html_texto_compartilhado(t, cab)
+
+
+def _html_texto_compartilhado_card(conn, q) -> str:
+    """Versão para o banco de questões (tela): sempre mostra o texto, com o aviso de que é compartilhado."""
+    tid = q["texto_compartilhado_id"] if "texto_compartilhado_id" in q.keys() else None
+    if not tid:
+        return ""
+    t = conn.execute("SELECT * FROM textos_compartilhados WHERE id = ?", (tid,)).fetchone()
+    if not t:
+        return ""
+    n = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE texto_compartilhado_id = ?", (tid,)).fetchone()["c"]
+    cab = (f'📖 Texto compartilhado por {n} questões · '
+           f'<a href="/textos-compartilhados/{tid}" style="color:inherit;">ver conjunto</a>')
+    return _bloco_html_texto_compartilhado(t, cab)
+
+
+def _limpar_texto_compartilhado_orfao(conn, tid):
+    """Se nenhuma questão usa mais o texto, apaga o texto (e a imagem dele)."""
+    if not tid:
+        return
+    em_uso = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE texto_compartilhado_id = ?", (tid,)).fetchone()["c"]
+    if em_uso == 0:
+        t = conn.execute("SELECT imagem_caminho FROM textos_compartilhados WHERE id = ?", (tid,)).fetchone()
+        if t and t["imagem_caminho"]:
+            try:
+                if os.path.exists(t["imagem_caminho"]):
+                    os.remove(t["imagem_caminho"])
+            except Exception:
+                pass
+        conn.execute("DELETE FROM textos_compartilhados WHERE id = ?", (tid,))
+
+
 def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False, pode_editar=True, autor_nome=None):
     """
     pode_editar: se False, esconde botões Editar/Excluir mesmo com mostrar_acoes=True.
@@ -6522,7 +6656,7 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
     habilidades = conn.execute("SELECT h.codigo FROM questao_habilidades qh JOIN habilidades_bncc h ON h.id = qh.habilidade_id WHERE qh.questao_id = ? ORDER BY h.codigo", (q["id"],)).fetchall()
     ano_q = q["ano"] if "ano" in q.keys() and q["ano"] else None
 
-    textos_html = ""
+    textos_html = _html_texto_compartilhado_card(conn, q)
     for t in textos:
         fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
         textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
@@ -7754,7 +7888,7 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
     content = (
         f'<div class="page-header"><h1>Banco de questões</h1>'
         f'<p class="subtitle">{subtitle}</p>'
-        f'<div class="page-actions"><a href="/questoes/nova" class="btn btn-primary">+ Nova questão</a> <a href="/questoes/importar-docx" class="btn">📄 Importar de Word</a></div></div>'
+        f'<div class="page-actions"><a href="/questoes/nova" class="btn btn-primary">+ Nova questão</a> <a href="/questoes/conjunto/nova" class="btn">📖 Questões com texto compartilhado</a> <a href="/questoes/importar-docx" class="btn">📄 Importar de Word</a></div></div>'
         f'{matriz_html}{filtros_html}{cards}{toggle_js}'
     )
     return render_page("Questões", content, active="questoes", head_extra=MATHJAX)
@@ -8395,6 +8529,413 @@ async def confirmar_importar_docx_questoes(request: Request, importacao_id: str)
         </div>
     """
     return HTMLResponse(render_page("Importação concluída", content, active="questoes"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QUESTÕES COM TEXTO COMPARTILHADO — telas (13/10/2026)
+# ═══════════════════════════════════════════════════════════════════════════
+TC_MAX_QUESTOES = 10   # máximo de questões digitadas de uma vez no formulário
+TC_VISIVEIS_INICIO = 3  # quantas aparecem abertas; as outras são reveladas pelo botão "+"
+
+
+def _pode_editar_texto_compartilhado(prof, t) -> bool:
+    if not prof:
+        return False
+    if prof.get("is_admin"):
+        return True
+    return t["criado_por_professor_id"] is not None and prof["id"] == t["criado_por_professor_id"]
+
+
+def _tc_erro(msg: str, voltar: str = "/questoes/conjunto/nova"):
+    return HTMLResponse(render_page(
+        "Não foi possível salvar",
+        '<div class="page-header"><h1>⚠️ Não foi possível salvar</h1></div>'
+        f'<div style="background:var(--red-bg);color:var(--red);border:1px solid var(--red);padding:16px;border-radius:6px;">{msg}</div>'
+        f'<div class="page-actions" style="margin-top:14px;"><a href="javascript:history.back()" class="btn btn-primary">← Voltar e corrigir</a>'
+        f'<a href="{voltar}" class="btn">Recomeçar</a></div>',
+        active="questoes"
+    ), status_code=400)
+
+
+@app.get("/questoes/conjunto/nova", response_class=HTMLResponse)
+def form_conjunto_texto(request: Request, texto_id: Optional[int] = None):
+    """Um texto-base + várias questões de uma vez. Com ?texto_id=N, acrescenta mais
+    questões a um texto que já existe."""
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    disciplinas = conn.execute("SELECT * FROM disciplinas WHERE nome NOT LIKE '%|%' ORDER BY nome").fetchall()
+    if not disciplinas:
+        disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    texto = None
+    if texto_id:
+        texto = conn.execute("SELECT * FROM textos_compartilhados WHERE id = ?", (texto_id,)).fetchone()
+        if not texto:
+            conn.close()
+            return RedirectResponse("/questoes", status_code=303)
+        if not _pode_editar_texto_compartilhado(prof, texto):
+            conn.close()
+            return _tc_erro("Só o autor do texto ou o administrador podem acrescentar questões a ele.", f"/textos-compartilhados/{texto_id}")
+    conn.close()
+
+    sel_disc = texto["disciplina_id"] if texto else None
+    sel_ano = texto["ano"] if texto else None
+    disc_opts = "".join(f'<option value="{d["id"]}"{" selected" if d["id"] == sel_disc else ""}>{d["nome"]}</option>' for d in disciplinas)
+    ano_opts = '<option value="">— Não definido —</option>' + "".join(
+        f'<option value="{a}"{" selected" if a == sel_ano else ""}>{a}</option>' for a in ANOS)
+
+    if texto:
+        bloco_texto = (
+            f'<input type="hidden" name="texto_id" value="{texto["id"]}">'
+            f'<div style="margin-bottom:6px;font-weight:600;">Texto-base (já cadastrado — será usado também nas novas questões)</div>'
+            + _bloco_html_texto_compartilhado(texto, "Texto-base")
+        )
+        disc_ano_html = f'<input type="hidden" name="disciplina_id" value="{sel_disc or ""}"><input type="hidden" name="ano" value="{sel_ano or ""}">'
+        if not sel_disc:
+            disc_ano_html = (f'<div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">'
+                             f'<label>Disciplina<select name="disciplina_id" required>{disc_opts}</select></label>'
+                             f'<label>Ano de escolaridade<select name="ano">{ano_opts}</select></label></div>')
+    else:
+        bloco_texto = f"""
+        <h3 style="margin:18px 0 8px;">1. Texto-base</h3>
+        <label>Título do texto <span style="font-weight:400;color:var(--text-muted);">(opcional)</span>
+            <input type="text" name="titulo" placeholder="Ex.: Cidades inteligentes">
+        </label>
+        <label>Texto <span style="font-weight:400;color:var(--red);font-size:12px;">* obrigatório (ou envie uma imagem)</span>
+            <textarea name="conteudo" rows="9" placeholder="Cole ou digite o texto. Uma linha em branco separa os parágrafos. Fórmulas: use $...$"></textarea>
+        </label>
+        <label>Fonte do texto <span style="font-weight:400;color:var(--text-muted);">(opcional)</span>
+            <input type="text" name="fonte" placeholder="Ex.: Autor, obra, site, data">
+        </label>
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+            <label>Imagem do texto <span style="font-weight:400;color:var(--text-muted);">(opcional — tabela, gráfico, mapa...)</span>
+                <input type="file" name="imagem" accept="image/*">
+            </label>
+            <label>Legenda<input type="text" name="imagem_legenda"></label>
+            <label>Fonte da imagem<input type="text" name="imagem_fonte"></label>
+        </div>
+        """
+        disc_ano_html = f"""
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
+            <label>Disciplina<select name="disciplina_id" required>{disc_opts}</select></label>
+            <label>Ano de escolaridade<select name="ano">{ano_opts}</select></label>
+        </div>"""
+
+    blocos_q = ""
+    for i in range(1, TC_MAX_QUESTOES + 1):
+        oculto = "" if i <= TC_VISIVEIS_INICIO else ' style="display:none;"'
+        req = " required" if i == 1 else ""
+        radios = "".join(
+            f'<label style="display:inline-flex;align-items:center;gap:4px;margin:0 12px 0 0;font-weight:400;">'
+            f'<input type="radio" name="q{i}_correta" value="{L}"{req} style="width:auto;margin:0;"> {L}</label>'
+            for L in "ABCD")
+        alts = "".join(
+            f'<label style="margin:0;">Alternativa {L}<input type="text" name="q{i}_{L.lower()}"{req}></label>'
+            for L in "ABCD")
+        blocos_q += f"""
+        <div class="tc-q" id="tc-q-{i}"{oculto}>
+            <div style="border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px;background:var(--card);">
+                <div style="font-weight:700;margin-bottom:8px;">Questão {i}</div>
+                <label>Enunciado<textarea name="q{i}_enunciado" rows="3" placeholder="O que se pergunta sobre o texto..."{req}></textarea></label>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;">{alts}</div>
+                <div style="margin-top:8px;font-size:13px;"><strong>Alternativa correta:</strong>&nbsp; {radios}</div>
+            </div>
+        </div>"""
+
+    n_ini = TC_VISIVEIS_INICIO
+    n_max = TC_MAX_QUESTOES
+    titulo_pg = "Mais questões para um texto existente" if texto else "Novas questões com texto compartilhado"
+    content = f"""
+        <div class="page-header">
+            <h1>📖 {titulo_pg}</h1>
+            <p class="subtitle">Um único texto-base para várias questões de múltipla escolha. Na prova, o texto aparece uma só vez.</p>
+        </div>
+        <form action="/questoes/conjunto/criar" method="post" enctype="multipart/form-data">
+            {disc_ano_html}
+            <label>Habilidades BNCC <span style="font-weight:400;color:var(--red);font-size:12px;">* obrigatório</span>
+                <input type="text" name="habilidades_codigos" placeholder="Códigos separados por vírgula. Ex.: EF09LP05, EF09LP06" required>
+                <small style="color:var(--text-muted);">Valem para todas as questões abaixo (depois você pode ajustar cada uma). <a href="/habilidades" target="_blank">Consultar lista</a></small>
+            </label>
+            {bloco_texto}
+            <h3 style="margin:22px 0 8px;">{"Novas questões" if texto else "2. Questões sobre o texto"}</h3>
+            {blocos_q}
+            <button type="button" class="btn" id="tc-mais" style="margin-bottom:16px;">➕ Adicionar outra questão</button>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary">💾 Salvar texto e questões</button>
+                <a href="/questoes" class="btn">Cancelar</a>
+            </div>
+        </form>
+        <script>
+        (function() {{
+            var visiveis = {n_ini}, max = {n_max};
+            var btn = document.getElementById('tc-mais');
+            btn.addEventListener('click', function() {{
+                if (visiveis >= max) return;
+                visiveis++;
+                document.getElementById('tc-q-' + visiveis).style.display = 'block';
+                if (visiveis >= max) btn.style.display = 'none';
+            }});
+        }})();
+        </script>
+    """
+    return render_page("Questões com texto compartilhado", content, active="questoes")
+
+
+@app.post("/questoes/conjunto/criar")
+async def criar_conjunto_texto(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    form = await request.form()
+
+    def campo(nome):
+        v = form.get(nome, "")
+        return v.strip() if isinstance(v, str) else ""
+
+    try:
+        disciplina_id = int(campo("disciplina_id"))
+    except ValueError:
+        return _tc_erro("Escolha a disciplina.")
+    ano = campo("ano") or None
+    habs = [h.strip().upper() for h in campo("habilidades_codigos").replace("\n", ",").split(",") if h.strip()]
+    if not habs:
+        return _tc_erro("Informe pelo menos uma habilidade BNCC.")
+
+    # valida as questões ANTES de gravar qualquer coisa
+    questoes = []
+    for i in range(1, TC_MAX_QUESTOES + 1):
+        enun = campo(f"q{i}_enunciado")
+        alts = {L: campo(f"q{i}_{L.lower()}") for L in "ABCD"}
+        correta = campo(f"q{i}_correta").upper()
+        if not enun and not any(alts.values()):
+            continue
+        if not enun:
+            return _tc_erro(f"A questão {i} tem alternativas, mas está sem enunciado.")
+        faltam = [L for L, t in alts.items() if not t]
+        if faltam:
+            return _tc_erro(f"A questão {i} está sem texto na(s) alternativa(s): {', '.join(faltam)}.")
+        if correta not in alts:
+            return _tc_erro(f"Marque a alternativa correta da questão {i}.")
+        questoes.append((enun, alts, correta))
+    if not questoes:
+        return _tc_erro("Cadastre pelo menos uma questão.")
+
+    conn = get_db()
+    texto_id_existente = campo("texto_id")
+    if texto_id_existente.isdigit():
+        texto = conn.execute("SELECT * FROM textos_compartilhados WHERE id = ?", (int(texto_id_existente),)).fetchone()
+        if not texto or not _pode_editar_texto_compartilhado(prof, texto):
+            conn.close()
+            return _tc_erro("Texto não encontrado ou sem permissão para acrescentar questões.", "/questoes")
+        tid = texto["id"]
+    else:
+        conteudo = _texto_simples_para_html(campo("conteudo"))
+        img = form.get("imagem")
+        tem_img = bool(img) and hasattr(img, "filename") and bool(img.filename)
+        if not conteudo and not tem_img:
+            conn.close()
+            return _tc_erro("Digite o texto-base ou envie uma imagem para ele.")
+        img_caminho = None
+        if tem_img:
+            dados = _redimensionar_imagem(await img.read(), max_width=1200)
+            nome = f"{uuid.uuid4().hex}.jpg"
+            with open(os.path.join(UPLOAD_DIR, nome), "wb") as f:
+                f.write(dados)
+            img_caminho = f"static/imagens/{nome}"
+        cur = conn.execute(
+            """INSERT INTO textos_compartilhados
+               (titulo, conteudo, fonte, imagem_caminho, imagem_legenda, imagem_fonte, disciplina_id, ano, criado_por_professor_id)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (campo("titulo") or None, conteudo or "", campo("fonte") or None, img_caminho,
+             campo("imagem_legenda") or None, campo("imagem_fonte") or None, disciplina_id, ano, prof["id"]))
+        tid = cur.lastrowid
+
+    ids_novos = []
+    for enun, alts, correta in questoes:
+        cur = conn.execute(
+            "INSERT INTO questoes (disciplina_id, enunciado, ano, criada_por_professor_id, tipo, texto_compartilhado_id) VALUES (?,?,?,?,?,?)",
+            (disciplina_id, _texto_simples_para_html(enun), ano, prof["id"], "multipla_escolha", tid))
+        qid = cur.lastrowid
+        ids_novos.append(qid)
+        for L in "ABCD":
+            conn.execute("INSERT INTO alternativas (questao_id, letra, texto, correta) VALUES (?,?,?,?)",
+                         (qid, L, _sanitizar_html_enunciado(alts[L]), 1 if L == correta else 0))
+        for codigo in habs:
+            ex = conn.execute("SELECT id FROM habilidades_bncc WHERE codigo = ?", (codigo,)).fetchone()
+            hid = ex["id"] if ex else conn.execute("INSERT INTO habilidades_bncc (codigo) VALUES (?)", (codigo,)).lastrowid
+            try:
+                conn.execute("INSERT INTO questao_habilidades (questao_id, habilidade_id) VALUES (?,?)", (qid, hid))
+            except sqlite3.IntegrityError:
+                pass
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/textos-compartilhados/{tid}?novo={len(ids_novos)}", status_code=303)
+
+
+@app.get("/textos-compartilhados/{tid}", response_class=HTMLResponse)
+def ver_texto_compartilhado(tid: int, request: Request, novo: Optional[int] = None):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    t = conn.execute("SELECT * FROM textos_compartilhados WHERE id = ?", (tid,)).fetchone()
+    if not t:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    questoes = conn.execute("""
+        SELECT q.id, q.enunciado, d.nome AS disc FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
+        WHERE q.texto_compartilhado_id = ? ORDER BY q.id
+    """, (tid,)).fetchall()
+    provas = conn.execute(
+        "SELECT id, titulo FROM provas WHERE criada_por_professor_id = ? ORDER BY id DESC LIMIT 15", (prof["id"],)
+    ).fetchall()
+    conn.close()
+    pode = _pode_editar_texto_compartilhado(prof, t)
+
+    aviso = (f'<div style="background:var(--green-bg);border:1px solid var(--green);color:var(--green);padding:10px 14px;border-radius:8px;margin-bottom:14px;font-weight:600;">'
+             f'✅ Salvo! {novo} questão(ões) vinculada(s) a este texto.</div>') if novo else ""
+    linhas = ""
+    for k, q in enumerate(questoes, start=1):
+        acoes = f'<a href="/questoes/{q["id"]}/editar" class="btn" style="padding:3px 10px;font-size:12px;">Editar</a>' if pode else ""
+        linhas += (f'<div style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--card);">'
+                   f'<strong style="color:var(--accent);min-width:22px;">{k}.</strong>'
+                   f'<span style="flex:1;font-size:13px;">{_preview_enunciado(q["enunciado"], max_chars=130)}</span>{acoes}</div>')
+    if not linhas:
+        linhas = '<div class="empty">Nenhuma questão usa este texto.</div>'
+
+    opts = "".join(f'<option value="{p["id"]}">{p["titulo"]}</option>' for p in provas)
+    add_prova = (
+        f'<form method="post" action="/textos-compartilhados/{tid}/adicionar-a-prova" style="margin:0;">'
+        f'<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">'
+        f'<label style="margin:0;flex:1;min-width:200px;">Adicionar TODAS as questões a uma atividade'
+        f'<select name="prova_id" required><option value="">— selecione —</option>{opts}</select></label>'
+        f'<button type="submit" class="btn btn-primary" style="margin:0;">Adicionar →</button></div></form>'
+    ) if provas and questoes else '<p style="font-size:13px;color:var(--text-muted);margin:0;">Você ainda não tem atividades. <a href="/provas/nova">Criar uma →</a></p>'
+
+    botoes = ""
+    if pode:
+        botoes = (f'<a href="/textos-compartilhados/{tid}/editar" class="btn">✏️ Editar texto</a> '
+                  f'<a href="/questoes/conjunto/nova?texto_id={tid}" class="btn">➕ Mais questões neste texto</a> ')
+    content = f"""
+        {aviso}
+        <div class="page-header"><h1>📖 Texto compartilhado</h1>
+            <p class="subtitle">{len(questoes)} questão(ões) usam este texto.</p>
+            <div class="page-actions">{botoes}<a href="/questoes" class="btn">← Banco de questões</a></div></div>
+        {_bloco_html_texto_compartilhado(t, "Texto-base")}
+        <h3 style="margin:18px 0 8px;">Questões deste texto</h3>
+        {linhas}
+        <div style="background:var(--bg-subtle);border:1px solid var(--border);border-radius:10px;padding:16px;margin-top:16px;">{add_prova}</div>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:10px;">Na prova impressa e no simulado, o texto aparece uma única vez, antes da primeira questão do conjunto, com a indicação das questões a que se refere.</p>
+    """
+    return render_page("Texto compartilhado", content, active="questoes", head_extra=MATHJAX)
+
+
+@app.post("/textos-compartilhados/{tid}/adicionar-a-prova")
+def adicionar_conjunto_a_prova(tid: int, request: Request, prova_id: int = Form(...)):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    qids = [r["id"] for r in conn.execute("SELECT id FROM questoes WHERE texto_compartilhado_id = ? ORDER BY id", (tid,)).fetchall()]
+    prox = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM prova_questoes WHERE prova_id = ?", (prova_id,)).fetchone()["n"]
+    for qid in qids:
+        if not conn.execute("SELECT id FROM prova_questoes WHERE prova_id = ? AND questao_id = ?", (prova_id, qid)).fetchone():
+            conn.execute("INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?,?,?)", (prova_id, qid, prox))
+            prox += 1
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/provas/{prova_id}", status_code=303)
+
+
+@app.get("/textos-compartilhados/{tid}/editar", response_class=HTMLResponse)
+def form_editar_texto_compartilhado(tid: int, request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    t = conn.execute("SELECT * FROM textos_compartilhados WHERE id = ?", (tid,)).fetchone()
+    n = conn.execute("SELECT COUNT(*) AS c FROM questoes WHERE texto_compartilhado_id = ?", (tid,)).fetchone()["c"]
+    conn.close()
+    if not t:
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_texto_compartilhado(prof, t):
+        return _tc_erro("Só o autor do texto ou o administrador podem editá-lo.", f"/textos-compartilhados/{tid}")
+    import re as _re, html as _h
+    # volta o HTML simples para texto com linhas em branco entre parágrafos
+    bruto = t["conteudo"] or ""
+    edit_txt = bruto.replace("</p><p>", "\n\n")
+    edit_txt = _re.sub(r"<br\s*/?>", "\n", edit_txt)
+    edit_txt = _re.sub(r"</?p>", "", edit_txt)
+    if "<" not in edit_txt:
+        edit_txt = _h.unescape(edit_txt)
+    img_atual = ""
+    if t["imagem_caminho"]:
+        img_atual = (f'<div style="margin:6px 0;"><img src="/{t["imagem_caminho"]}" style="max-width:240px;border:1px solid var(--border);border-radius:6px;"><br>'
+                     f'<label style="font-weight:400;"><input type="checkbox" name="remover_imagem" value="1" style="width:auto;"> remover esta imagem</label></div>')
+    esc = lambda v: _h.escape(v or "", quote=True)
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar texto compartilhado</h1>
+            <p class="subtitle">A alteração vale para as {n} questão(ões) que usam este texto.</p></div>
+        <form action="/textos-compartilhados/{tid}/editar" method="post" enctype="multipart/form-data">
+            <label>Título<input type="text" name="titulo" value="{esc(t['titulo'])}"></label>
+            <label>Texto<textarea name="conteudo" rows="12">{_h.escape(edit_txt)}</textarea></label>
+            <label>Fonte do texto<input type="text" name="fonte" value="{esc(t['fonte'])}"></label>
+            <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+                <label>Imagem {("(enviar outra substitui a atual)" if t["imagem_caminho"] else "")}<input type="file" name="imagem" accept="image/*"></label>
+                <label>Legenda<input type="text" name="imagem_legenda" value="{esc(t['imagem_legenda'])}"></label>
+                <label>Fonte da imagem<input type="text" name="imagem_fonte" value="{esc(t['imagem_fonte'])}"></label>
+            </div>
+            {img_atual}
+            <div class="page-actions"><button type="submit" class="btn btn-primary">💾 Salvar</button>
+                <a href="/textos-compartilhados/{tid}" class="btn">Cancelar</a></div>
+        </form>
+    """
+    return render_page("Editar texto compartilhado", content, active="questoes")
+
+
+@app.post("/textos-compartilhados/{tid}/editar")
+async def salvar_texto_compartilhado(tid: int, request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    t = conn.execute("SELECT * FROM textos_compartilhados WHERE id = ?", (tid,)).fetchone()
+    if not t:
+        conn.close()
+        return RedirectResponse("/questoes", status_code=303)
+    if not _pode_editar_texto_compartilhado(prof, t):
+        conn.close()
+        return _tc_erro("Só o autor do texto ou o administrador podem editá-lo.", f"/textos-compartilhados/{tid}")
+    form = await request.form()
+    g = lambda k: (form.get(k) if isinstance(form.get(k), str) else "").strip()
+    conteudo = _texto_simples_para_html(g("conteudo"))
+    img = form.get("imagem")
+    tem_img = bool(img) and hasattr(img, "filename") and bool(img.filename)
+    caminho = t["imagem_caminho"]
+    if g("remover_imagem") == "1" or tem_img:
+        if caminho:
+            try:
+                if os.path.exists(caminho):
+                    os.remove(caminho)
+            except Exception:
+                pass
+        caminho = None
+    if tem_img:
+        dados = _redimensionar_imagem(await img.read(), max_width=1200)
+        nome = f"{uuid.uuid4().hex}.jpg"
+        with open(os.path.join(UPLOAD_DIR, nome), "wb") as f:
+            f.write(dados)
+        caminho = f"static/imagens/{nome}"
+    if not conteudo and not caminho:
+        conn.close()
+        return _tc_erro("O texto não pode ficar vazio sem uma imagem.", f"/textos-compartilhados/{tid}/editar")
+    conn.execute(
+        """UPDATE textos_compartilhados SET titulo=?, conteudo=?, fonte=?, imagem_caminho=?, imagem_legenda=?, imagem_fonte=? WHERE id=?""",
+        (g("titulo") or None, conteudo, g("fonte") or None, caminho, g("imagem_legenda") or None, g("imagem_fonte") or None, tid))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/textos-compartilhados/{tid}", status_code=303)
 
 
 @app.post("/questoes/criar")
@@ -14462,11 +15003,12 @@ def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
             respostas_texto[r["questao_id"]] = r["resposta_texto"]
 
     questoes_html = ""
+    _ctx_tc = _ctx_textos_compartilhados(conn, [qq["id"] for qq in questoes])
     for idx, q in enumerate(questoes, start=1):
         textos = conn.execute("SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
         imagens = conn.execute("SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
 
-        textos_html = ""
+        textos_html = _html_texto_compartilhado(conn, q["id"], idx, _ctx_tc)
         for t in textos:
             fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
             textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
@@ -15257,6 +15799,14 @@ def form_editar_questao(id: int, request: Request):
 
     habs_preset = ", ".join(h["codigo"] for h in habilidades)
 
+    aviso_texto_compartilhado = ""
+    if "texto_compartilhado_id" in q.keys() and q["texto_compartilhado_id"]:
+        aviso_texto_compartilhado = (
+            '<div style="background:var(--accent-bg);border:1px solid var(--accent);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;">'
+            f'📖 Esta questão usa um <strong>texto compartilhado</strong> com outras questões. Para alterar o texto, '
+            f'<a href="/textos-compartilhados/{q["texto_compartilhado_id"]}">abra o conjunto</a> — a mudança vale para todas.</div>'
+        )
+
     total_habs = len(habs_existentes)
     link_catalogo = (
         f'<p class="muted-line" style="font-size:11px;">'
@@ -15420,6 +15970,7 @@ def form_editar_questao(id: int, request: Request):
         """
 
     content = f"""
+        {aviso_texto_compartilhado}
         <div class="page-header"><h1>Editar questão</h1>
             <p class="subtitle">{tipo_info['icone']} {tipo_info['label']} <span style="color:var(--text-muted); font-size:12px;">(o tipo não pode ser alterado depois da criação)</span></p>
         </div>
@@ -15638,7 +16189,10 @@ def deletar_questao(id: int, request: Request):
     conn.execute("DELETE FROM textos_apoio WHERE questao_id = ?", (id,))
     conn.execute("DELETE FROM imagens WHERE questao_id = ?", (id,))
     conn.execute("DELETE FROM questao_habilidades WHERE questao_id = ?", (id,))
+    _tid_q = conn.execute("SELECT texto_compartilhado_id FROM questoes WHERE id = ?", (id,)).fetchone()
     conn.execute("DELETE FROM questoes WHERE id = ?", (id,))
+    if _tid_q:
+        _limpar_texto_compartilhado_orfao(conn, _tid_q["texto_compartilhado_id"])
     conn.commit()
     conn.close()
     return RedirectResponse("/questoes", status_code=303)
@@ -16554,12 +17108,13 @@ def imprimir_prova(prova_id: int):
     """, (prova_id,)).fetchall()
 
     questoes_html = ""
+    _ctx_tc = _ctx_textos_compartilhados(conn, [qq["id"] for qq in questoes])
     for idx, q in enumerate(questoes, start=1):
         tipo_q = q["tipo"] if "tipo" in q.keys() and q["tipo"] else "multipla_escolha"
         textos = conn.execute("SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
         imagens = conn.execute("SELECT caminho, legenda, fonte FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
 
-        textos_html = ""
+        textos_html = _html_texto_compartilhado(conn, q["id"], idx, _ctx_tc)
         for t in textos:
             fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
             textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
@@ -21815,6 +22370,11 @@ def imprimir_simulado(sim_id: int):
     num_global = 0  # numeração corrida
     blocos_html = ""
     gabarito_data = []  # lista de (num, letra_correta, bloco_num)
+    _ids_ordem = []
+    for _b in blocos:
+        _ids_ordem += [r["questao_id"] for r in conn.execute(
+            "SELECT questao_id FROM simulado_questoes WHERE bloco_id = ? ORDER BY ordem", (_b["id"],)).fetchall()]
+    _ctx_tc = _ctx_textos_compartilhados(conn, _ids_ordem)
 
     for bloco in blocos:
         questoes_bloco = conn.execute("""
@@ -21861,7 +22421,7 @@ def imprimir_simulado(sim_id: int):
                 "SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem",
                 (q["id"],)
             ).fetchall()
-            textos_html = ""
+            textos_html = _html_texto_compartilhado(conn, q["id"], num_global, _ctx_tc)
             for t in textos:
                 textos_html += f'<blockquote>{t["conteudo"]}'
                 if t["fonte"]:
@@ -22280,6 +22840,11 @@ def preview_simulado(sim_id: int):
 
     num_global = 0
     blocos_html = ""
+    _ids_ordem = []
+    for _b in blocos:
+        _ids_ordem += [r["questao_id"] for r in conn.execute(
+            "SELECT questao_id FROM simulado_questoes WHERE bloco_id = ? ORDER BY ordem", (_b["id"],)).fetchall()]
+    _ctx_tc = _ctx_textos_compartilhados(conn, _ids_ordem)
     for bloco in blocos:
         questoes = conn.execute("""
             SELECT q.id, q.enunciado, q.tipo
@@ -22304,7 +22869,7 @@ def preview_simulado(sim_id: int):
                 "SELECT conteudo, fonte FROM textos_apoio WHERE questao_id = ? ORDER BY ordem",
                 (q["id"],)
             ).fetchall()
-            textos_html = ""
+            textos_html = _html_texto_compartilhado(conn, q["id"], num_global, _ctx_tc)
             for t in textos:
                 textos_html += f'<blockquote style="border-left:3px solid #aaa;padding:6px 12px;margin:0 0 8px;color:#333;font-style:italic;font-size:12px;background:#fafafa;">{t["conteudo"]}'
                 if t["fonte"]:
