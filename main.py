@@ -9310,18 +9310,64 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
     return render_page("Provas | Tarefas", content, active="provas")
 
 
+def _escopo_disciplinas_prof(conn, prof):
+    """Quais disciplinas o usuário pode ver ao escolher questões (prova, teste, simulado).
+    - Admin e gestão: sem restrição (restrito=False).
+    - Docente com disciplinas vinculadas no cadastro (tabela boletim_professor_turma):
+      só essas disciplinas e as suas subdisciplinas (ex.: 'Matemática' inclui 'Matemática | Álgebra').
+    - Docente SEM nenhuma disciplina vinculada: sem restrição (para não ficar com a lista vazia),
+      mas o campo 'sem_vinculo' fica True para a tela avisar a gestão.
+    Retorna {"restrito": bool, "ids": set, "nomes": [str], "sem_vinculo": bool}."""
+    livre = {"restrito": False, "ids": set(), "nomes": [], "sem_vinculo": False}
+    if not prof or prof.get("is_admin") or prof.get("is_gestor"):
+        return livre
+    base = conn.execute(
+        """SELECT DISTINCT d.id, d.nome FROM boletim_professor_turma bpt
+           JOIN disciplinas d ON d.id = bpt.disciplina_id
+           WHERE bpt.professor_id = ?""", (prof["id"],)).fetchall()
+    if not base:
+        livre["sem_vinculo"] = True
+        return livre
+    ids, nomes = set(), []
+    for d in base:
+        nomes.append(d["nome"])
+        ids.add(d["id"])
+        for sub in conn.execute("SELECT id FROM disciplinas WHERE nome LIKE ?", (f"{d['nome']} |%",)).fetchall():
+            ids.add(sub["id"])
+    return {"restrito": True, "ids": ids, "nomes": sorted(set(nomes)), "sem_vinculo": False}
+
+
+def _prof_pode_disciplina(conn, prof, disciplina_id):
+    """True se o usuário pode mexer com questões/blocos dessa disciplina."""
+    esc = _escopo_disciplinas_prof(conn, prof)
+    return (not esc["restrito"]) or (disciplina_id in esc["ids"])
+
+
 def _render_picker_questoes(conn, selected_ids=None):
     """Widget de seleção de questões com filtros, duas colunas e reordenação.
-    Usado tanto em criar quanto editar prova. JS serializa IDs em string CSV no campo 'questoes_serializadas'."""
+    Usado tanto em criar quanto editar prova. JS serializa IDs em string CSV no campo 'questoes_serializadas'.
+    Docentes só veem as questões das disciplinas que lecionam (as já escolhidas na prova sempre aparecem)."""
     if selected_ids is None:
         selected_ids = []
     import json
 
-    questoes_db = conn.execute("""
-        SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome
-        FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
-        ORDER BY d.nome, q.id
-    """).fetchall()
+    esc = _escopo_disciplinas_prof(conn, _current_prof_ctx.get())
+    if esc["restrito"]:
+        ph_d = ",".join("?" * len(esc["ids"]))
+        ids_sel = [int(x) for x in selected_ids]
+        ph_s = ",".join("?" * len(ids_sel)) if ids_sel else "NULL"
+        questoes_db = conn.execute(f"""
+            SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome
+            FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
+            WHERE q.disciplina_id IN ({ph_d}) OR q.id IN ({ph_s})
+            ORDER BY d.nome, q.id
+        """, list(esc["ids"]) + ids_sel).fetchall()
+    else:
+        questoes_db = conn.execute("""
+            SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome
+            FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
+            ORDER BY d.nome, q.id
+        """).fetchall()
 
     bncc_map = {}
     for row in conn.execute("""
@@ -9332,6 +9378,24 @@ def _render_picker_questoes(conn, selected_ids=None):
         bncc_map.setdefault(row["questao_id"], []).append(row["codigo"])
 
     disciplinas = conn.execute("SELECT * FROM disciplinas ORDER BY nome").fetchall()
+    if esc["restrito"]:
+        disciplinas = [d for d in disciplinas if d["id"] in esc["ids"]]
+        aviso_escopo = (
+            '<div style="background:var(--accent-bg); border-left:3px solid var(--accent); padding:8px 12px; '
+            'border-radius:6px; margin-bottom:14px; font-size:13px;">'
+            f'📚 Você está vendo apenas as questões de <strong>{", ".join(esc["nomes"])}</strong> '
+            '(as disciplinas cadastradas para você). Use os filtros abaixo para refinar por ano, '
+            'habilidade BNCC ou palavra-chave.</div>'
+        )
+    elif esc["sem_vinculo"]:
+        aviso_escopo = (
+            '<div style="background:var(--orange-bg); border-left:3px solid var(--orange); padding:8px 12px; '
+            'border-radius:6px; margin-bottom:14px; font-size:13px;">'
+            '⚠️ Seu cadastro ainda não tem disciplina vinculada, por isso aparecem as questões de todas as '
+            'disciplinas. Peça à gestão para vincular a(s) disciplina(s) que você leciona.</div>'
+        )
+    else:
+        aviso_escopo = ""
 
     questoes_payload = [
         {
@@ -9353,6 +9417,7 @@ def _render_picker_questoes(conn, selected_ids=None):
     anos_opts = '<option value="">Todos</option>' + "".join(f'<option value="{a}">{a}</option>' for a in ANOS)
 
     template = r'''
+__AVISO_ESCOPO__
 <input type="hidden" name="questoes_serializadas" id="questoes_serializadas" value="">
 
 <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap:20px; align-items:flex-start;">
@@ -9366,6 +9431,10 @@ def _render_picker_questoes(conn, selected_ids=None):
             <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:8px; margin-top:8px;">
                 <label style="margin:0;">BNCC<input type="text" id="filtro-bncc" placeholder="EF06MA"></label>
                 <label style="margin:0;">Buscar<input type="text" id="filtro-q" placeholder="palavra-chave no enunciado"></label>
+            </div>
+            <div style="margin-top:8px; display:flex; gap:10px; align-items:center; font-size:12px; color:var(--text-muted);">
+                <span id="picker-resultados"></span>
+                <button type="button" class="btn" style="padding:2px 10px; font-size:12px;" onclick="limparFiltrosPicker()">Limpar filtros</button>
             </div>
         </div>
         <div id="picker-disponiveis" style="max-height:600px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; padding:8px;"></div>
@@ -9384,6 +9453,10 @@ function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function semAcento(s) {
+    return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
 function renderPicker() {
     const disc = document.getElementById('filtro-disciplina').value;
     const ano = document.getElementById('filtro-ano').value;
@@ -9394,11 +9467,13 @@ function renderPicker() {
         if (disc && quest.disciplina !== disc) return false;
         if (ano && quest.ano !== ano) return false;
         if (bncc && !quest.bnccs.some(function(c){ return c.includes(bncc); })) return false;
-        if (q && !quest.enunciado.toLowerCase().includes(q)) return false;
+        if (q && !semAcento(quest.enunciado).includes(semAcento(q))) return false;
         return true;
     });
 
     const dispDiv = document.getElementById('picker-disponiveis');
+    const resEl = document.getElementById('picker-resultados');
+    if (resEl) resEl.textContent = filtradas.length + ' de ' + TODAS_QUESTOES.length + ' questão(ões)';
     if (filtradas.length === 0) {
         dispDiv.innerHTML = '<p style="color:var(--text-muted); padding:12px;">Nenhuma questão com esses filtros.</p>';
     } else {
@@ -9454,6 +9529,13 @@ function renderPicker() {
     document.getElementById('questoes_serializadas').value = selecionadas.join(',');
 }
 
+function limparFiltrosPicker() {
+    document.getElementById('filtro-disciplina').value = '';
+    document.getElementById('filtro-ano').value = '';
+    document.getElementById('filtro-bncc').value = '';
+    document.getElementById('filtro-q').value = '';
+    renderPicker();
+}
 function adicionar(id) { if (!selecionadas.includes(id)) selecionadas.push(id); renderPicker(); }
 function remover(id) { selecionadas = selecionadas.filter(function(x){ return x !== id; }); renderPicker(); }
 function mover(idx, delta) {
@@ -9477,7 +9559,8 @@ renderPicker();
         .replace("__QUESTOES_JSON__", questoes_json)
         .replace("__SELECTED_JSON__", selected_json)
         .replace("__DISC_OPTS__", disciplinas_opts)
-        .replace("__ANOS_OPTS__", anos_opts))
+        .replace("__ANOS_OPTS__", anos_opts)
+        .replace("__AVISO_ESCOPO__", aviso_escopo))
 
 
 @app.get("/provas/nova", response_class=HTMLResponse)
@@ -9595,7 +9678,7 @@ def ver_prova(prova_id: int):
     submeter_btn = ""
     if eh_dono and status_rev in ("rascunho", "devolvida"):
         submeter_btn = f'<form method="post" action="/provas/{prova_id}/submeter" style="margin:0;" onsubmit="return confirm(\'Submeter para revisão da gestão?\')"><button type="submit" class="btn btn-primary" style="background:var(--orange); border-color:var(--orange);">📤 Submeter para revisão</button></form>'
-    imprimir_btn = f'<a href="/provas/{prova_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Imprimir prova</a>' if (status_rev == "aprovada" or eh_gestor_ou_admin) else ""
+    imprimir_btn = f'<a href="/provas/{prova_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Imprimir prova</a><a href="/provas/{prova_id}/imprimir?caixa_alta=1" class="btn" target="_blank">🔠 Imprimir em CAIXA ALTA</a>' if (status_rev == "aprovada" or eh_gestor_ou_admin) else ""
     acoes_html = f'<div class="page-actions" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">{imprimir_btn}{comparativo_btn}{submeter_btn}{status_badge_html}{obs_html}</div>'
     content = f'<div class="page-header"><h1>{prova["titulo"]}</h1><p class="subtitle">{len(questoes)} questões</p>{desc_html}{acoes_html}</div><hr>{questoes_html}'
     return render_page(prova["titulo"], content, active="provas", head_extra=MATHJAX)
@@ -9608,61 +9691,64 @@ def form_editar_prova(id: int):
     if not prova:
         conn.close()
         return RedirectResponse("/provas", status_code=303)
-    
-    todas_questoes = conn.execute("""
-        SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome 
-        FROM questoes q 
-        JOIN disciplinas d ON d.id = q.disciplina_id 
-        ORDER BY d.nome, q.id
-    """).fetchall()
-    
-    selecionadas = [r["questao_id"] for r in conn.execute("SELECT questao_id FROM prova_questoes WHERE prova_id = ?", (id,)).fetchall()]
-    conn.close()
-    
-    questoes_html = ""
-    for q in todas_questoes:
-        checked = " checked" if q["id"] in selecionadas else ""
-        resumo_enunciado = q["enunciado"][:110] + "..." if len(q["enunciado"]) > 110 else q["enunciado"]
-        questoes_html += f"""
-        <div style="margin-bottom:10px; display:flex; align-items:flex-start; gap:10px;">
-            <input type="checkbox" name="questoes_ids" value="{q["id"]}"{checked} id="q_{q["id"]}" style="width:auto; margin-top:4px;">
-            <label for="q_{q["id"]}" style="font-weight:normal; margin:0; cursor:pointer;">
-                <span class="badge" style="margin-right:4px;">{q["disciplina_nome"]}</span> 
-                <strong>(ID #{q["id"]})</strong> - {resumo_enunciado}
-            </label>
-        </div>
-        """
 
-    content = f"""
-    <div class="page-header"><h1>Editar Prova: {prova["titulo"]}</h1></div>
-    <form action="/provas/{id}/editar" method="post">
-        <label>Título da Prova
-            <input type="text" name="titulo" value="{prova["titulo"]}" required>
-        </label>
-        
-        <fieldset style="margin-top:20px;">
-            <legend>Selecione as Questões Integrantes</legend>
-            {questoes_html if questoes_html else '<p class="empty">Nenhuma questão encontrada para vincular.</p>'}
-        </fieldset>
-        
-        <div class="page-actions" style="margin-top:20px;">
-            <button type="submit" class="btn btn-primary">Salvar Alterações</button>
-            <a href="/provas" class="btn">Cancelar</a>
-        </div>
-    </form>
-    """
-    return render_page("Editar Prova", content, active="provas")
+    selecionadas = [r["questao_id"] for r in conn.execute(
+        "SELECT questao_id FROM prova_questoes WHERE prova_id = ? ORDER BY ordem", (id,)).fetchall()]
+    # Mesmo seletor da tela "Nova prova": filtros de disciplina, ano, BNCC e palavra-chave,
+    # e docentes só veem as questões das disciplinas que lecionam.
+    picker = _render_picker_questoes(conn, selected_ids=selecionadas)
+    conn.close()
+
+    descricao = prova["descricao"] or ""
+    content = (
+        f'<div class="page-header"><h1>Editar: {prova["titulo"]}</h1></div>'
+        f'<form action="/provas/{id}/editar" method="post">'
+        f'<label>Título<input type="text" name="titulo" value="{html.escape(prova["titulo"], quote=True)}" required></label>'
+        f'<label>Descrição (opcional)<textarea name="descricao" rows="2">{html.escape(descricao)}</textarea></label>'
+        f'{picker}'
+        '<div class="page-actions" style="margin-top:20px;">'
+        '<button type="submit" class="btn btn-primary">Salvar alterações</button>'
+        '<a href="/provas" class="btn">Cancelar</a></div>'
+        '</form>'
+    )
+    return render_page("Editar Prova", content, active="provas", head_extra=MATHJAX_EDIT)
 
 
 @app.post("/provas/{id}/editar")
-def atualizar_prova(id: int, titulo: str = Form(...), questoes_ids: List[int] = Form([])):
+def atualizar_prova(id: int, titulo: str = Form(...), descricao: str = Form(""),
+                    questoes_serializadas: str = Form(""), questoes_ids: List[int] = Form([])):
+    # Novo seletor envia 'questoes_serializadas' (ids separados por vírgula, na ordem escolhida);
+    # 'questoes_ids' continua aceito por compatibilidade.
+    novos = []
+    for x in questoes_serializadas.split(","):
+        x = x.strip()
+        if x.isdigit():
+            novos.append(int(x))
+    if not novos:
+        novos = list(questoes_ids)
+    if not novos:
+        # nada selecionado: não apaga a prova, volta para a edição
+        return RedirectResponse(f"/provas/{id}/editar", status_code=303)
+
     conn = get_db()
-    conn.execute("UPDATE provas SET titulo = ? WHERE id = ?", (titulo.strip(), id))
+    prof = _current_prof_ctx.get()
+    esc = _escopo_disciplinas_prof(conn, prof)
+    if esc["restrito"]:
+        # docente: só aceita questões das suas disciplinas ou que já estavam na prova
+        ja = {r["questao_id"] for r in conn.execute("SELECT questao_id FROM prova_questoes WHERE prova_id = ?", (id,)).fetchall()}
+        ok = {r["id"] for r in conn.execute(
+            f"SELECT id FROM questoes WHERE disciplina_id IN ({','.join('?' * len(esc['ids']))})", list(esc["ids"])).fetchall()}
+        novos = [q for q in novos if q in ok or q in ja]
+    vistos, unicos = set(), []
+    for q in novos:
+        if q not in vistos:
+            vistos.add(q); unicos.append(q)
+
+    conn.execute("UPDATE provas SET titulo = ?, descricao = ? WHERE id = ?",
+                 (titulo.strip(), descricao.strip() or None, id))
     conn.execute("DELETE FROM prova_questoes WHERE prova_id = ?", (id,))
-    
-    for idx, q_id in enumerate(questoes_ids):
+    for idx, q_id in enumerate(unicos):
         conn.execute("INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?, ?, ?)", (id, q_id, idx))
-        
     conn.commit()
     conn.close()
     return RedirectResponse("/provas", status_code=303)
@@ -14238,7 +14324,7 @@ def painel_gestao(request: Request, status: Optional[str] = "submetida", prof_id
         badge = _status_badge_html(p["status_revisao"])
         obs_html = f'<div style="margin-top:6px; background:var(--orange-bg); border-left:3px solid var(--orange); padding:6px 10px; border-radius:4px; font-size:12px;"><strong>Obs:</strong> {p["obs_gestao"]}</div>' if p["obs_gestao"] else ""
         revisor = f'<span style="font-size:11px; color:var(--text-muted);">Revisado por {p["revisor_nome"]} em {(p["revisado_em"] or "")[:10]}</span>' if p["revisor_nome"] else ""
-        acoes = f'<a href="/provas/{p["id"]}" class="btn" style="padding:5px 10px; font-size:12px;">👁️ Ver</a><a href="/provas/{p["id"]}/imprimir" class="btn" style="padding:5px 10px; font-size:12px;" target="_blank">🖨️ PDF</a>'
+        acoes = f'<a href="/provas/{p["id"]}" class="btn" style="padding:5px 10px; font-size:12px;">👁️ Ver</a><a href="/provas/{p["id"]}/imprimir" class="btn" style="padding:5px 10px; font-size:12px;" target="_blank">🖨️ PDF</a><a href="/provas/{p["id"]}/imprimir?caixa_alta=1" class="btn" style="padding:5px 10px; font-size:12px;" target="_blank">🔠 PDF CAIXA ALTA</a>'
         if p["status_revisao"] == "submetida":
             acoes += f'''<form method="post" action="/provas/{p["id"]}/aprovar" style="margin:0; display:inline-flex; gap:4px; align-items:center;">
                 <input type="text" name="obs" placeholder="Obs. opcional..." style="width:160px; padding:4px 8px; font-size:12px; margin:0;">
@@ -14920,6 +15006,7 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
         acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/cartao-resposta" class="btn btn-primary">📄 Cartões Resposta (PDF)</a>'
         acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/escanear" class="btn btn-primary" style="background:var(--green); border-color:var(--green);">📷 Escanear cartão</a>'
         acoes_btn += f'<a href="/provas/{apl["prova_id"]}/imprimir" class="btn" target="_blank">🖨️ Imprimir prova</a>'
+        acoes_btn += f'<a href="/provas/{apl["prova_id"]}/imprimir?caixa_alta=1" class="btn" target="_blank">🔠 Imprimir em CAIXA ALTA</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/analise" class="btn">📈 Análise pedagógica</a>'
     acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/exportar" class="btn">📊 Exportar Planilha Excel</a>'
     if apl["modo"] == "online":
@@ -17153,9 +17240,81 @@ def comparativo_prova(prova_id: int):
 #  FASE C1: PDF DA PROVA E CARTÃO RESPOSTA
 # ==========================================
 
+# ── OPÇÃO "TUDO EM CAIXA ALTA" PARA TELAS DE IMPRESSÃO (prova, atividade, preview) ──
+# Strings comuns (sem f-string): inseridas nas páginas via {CAIXA_ALTA_CSS} / {CAIXA_ALTA_JS}.
+# Fórmulas (MathJax), unidades depois de número, pH e fórmulas químicas ficam como estão.
+CAIXA_ALTA_CSS = """
+        body.caixa-alta, body.caixa-alta * { text-transform: uppercase; }
+        body.caixa-alta .manter-caixa, body.caixa-alta mjx-container, body.caixa-alta mjx-container * { text-transform: none !important; }
+"""
+CAIXA_ALTA_JS = r"""
+var _caixaAltaMarcada = false;
+function marcarTrechosPreservados() {
+    if (_caixaAltaMarcada) return;
+    _caixaAltaMarcada = true;
+    var re = /(\d(?:[\d.,]*\d)?\s?)(km²|km³|m²|m³|km\/h|m\/s|km|cm|mm|dm|hm|ha|kg|mg|g|mL|ml|dL|cL|kL|L|min|h|s|ms|Hz|kHz|MHz|GHz|kW|W|kJ|J|cal|kcal|Pa|kPa|N|V|A|mol|K|°C|°F|m)(?![A-Za-zÀ-ÿ])|\bpH\b|\b(?:[A-Z][a-z]?\d*){2,}\b/g;
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+        acceptNode: function(n) {
+            var p = n.parentNode;
+            if (!p || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+            if (p.closest && p.closest('script,style,mjx-container,.no-print,.actions,.manter-caixa')) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+        }
+    });
+    var nos = [];
+    while (walker.nextNode()) nos.push(walker.currentNode);
+    nos.forEach(function(n) {
+        var t = n.nodeValue, m, ultimo = 0, achou = false, frag = document.createDocumentFragment();
+        re.lastIndex = 0;
+        while ((m = re.exec(t)) !== null) {
+            if (m[0].length === 0) { re.lastIndex++; continue; }
+            achou = true;
+            var ini = m.index, fim = m.index + m[0].length;
+            if (m[1] !== undefined) ini += m[1].length;
+            if (ini > ultimo) frag.appendChild(document.createTextNode(t.slice(ultimo, ini)));
+            var sp = document.createElement('span');
+            sp.className = 'manter-caixa';
+            sp.textContent = t.slice(ini, fim);
+            frag.appendChild(sp);
+            ultimo = fim;
+        }
+        if (achou) {
+            if (ultimo < t.length) frag.appendChild(document.createTextNode(t.slice(ultimo)));
+            n.parentNode.replaceChild(frag, n);
+        }
+    });
+}
+function _depoisDoMathJax(fn) {
+    if (window.MathJax && MathJax.startup && MathJax.startup.promise) {
+        MathJax.startup.promise.then(function() { setTimeout(fn, 100); });
+    } else {
+        setTimeout(fn, 1500);
+    }
+}
+function alternarCaixaAlta(ligado) {
+    document.body.classList.toggle('caixa-alta', ligado);
+    try {
+        var u = new URL(window.location.href);
+        if (ligado) u.searchParams.set('caixa_alta', '1'); else u.searchParams.delete('caixa_alta');
+        window.history.replaceState(null, '', u.toString());
+    } catch (e) {}
+    if (ligado) _depoisDoMathJax(marcarTrechosPreservados);
+}
+function imprimirComCaixaAlta() {
+    if (document.body.classList.contains('caixa-alta')) marcarTrechosPreservados();
+    window.print();
+}
+document.addEventListener('DOMContentLoaded', function() {
+    if (document.body.classList.contains('caixa-alta')) _depoisDoMathJax(marcarTrechosPreservados);
+});
+"""
+
+
 @app.get("/provas/{prova_id}/imprimir", response_class=HTMLResponse)
-def imprimir_prova(prova_id: int):
-    """Versão da prova otimizada pra impressão (sem gabarito visível)."""
+def imprimir_prova(prova_id: int, caixa_alta: Optional[int] = None):
+    """Versão da prova otimizada pra impressão (sem gabarito visível).
+    ?caixa_alta=1 imprime tudo em maiúsculas (preservando fórmulas e unidades).
+    Também é a tela usada para imprimir as atividades/avaliações aplicadas pelos docentes."""
     conn = get_db()
     prova = conn.execute("SELECT * FROM provas WHERE id = ?", (prova_id,)).fetchone()
     if not prova:
@@ -17291,11 +17450,15 @@ def imprimir_prova(prova_id: int):
             body {{ padding: 0; max-width: 100%; }}
             .no-print {{ display: none !important; }}
         }}
+        {CAIXA_ALTA_CSS}
     </style>
 </head>
-<body>
-    <div class="actions no-print">
-        <button onclick="window.print()" class="btn">🖨️ Imprimir / Salvar PDF</button>
+<body class="{'caixa-alta' if caixa_alta else ''}">
+    <div class="actions no-print" style="align-items:center;">
+        <button onclick="imprimirComCaixaAlta()" class="btn">🖨️ Imprimir / Salvar PDF</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="chk-caixa-alta" onchange="alternarCaixaAlta(this.checked)" {'checked' if caixa_alta else ''}> 🔠 Tudo em CAIXA ALTA
+        </label>
         <a href="/provas/{prova_id}" class="btn btn-secondary">← Voltar</a>
     </div>
     <div class="inst-header">
@@ -17317,6 +17480,7 @@ def imprimir_prova(prova_id: int):
         </div>
     </div>
     {questoes_html}
+<script>{CAIXA_ALTA_JS}</script>
 </body>
 </html>""")
 
@@ -21443,6 +21607,7 @@ def ver_simulado(sim_id: int):
         WHERE b.simulado_id = ?
         ORDER BY b.numero
     """, (sim_id,)).fetchall()
+    esc_prof = _escopo_disciplinas_prof(conn, prof)
     conn.close()
 
     vpq = _valor_por_questao(sim["pontuacao_total"])
@@ -21479,7 +21644,9 @@ def ver_simulado(sim_id: int):
         btn_bloco = ""
         # Qualquer professor pode contribuir para o bloco da sua disciplina
         pode_contribuir = sim["status"] == "aberto" and b["status"] in ("em_contribuicao", "completo")
-        if pode_contribuir and not is_admin:
+        if pode_contribuir and not is_admin and esc_prof["restrito"] and b["disciplina_id"] not in esc_prof["ids"]:
+            btn_bloco = '<span style="font-size:12px; color:var(--text-muted);">Outra disciplina</span>'
+        elif pode_contribuir and not is_admin:
             btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn btn-primary" style="font-size:12px; padding:5px 12px;">✏️ Contribuir</a>'
         elif is_admin:
             btn_bloco = f'<a href="/simulados/{sim_id}/blocos/{b["id"]}/contribuir" class="btn" style="font-size:12px; padding:5px 12px;">⚙️ Gerenciar</a>'
@@ -22121,7 +22288,8 @@ def _sanear_bloco_simulado(conn, bloco_id: int):
 
 
 @app.get("/simulados/{sim_id}/blocos/{bloco_id}/contribuir", response_class=HTMLResponse)
-def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = None, q: Optional[str] = None, aviso: Optional[str] = None):
+def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = None, q: Optional[str] = None, aviso: Optional[str] = None,
+                     sub: Optional[str] = None, bncc: Optional[str] = None):
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
@@ -22136,6 +22304,15 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     if not sim or not bloco:
         conn.close()
         return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
+
+    # Docente só trabalha nos blocos das disciplinas que leciona
+    if not _prof_pode_disciplina(conn, prof, bloco["disciplina_id"]):
+        conn.close()
+        return render_page("Bloco de outra disciplina", f'''
+            <div class="page-header"><h1>Bloco de outra disciplina</h1></div>
+            <div class="empty"><p>O Bloco {bloco["numero"]} é de <strong>{bloco["disciplina_nome"]}</strong>, que não está entre as
+            disciplinas cadastradas para você. Se isso estiver errado, peça à gestão para ajustar o seu cadastro.</p>
+            <a href="/simulados/{sim_id}" class="btn">← Voltar ao simulado</a></div>''', active="simulados")
 
     _sanear_bloco_simulado(conn, bloco_id)
     bloco = conn.execute("""
@@ -22166,10 +22343,16 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     disc_pai_nome = disc_pai["nome"] if disc_pai else ""
     # Buscar subdisciplinas (ex: "Matemática" inclui "Matemática | Álgebra" e "Matemática | Geometria")
     subdisciplinas = conn.execute(
-        "SELECT id FROM disciplinas WHERE id = ? OR nome LIKE ?",
+        "SELECT id, nome FROM disciplinas WHERE id = ? OR nome LIKE ? ORDER BY nome",
         (bloco["disciplina_id"], f"{disc_pai_nome} |%")
     ).fetchall()
     disc_ids = [d["id"] for d in subdisciplinas]
+    # Filtro opcional por subdisciplina (ex.: Matemática | Geometria)
+    sub_id = int(sub) if (sub or "").strip().isdigit() else None
+    if sub_id and sub_id in disc_ids:
+        disc_ids = [sub_id]
+    else:
+        sub_id = None
     placeholders = ",".join("?" * len(disc_ids))
 
     where_q = [f"q.disciplina_id IN ({placeholders})", "q.tipo = 'multipla_escolha'"]
@@ -22177,16 +22360,26 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
     if ano_label_q:
         where_q.append("q.ano = ?")
         params_q.append(ano_label_q)
-    if q:
-        where_q.append("q.enunciado LIKE ?")
-        params_q.append(f"%{q}%")
+    if q and q.strip():
+        where_q.append("(q.enunciado LIKE ? OR EXISTS (SELECT 1 FROM alternativas a WHERE a.questao_id = q.id AND a.texto LIKE ?))")
+        params_q.extend([f"%{q.strip()}%", f"%{q.strip()}%"])
+    bncc_txt = (bncc or "").strip().upper()
+    if bncc_txt:
+        where_q.append("""q.id IN (SELECT qh.questao_id FROM questao_habilidades qh
+                          JOIN habilidades_bncc h ON h.id = qh.habilidade_id WHERE UPPER(h.codigo) LIKE ?)""")
+        params_q.append(f"%{bncc_txt}%")
+    if ids_no_bloco:
+        where_q.append(f"q.id NOT IN ({','.join('?' * len(ids_no_bloco))})")
+        params_q.extend(sorted(ids_no_bloco))
     wc = " AND ".join(where_q)
+    total_banco = conn.execute(f"SELECT COUNT(*) AS c FROM questoes q WHERE {wc}", params_q).fetchone()["c"]
     questoes_banco = conn.execute(f"""
         SELECT q.id, q.enunciado, q.ano, d.nome AS disc_nome
         FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
         WHERE {wc}
         ORDER BY d.nome, q.id DESC LIMIT 100
     """, params_q).fetchall()
+    tem_filtro_banco = bool((q or "").strip() or bncc_txt or sub_id)
 
 
     n_add = len(questoes_bloco)
@@ -22258,7 +22451,19 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             </div>
         </form>"""
     if not banco_items:
-        banco_items = '<div class="empty">Nenhuma questão disponível.</div>'
+        banco_items = '<div class="empty">Nenhuma questão disponível' + (' com esses filtros.' if tem_filtro_banco else '.') + '</div>'
+
+    sub_select_html = ""
+    if len(subdisciplinas) > 1:
+        sub_select_html = (
+            '<label style="margin:0; flex:1 1 150px;">Subdisciplina<select name="sub" style="margin:0;">'
+            '<option value="">Todas</option>' +
+            "".join(
+                f'<option value="{d["id"]}"{" selected" if sub_id == d["id"] else ""}>'
+                f'{html.escape(d["nome"].replace(disc_pai_nome, "").strip(" |") or d["nome"])}</option>'
+                for d in subdisciplinas if d["nome"] != disc_pai_nome
+            ) + '</select></label>'
+        )
 
     # Botão finalizar
     btn_finalizar = ""
@@ -22281,6 +22486,7 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
         "cheio": "⚠️ Este bloco já está com todas as questões. Remova uma (✕) para poder adicionar outra.",
         "repetida": "⚠️ Essa questão já está neste bloco.",
         "inexistente": "⚠️ Essa questão não existe mais no banco (foi excluída). Atualize a lista.",
+        "outra_disciplina": "⚠️ Essa questão é de uma disciplina que não está no seu cadastro e não pode ser adicionada.",
     }
     aviso_html = (f'<div style="background:var(--orange-bg);border:1px solid var(--orange);color:var(--orange);'
                   f'padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:13px;">{avisos_txt[aviso]}</div>'
@@ -22299,13 +22505,23 @@ def contribuir_bloco(sim_id: int, bloco_id: int, disciplina: Optional[str] = Non
             </div>
             <div>
                 <h3 style="margin-bottom:10px;">Banco de questões</h3>
-                <form method="get" style="margin-bottom:10px;">
-                    <input type="hidden" name="disciplina" value="{bloco['disciplina_id']}">
-                    <div style="display:flex; gap:6px;">
-                        <input type="search" name="q" value="{q or ''}" placeholder="Buscar no banco..." style="margin:0; flex:1;">
-                        <button type="submit" class="btn btn-primary" style="margin:0;">🔍</button>
+                <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">
+                    Mostrando só questões de <strong>{disc_pai_nome}</strong>{f' · <strong>{ano_label_q}</strong>' if ano_label_q else ''} (múltipla escolha).
+                </div>
+                <form method="get" style="margin-bottom:10px; background:var(--bg-subtle); padding:10px; border-radius:6px;">
+                    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end;">
+                        <label style="margin:0; flex:2 1 160px;">Palavra-chave
+                            <input type="search" name="q" value="{html.escape(q or '', quote=True)}" placeholder="no enunciado ou nas alternativas" style="margin:0;">
+                        </label>
+                        <label style="margin:0; flex:1 1 110px;">Habilidade BNCC
+                            <input type="text" name="bncc" value="{html.escape(bncc or '', quote=True)}" placeholder="EF09MA" style="margin:0;">
+                        </label>
+                        {sub_select_html}
+                        <button type="submit" class="btn btn-primary" style="margin:0;">🔍 Filtrar</button>
+                        <a href="/simulados/{sim_id}/blocos/{bloco_id}/contribuir" class="btn" style="margin:0;">Limpar</a>
                     </div>
                 </form>
+                <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">{total_banco} questão(ões) disponível(is){' (mostrando as 100 mais recentes)' if total_banco > 100 else ''}.</div>
                 {banco_items}
             </div>
         </div>
@@ -22339,12 +22555,20 @@ def adicionar_questao_bloco(sim_id: int, bloco_id: int, questao_id: int = Form(.
     conn = get_db()
     aviso = ""
     bloco = conn.execute("SELECT * FROM simulado_blocos WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id)).fetchone()
+    if bloco and not _prof_pode_disciplina(conn, prof, bloco["disciplina_id"]):
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
     if bloco:
         # Conta só questões que realmente existem (ignora vínculos órfãos) e corrige a ordem
         n_atual = _sanear_bloco_simulado(conn, bloco_id)
         existe = conn.execute("SELECT id FROM questoes WHERE id = ?", (questao_id,)).fetchone()
         ja = conn.execute("SELECT id FROM simulado_questoes WHERE bloco_id = ? AND questao_id = ?", (bloco_id, questao_id)).fetchone()
-        if not existe:
+        if existe and not _prof_pode_disciplina(conn, prof, conn.execute("SELECT disciplina_id FROM questoes WHERE id = ?", (questao_id,)).fetchone()["disciplina_id"]):
+            existe = None  # questão de disciplina que o docente não leciona
+            aviso = "outra_disciplina"
+        if aviso:
+            pass
+        elif not existe:
             aviso = "inexistente"
         elif ja:
             aviso = "repetida"
@@ -22366,6 +22590,10 @@ def remover_questao_bloco(sim_id: int, bloco_id: int, sq_id: int):
     if not prof:
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
+    _b = conn.execute("SELECT disciplina_id FROM simulado_blocos WHERE id = ? AND simulado_id = ?", (bloco_id, sim_id)).fetchone()
+    if not _b or not _prof_pode_disciplina(conn, prof, _b["disciplina_id"]):
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
     conn.execute("DELETE FROM simulado_questoes WHERE id = ? AND bloco_id = ?", (sq_id, bloco_id))
     conn.commit()
     _sanear_bloco_simulado(conn, bloco_id)
@@ -22385,6 +22613,9 @@ def finalizar_bloco(sim_id: int, bloco_id: int):
         WHERE b.id = ? AND b.simulado_id = ?
     """, (bloco_id, sim_id)).fetchone()
     entregue = False
+    if bloco and not _prof_pode_disciplina(conn, prof, bloco["disciplina_id"]):
+        conn.close()
+        return RedirectResponse(f"/simulados/{sim_id}", status_code=303)
     if bloco:
         n = _sanear_bloco_simulado(conn, bloco_id)
         if n >= bloco["n_questoes"]:
@@ -22951,7 +23182,7 @@ def mover_questao_bloco(sim_id: int, bloco_id: int, sq_id: int, direcao: str = F
 
 
 @app.get("/simulados/{sim_id}/preview", response_class=HTMLResponse)
-def preview_simulado(sim_id: int):
+def preview_simulado(sim_id: int, caixa_alta: Optional[int] = None):
     """Preview de todas as questões em sequência para revisão antes de imprimir."""
     prof = _current_prof_ctx.get()
     if not prof:
@@ -23067,9 +23298,10 @@ window.MathJax = {{
   .btn {{ padding: 7px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; cursor: pointer; font-family: inherit; border: 1px solid #ccc; background: white; }}
   .btn-primary {{ background: #2563eb; color: white; border-color: #2563eb; }}
   @media print {{ .no-print {{ display: none; }} }}
+  {CAIXA_ALTA_CSS}
 </style>
 </head>
-<body>
+<body class="{'caixa-alta' if caixa_alta else ''}">
 <div style="text-align:center; margin-bottom:20px; padding-bottom:16px; border-bottom:2px solid #000;">
   <img src="/static/imagens/logo_walmir.png" style="max-height:70px; max-width:180px;" alt="Walmir">
   <div style="font-size:11px; color:#555; margin-top:6px;">E.M. Walmir de Freitas Monteiro</div>
@@ -23077,10 +23309,14 @@ window.MathJax = {{
 <div class="no-print">
   <strong>👁️ Preview — {sim['nome']}</strong>
   <span style="color:#666; font-size:12px;">Dia {sim['dia'] if 'dia' in sim.keys() else 1:02d} · {_ano_esc_label(sim['ano_escolaridade'] or 0)} · {sim['trimestre']}º Trimestre · {sim['ano']} · {num_global} questões</span>
-  <button class="btn btn-primary" onclick="window.print()">🖨️ Imprimir</button>
+  <button class="btn btn-primary" onclick="imprimirComCaixaAlta()">🖨️ Imprimir</button>
+  <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+    <input type="checkbox" id="chk-caixa-alta" onchange="alternarCaixaAlta(this.checked)" {'checked' if caixa_alta else ''}> 🔠 Tudo em CAIXA ALTA
+  </label>
   <a href="/simulados/{sim_id}" class="btn">← Voltar</a>
 </div>
 {blocos_html}
+<script>{CAIXA_ALTA_JS}</script>
 </body>
 </html>"""
     return HTMLResponse(content=html)
