@@ -1697,6 +1697,50 @@ def _redimensionar_imagem(data: bytes, max_width: int = 1200) -> bytes:
         return data
 
 
+LIMITE_ANEXO_KB = 300  # o sistema oficial da prefeitura só aceita imagens até 300 KB
+
+
+def _compactar_imagem_ate(data: bytes, limite_kb: int = LIMITE_ANEXO_KB):
+    """Reduz uma imagem (foto/print de atestado) para caber em limite_kb, em JPEG.
+    Ordem: endireita pela orientação da foto (EXIF), limita o lado maior a 2000 px e baixa a
+    qualidade aos poucos (85 -> 40); se ainda passar do limite, encolhe as dimensões em 15%
+    por rodada. Retorna (bytes, ok). ok=False só se não for imagem ou não couber."""
+    try:
+        from PIL import Image as _Pil, ImageOps as _Ops
+        import io as _io
+        img = _Pil.open(_io.BytesIO(data))
+        img.verify()  # confirma que é imagem de verdade
+        if len(data) <= limite_kb * 1024:
+            return data, True  # já cabe no limite: não mexe (evita perder qualidade à toa)
+        img = _Pil.open(_io.BytesIO(data))
+        img = _Ops.exif_transpose(img)
+        if img.mode in ("RGBA", "LA", "P"):
+            fundo = _Pil.new("RGB", img.size, (255, 255, 255))
+            rgba = img.convert("RGBA")
+            fundo.paste(rgba, mask=rgba.split()[-1])
+            img = fundo
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        limite = limite_kb * 1024
+        lado = 2000
+        melhor = None
+        for _ in range(12):
+            w, h = img.size
+            if max(w, h) > lado:
+                f = lado / max(w, h)
+                img = img.resize((max(1, int(w * f)), max(1, int(h * f))), _Pil.LANCZOS)
+            for q in (85, 75, 65, 55, 45, 38):
+                buf = _io.BytesIO()
+                img.save(buf, format="JPEG", quality=q, optimize=True)
+                melhor = buf.getvalue()
+                if len(melhor) <= limite:
+                    return melhor, True
+            lado = int(max(img.size) * 0.85)
+        return melhor, (melhor is not None and len(melhor) <= limite)
+    except Exception:
+        return data, False
+
+
 def _sanitizar_html_enunciado(html: str) -> str:
     """Permite apenas tags básicas de formatação no enunciado. Remove scripts, iframes, handlers JS.
     Tags permitidas: strong/b, em/i, u, br, p, div (só com style text-align), span (só com style text-align), ul, ol, li, blockquote.
@@ -3113,6 +3157,7 @@ def form_novo_afastamento(request: Request):
             </label>
             <label>Documento (PDF, foto ou imagem do atestado/permissão) — opcional
                 <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png">
+                <small style="color:var(--text-muted);">📷 Fotos e imagens são reduzidas automaticamente para até 300 KB (limite do sistema da prefeitura).</small>
             </label>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Enviar solicitação</button>
@@ -3155,14 +3200,28 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     nome_arquivo_salvo = None
     drive_id = drive_link = erro_drive = None
     status_upload = "sem_documento"
+    aviso_compactacao = ""
     if arquivo is not None and arquivo.filename:
         conteudo = await arquivo.read()
         ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
-        nome_no_drive = f"{prof['nome']} - {TIPOS_AFASTAMENTO[tipo]} - {data_inicio}{ext}"
         mime = arquivo.content_type or "application/octet-stream"
+        tam_original_kb = len(conteudo) / 1024
+        # O sistema oficial da prefeitura só aceita IMAGEM de até 300 KB: toda imagem anexada
+        # já é compactada aqui (14/10/2026). PDF não é alterado, mas a pessoa é avisada se passar do limite.
+        if ext.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic") or mime.startswith("image/"):
+            novo, ok_cmp = _compactar_imagem_ate(conteudo)
+            if novo is not conteudo and ok_cmp:
+                conteudo, ext, mime = novo, ".jpg", "image/jpeg"
+                aviso_compactacao = f"Imagem reduzida automaticamente de {tam_original_kb:.0f} KB para {len(conteudo)/1024:.0f} KB (limite da prefeitura: {LIMITE_ANEXO_KB} KB)."
+            elif not ok_cmp:
+                aviso_compactacao = f"Não foi possível reduzir esta imagem para {LIMITE_ANEXO_KB} KB. Tente enviar outra foto, com menos detalhes."
+        elif ext.lower() == ".pdf" and tam_original_kb > LIMITE_ANEXO_KB:
+            aviso_compactacao = (f"O PDF tem {tam_original_kb:.0f} KB e o sistema da prefeitura só aceita imagem de até {LIMITE_ANEXO_KB} KB. "
+                                 f"Para anexar lá, envie uma foto/imagem do documento no lugar do PDF.")
+        nome_no_drive = f"{prof['nome']} - {TIPOS_AFASTAMENTO[tipo]} - {data_inicio}{ext}"
         drive_id, drive_link, erro_drive = _drive_upload_arquivo(nome_no_drive, conteudo, mime)
         status_upload = "enviado" if drive_id else "erro"
-        nome_arquivo_salvo = arquivo.filename
+        nome_arquivo_salvo = os.path.splitext(arquivo.filename or "")[0] + ext if ext == ".jpg" else arquivo.filename
 
     conn = get_db()
     conn.execute("""
@@ -3173,8 +3232,11 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     conn.close()
 
     aviso_html = ""
+    if aviso_compactacao:
+        _cor = "var(--green)" if aviso_compactacao.startswith("Imagem reduzida") else "var(--orange)"
+        aviso_html += (f'<div class="tip" style="border-color:{_cor};margin-top:14px;">🗜️ {aviso_compactacao}</div>')
     if erro_drive:
-        aviso_html = f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> a solicitação foi registrada, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador; o arquivo original fica só com você por enquanto.</div>'
+        aviso_html += f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> a solicitação foi registrada, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador; o arquivo original fica só com você por enquanto.</div>'
 
     if tipo == "compensacao_horas" and horario_inicio and horas_compensar:
         horario_str = f' · Saída: {horario_inicio} · {horas_compensar}h a compensar'
@@ -6237,6 +6299,7 @@ CSS_LINK = f'<link rel="stylesheet" href="/static/css/app.css?v={CSS_VERSION}">'
 PWA_HEAD_TAGS = """<link rel="manifest" href="/static/manifest.json">
     <meta name="theme-color" content="#4C6EF5">
     <link rel="apple-touch-icon" href="/static/icon-192.png">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="apple-mobile-web-app-title" content="Ped. Walmir">
