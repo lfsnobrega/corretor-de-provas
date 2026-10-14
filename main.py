@@ -21464,6 +21464,7 @@ def ver_simulado(sim_id: int):
         acoes_admin += f'<a href="/simulados/{sim_id}/cartao-resposta" class="btn" target="_blank">📋 Cartões OMR</a>'
         if sim["status"] in ("fechado", "publicado"):
             acoes_admin += f'<a href="/simulados/{sim_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Gerar PDF</a>'
+            acoes_admin += f'<a href="/simulados/{sim_id}/imprimir?caixa_alta=1" class="btn" target="_blank">🔠 Gerar PDF (CAIXA ALTA)</a>'
             acoes_admin += f'<a href="/simulados/{sim_id}/aplicacoes" class="btn" style="color:var(--green);border-color:var(--green);">📋 Aplicações</a>'
 
     # Cards dos blocos
@@ -22412,7 +22413,7 @@ def finalizar_bloco(sim_id: int, bloco_id: int):
 
 
 @app.get("/simulados/{sim_id}/imprimir", response_class=HTMLResponse)
-def imprimir_simulado(sim_id: int):
+def imprimir_simulado(sim_id: int, caixa_alta: Optional[int] = None):
     prof = _current_prof_ctx.get()
     if not prof:
         return RedirectResponse("/login", status_code=303)
@@ -22601,6 +22602,10 @@ window.MathJax = {{
   th, td {{ border: 1px solid #999; padding: 4px 8px; }}
   th {{ background: #f0f0f0; font-weight: 600; }}
 
+  /* CAIXA ALTA (opção na barra do topo) — fórmulas (MathJax), unidades e fórmulas químicas ficam como estão */
+  body.caixa-alta, body.caixa-alta * {{ text-transform: uppercase; }}
+  body.caixa-alta .manter-caixa, body.caixa-alta mjx-container, body.caixa-alta mjx-container * {{ text-transform: none !important; }}
+
   /* GABARITO */
   .gabarito-page {{ padding: 40px; }}
   .gabarito-titulo {{ font-size: 18px; font-weight: 800; text-align: center; margin-bottom: 24px; border-bottom: 2px solid #000; padding-bottom: 10px; }}
@@ -22611,10 +22616,13 @@ window.MathJax = {{
   .gab-letra {{ font-weight: 800; font-size: 15px; color: #000; background: #f0f0f0; padding: 1px 8px; border-radius: 3px; }}
 </style>
 </head>
-<body>
+<body class="{'caixa-alta' if caixa_alta else ''}">
 
 <div class="no-print">
   <button class="btn-print" id="btn-imprimir" onclick="imprimirAposMathJax()">🖨️ Imprimir simulado</button>
+  <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer;">
+    <input type="checkbox" id="chk-caixa-alta" onchange="alternarCaixaAlta(this.checked)" {'checked' if caixa_alta else ''}> 🔠 Tudo em CAIXA ALTA
+  </label>
   <a href="/simulados/{sim_id}" style="padding:8px 16px; border:1px solid #ccc; border-radius:6px; text-decoration:none; color:#333;">← Voltar</a>
 </div>
 
@@ -22650,8 +22658,67 @@ window.MathJax = {{
 </div>
 
 <script>
+// ── CAIXA ALTA ────────────────────────────────────────────────────────────
+// O CSS coloca tudo em maiúsculas. Para NÃO estragar o significado científico, depois que o
+// MathJax desenhou as fórmulas, marcamos (e deixamos como estão): unidades de medida depois de
+// número (km, kg, mL, m/s, °C, %...), "pH" e fórmulas químicas (NaCl, H2O, CO2...).
+var _caixaAltaMarcada = false;
+function marcarTrechosPreservados() {{
+    if (_caixaAltaMarcada) return;
+    _caixaAltaMarcada = true;
+    var re = /(\\d(?:[\\d.,]*\\d)?\\s?)(km²|km³|m²|m³|km\\/h|m\\/s|km|cm|mm|dm|hm|ha|kg|mg|g|mL|ml|dL|cL|kL|L|min|h|s|ms|Hz|kHz|MHz|GHz|kW|W|kJ|J|cal|kcal|Pa|kPa|N|V|A|mol|K|°C|°F|m)(?![A-Za-zÀ-ÿ])|\\bpH\\b|\\b(?:[A-Z][a-z]?\\d*){{2,}}\\b/g;
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {{
+        acceptNode: function(n) {{
+            var p = n.parentNode;
+            if (!p || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+            if (p.closest && p.closest('script,style,mjx-container,.no-print,.manter-caixa')) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+        }}
+    }});
+    var nos = [];
+    while (walker.nextNode()) nos.push(walker.currentNode);
+    nos.forEach(function(n) {{
+        var t = n.nodeValue, m, ultimo = 0, achou = false, frag = document.createDocumentFragment();
+        re.lastIndex = 0;
+        while ((m = re.exec(t)) !== null) {{
+            if (m[0].length === 0) {{ re.lastIndex++; continue; }}
+            achou = true;
+            var ini = m.index, fim = m.index + m[0].length;
+            if (m[1] !== undefined) ini += m[1].length;   // só a unidade fica preservada, o número não importa
+            if (ini > ultimo) frag.appendChild(document.createTextNode(t.slice(ultimo, ini)));
+            var sp = document.createElement('span');
+            sp.className = 'manter-caixa';
+            sp.textContent = t.slice(ini, fim);
+            frag.appendChild(sp);
+            ultimo = fim;
+        }}
+        if (achou) {{
+            if (ultimo < t.length) frag.appendChild(document.createTextNode(t.slice(ultimo)));
+            n.parentNode.replaceChild(frag, n);
+        }}
+    }});
+}}
+function _depoisDoMathJax(fn) {{
+    if (window.MathJax && MathJax.startup && MathJax.startup.promise) {{
+        MathJax.startup.promise.then(function() {{ setTimeout(fn, 100); }});
+    }} else {{
+        setTimeout(fn, 1500);
+    }}
+}}
+function alternarCaixaAlta(ligado) {{
+    document.body.classList.toggle('caixa-alta', ligado);
+    try {{
+        var u = new URL(window.location.href);
+        if (ligado) u.searchParams.set('caixa_alta', '1'); else u.searchParams.delete('caixa_alta');
+        window.history.replaceState(null, '', u.toString());
+    }} catch (e) {{}}
+    if (ligado) _depoisDoMathJax(marcarTrechosPreservados);
+}}
+if (document.body.classList.contains('caixa-alta')) _depoisDoMathJax(marcarTrechosPreservados);
+
 function imprimirAposMathJax() {{
     var btn = document.getElementById('btn-imprimir');
+    if (document.body.classList.contains('caixa-alta')) marcarTrechosPreservados();
     btn.textContent = '⏳ Aguardando renderização...';
     btn.disabled = true;
     if (window.MathJax && MathJax.startup && MathJax.startup.promise) {{
@@ -22671,7 +22738,7 @@ function imprimirAposMathJax() {{
 }}
 // Aguardar MathJax antes de liberar o botão na carga inicial
 document.addEventListener('DOMContentLoaded', function() {{
-    if (window.MathJax) {{
+    if (window.MathJax && MathJax.startup && MathJax.startup.promise) {{
         var btn = document.getElementById('btn-imprimir');
         if (btn) {{
             btn.textContent = '⏳ Carregando fórmulas...';
