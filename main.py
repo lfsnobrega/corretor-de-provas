@@ -3860,6 +3860,8 @@ CONF_STATUS = {
     "nenhuma":      ("❌ Nenhuma justificativa cadastrada", "#dc2626"),
     "sem_cadastro": ("❓ Pessoa não encontrada no sistema", "#6b7280"),
     "sem_dia":      ("⚪ Planilha sem os dias — conferir", "#6b7280"),
+    "deferido":     ("🔵 Já resolvido no ponto (parecer Deferido)", "#2563eb"),
+    "folha":        ("🟣 Lançado na folha (férias/licença)", "#7c3aed"),
 }
 
 
@@ -3923,6 +3925,151 @@ def _conf_ler_planilha(conteudo: bytes) -> list:
             "obs": str(cel(r, c_obs)).strip() if cel(r, c_obs) not in (None, "") else "",
         })
     return saida
+
+
+def _conf_eh_consulta(conteudo: bytes) -> bool:
+    """True se a planilha é o modelo 'Consulta' do ponto (uma linha por dia/turno, com as colunas
+    'Data Escala' e 'Situação Frequencia')."""
+    try:
+        wb = load_workbook(BytesIO(conteudo), read_only=True, data_only=True)
+        ws = wb.active
+        for r in ws.iter_rows(min_row=1, max_row=3, values_only=True):
+            cab = " | ".join(_conf_norm(c) for c in r if c)
+            if "DATA ESCALA" in cab and "SITUACAO FREQUENCIA" in cab:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _conf_ler_consulta(conteudo: bytes) -> list:
+    """Lê o modelo 'Consulta' do ponto e devolve uma lista de PESSOAS, cada uma com suas
+    ocorrências por dia: [{matricula, nome, unidade, ocorrencias:[{data(date), turnos, sit,
+    obs_folha, obs_just, parecer, obs_parecer}]}]. Só entram dias com problema no ponto (decreto
+    ou carga horária diferente de 'Normal'); dias normais são ignorados."""
+    wb = load_workbook(BytesIO(conteudo), data_only=True)
+    ws = wb.active
+    linhas = list(ws.iter_rows(values_only=True))
+    idx = None
+    for i, r in enumerate(linhas[:5]):
+        cab = " | ".join(_conf_norm(c) for c in r if c)
+        if "DATA ESCALA" in cab:
+            idx = i
+            break
+    if idx is None:
+        raise ValueError("Não encontrei os títulos do modelo 'Consulta' (coluna 'Data Escala').")
+    cab = [_conf_norm(c) for c in linhas[idx]]
+
+    def col(*chaves):
+        for j, c in enumerate(cab):
+            if any(c.startswith(k) for k in chaves):
+                return j
+        return None
+    c = {"turno": col("TURNO:"), "mat": col("MATRICULA"), "nome": col("NOME"), "local": col("LOCAL"),
+         "data": col("DATA ESCALA"), "just": col("JUSTIFICATIVA:"), "obsf": col("OBS. FOLHA"),
+         "freq": col("SITUACAO FREQUENCIA"), "obsj": col("OBS. JUSTIFICATIVA"),
+         "par": col("SITUACAO PARECER"), "obsp": col("OBS. PARECER")}
+    if None in (c["mat"], c["nome"], c["data"], c["freq"]):
+        raise ValueError("Faltam colunas no modelo 'Consulta' (Matricula, Nome, Data Escala, Situação Frequencia).")
+
+    def g(r, k):
+        j = c[k]
+        v = r[j] if (j is not None and j < len(r)) else None
+        return "" if v is None else re.sub(r"\s+", " ", str(v)).strip()
+
+    pessoas = {}
+    for r in linhas[idx + 1:]:
+        if not r or not _conf_matricula(r[c["mat"]]):
+            continue
+        dt = r[c["data"]]
+        if isinstance(dt, datetime):
+            dt = dt.date()
+        elif isinstance(dt, str):
+            try:
+                dt = datetime.strptime(dt.strip()[:10], "%d/%m/%Y").date()
+            except ValueError:
+                continue
+        if not isinstance(dt, date):
+            continue
+        freq = g(r, "freq")
+        m = re.search(r"Decreto:\s*(.*?)\s*C\.?H\.?:\s*(.*)$", freq, re.I)
+        dec, ch = (m.group(1).strip(), m.group(2).strip()) if m else (freq, freq)
+        if _conf_norm(dec) == "NORMAL" and _conf_norm(ch) == "NORMAL":
+            continue
+        mat = _conf_matricula(r[c["mat"]])
+        p = pessoas.setdefault(mat, {"matricula": mat, "nome": re.sub(r"\s+", " ", str(r[c["nome"]]).strip()),
+                                      "unidade": g(r, "local"), "cargo": "", "ocorrencias": {}})
+        oc = p["ocorrencias"].setdefault(dt, {"data": dt, "turnos": [], "sit": [], "obs_folha": "", "obs_just": "",
+                                              "parecer": "", "obs_parecer": ""})
+        t = g(r, "turno")
+        if t and t not in oc["turnos"]:
+            oc["turnos"].append(t)
+        if freq and freq not in oc["sit"]:
+            oc["sit"].append(freq)
+        oc["obs_folha"] = oc["obs_folha"] or g(r, "obsf")
+        oc["obs_just"] = oc["obs_just"] or g(r, "obsj")
+        oc["parecer"] = oc["parecer"] or g(r, "par")
+        oc["obs_parecer"] = oc["obs_parecer"] or g(r, "obsp")
+    saida = []
+    for p in pessoas.values():
+        p["ocorrencias"] = sorted(p["ocorrencias"].values(), key=lambda o: o["data"])
+        saida.append(p)
+    return saida
+
+
+def _conf_montar_consulta(conn, pessoas, mes, ano):
+    """Cruza as ocorrências diárias do modelo 'Consulta' com as justificativas cadastradas."""
+    profs, por_mat, por_nome = _conf_indices_pessoas(conn)
+    # O mês é o que aparece nas datas da planilha (o mais frequente), não o do formulário.
+    contagem = {}
+    for p in pessoas:
+        for o in p["ocorrencias"]:
+            contagem[(o["data"].year, o["data"].month)] = contagem.get((o["data"].year, o["data"].month), 0) + 1
+    avisos = []
+    if contagem:
+        (ano_pl, mes_pl) = max(contagem, key=contagem.get)
+        if (ano_pl, mes_pl) != (ano, mes):
+            avisos.append(f"As datas da planilha são de {mes_pl:02d}/{ano_pl}; usei esse mês na conferência.")
+        ano, mes = ano_pl, mes_pl
+    afs_por_prof = _conf_afastamentos_do_mes(conn, mes, ano)
+
+    lista = []
+    for p in pessoas:
+        prof, via = _conf_achar_pessoa(p["matricula"], p["nome"], profs, por_mat, por_nome)
+        afs = afs_por_prof.get(prof["id"], []) if prof else []
+        itens = []
+        for o in p["ocorrencias"]:
+            if o["data"].month != mes or o["data"].year != ano:
+                continue
+            if not prof:
+                st, cob = "sem_cadastro", []
+            else:
+                st, cob = _conf_cobertura(afs, o["data"].isoformat())
+            if _conf_norm(o["parecer"]).startswith("DEFERIDO"):
+                st = "deferido"
+            elif o["obs_folha"] and st != "ok":
+                st = "folha"
+            partes = [" / ".join(o["sit"])]
+            if o["turnos"]:
+                partes.insert(0, "Turno: " + ", ".join(o["turnos"]))
+            if o["obs_folha"]:
+                partes.append("Folha: " + o["obs_folha"])
+            if o["obs_just"]:
+                partes.append("Justificativa no ponto: " + o["obs_just"])
+            if o["parecer"] and not _conf_norm(o["parecer"]).startswith("SEM JUSTIFICATIVA"):
+                partes.append("Parecer: " + o["parecer"] + (f" ({o['obs_parecer']})" if o["obs_parecer"] else ""))
+            itens.append({"dia": o["data"].strftime("%d/%m/%Y"), "status": st, "cobertura": cob, "detalhe": " · ".join(partes)})
+        if not itens:
+            continue
+        lista.append({"matricula": p["matricula"], "nome": p["nome"], "cargo": "", "unidade": p["unidade"],
+                      "situacao": "", "quantitativo": "", "dias_bruto": "", "obs": "", "motivo_ponto": "",
+                      "prof": prof, "via": via, "afs": afs, "itens": itens})
+    cont = {k: 0 for k in CONF_STATUS}
+    for x in lista:
+        for i in x["itens"]:
+            cont[i["status"]] += 1
+    return {"mes": mes, "ano": ano, "faltas": [], "descontos": [], "diario": lista, "avisos": avisos,
+            "cont_faltas": {k: 0 for k in CONF_STATUS}, "cont_desc": {k: 0 for k in CONF_STATUS}, "cont_diario": cont}
 
 
 def _conf_dias_faltas(texto) -> tuple:
@@ -4108,7 +4255,7 @@ def _conf_html(res, token):
     def tabela(lista, tipo):
         if not lista:
             return '<p style="color:var(--text-muted);">Nenhuma linha desta unidade na planilha.</p>'
-        cab_extra = "Desconto" if tipo == "desc" else "Motivo no ponto"
+        cab_extra = "Desconto" if tipo == "desc" else ("Situação no ponto" if tipo == "dia" else "Motivo no ponto")
         out = ['<div style="overflow-x:auto;"><table class="cf-tab"><thead><tr>'
                f'<th>Servidor</th><th>{cab_extra}</th><th>Dia</th><th>Conferência</th>'
                '<th>Justificativa cadastrada</th><th>O que o servidor escreveu</th><th>Documento</th></tr></thead><tbody>']
@@ -4124,7 +4271,7 @@ def _conf_html(res, token):
                 # nome e motivo em todas as linhas, para o filtro "só pendências" nunca esconder quem é a pessoa
                 pessoa = (f'<strong>{esc(it["nome"])}</strong><br><small>Mat. {esc(it["matricula"])} · {esc(it["cargo"])}'
                           + (f'<br>achado por {esc(it["via"])}' if it["via"] and it["via"] != "matrícula" else "") + '</small>')
-                detalhe = sit
+                detalhe = esc(i.get("detalhe", "")) if tipo == "dia" else sit
                 if a:
                     per = f'{_fmt_data_br(a["ini"])}' + (f' a {_fmt_data_br(a["fim"])}' if a["fim"] != a["ini"] else "")
                     just = f'<strong>{esc(a["tipo_label"])}</strong><br>{per}' + (f' · {esc(a["horario"])}' if a["horario"] and a["horario"] != "—" else "")
@@ -4156,30 +4303,42 @@ def _conf_html(res, token):
     </style>"""
     js = """<script>
     function cfFiltrar(v){document.querySelectorAll('.cf-tab tbody tr').forEach(function(tr){
-      var st=tr.getAttribute('data-st'); var pend=(st!=='ok');
+      var st=tr.getAttribute('data-st'); var pend=(st!=='ok' && st!=='deferido' && st!=='folha');
       tr.style.display=(v==='todos'||pend)?'':'none';});}
     </script>"""
     topo = (f'<div class="page-header"><h1>🔎 Conferência com o Ponto — {meses[res["mes"]]}/{res["ano"]}</h1></div>'
             f'<div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px;">'
             f'<a class="btn btn-primary" href="/administrativo/conferencia-ponto/excel/{token}">📥 Baixar relatório em Excel</a>'
             f'<a class="btn" href="/administrativo/conferencia-ponto">← Nova conferência</a>'
-            f'<label style="margin:0 0 0 auto;font-size:13px;">Mostrar <select onchange="cfFiltrar(this.value)"><option value="todos">Tudo</option><option value="pend">Só pendências (tudo que não está ✅)</option></select></label></div>')
-    return (css + topo + avisos +
-            cards(res["cont_faltas"], "Planilha de FALTAS") + tabela(res["faltas"], "falta") +
-            cards(res["cont_desc"], "Planilha de DESCONTOS") + tabela(res["descontos"], "desc") + js)
+            f'<label style="margin:0 0 0 auto;font-size:13px;">Mostrar <select onchange="cfFiltrar(this.value)"><option value="todos">Tudo</option><option value="pend">Só pendências (sem ✅, 🔵 ou 🟣)</option></select></label></div>')
+    corpo = ""
+    if res.get("diario") is not None:
+        corpo += cards(res["cont_diario"], "Ocorrências do ponto (dias com falta ou desconto)") + tabela(res["diario"], "dia")
+    if res["faltas"] or (res.get("diario") is None and not res["descontos"]):
+        corpo += cards(res["cont_faltas"], "Planilha de FALTAS") + tabela(res["faltas"], "falta")
+    if res["descontos"]:
+        corpo += cards(res["cont_desc"], "Planilha de DESCONTOS") + tabela(res["descontos"], "desc")
+    return css + topo + avisos + corpo + js
 
 
 def _conf_excel(res) -> bytes:
     wb = Workbook()
     meses = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
-    cores = {"ok": "DCFCE7", "parcial": "FEF9C3", "fora": "FFEDD5", "nenhuma": "FEE2E2", "sem_cadastro": "E5E7EB", "sem_dia": "E5E7EB"}
+    cores = {"ok": "DCFCE7", "parcial": "FEF9C3", "fora": "FFEDD5", "nenhuma": "FEE2E2", "sem_cadastro": "E5E7EB", "sem_dia": "E5E7EB", "deferido": "DBEAFE", "folha": "EDE9FE"}
     cab_fill = PatternFill(start_color="4B5563", end_color="4B5563", fill_type="solid")
 
     ws = wb.active
     ws.title = "Resumo"
     ws.append([f"Conferência com o ponto — {meses[res['mes']]}/{res['ano']}"]); ws["A1"].font = Font(bold=True, size=14)
     ws.append([])
-    for titulo, cont in (("Planilha de FALTAS", res["cont_faltas"]), ("Planilha de DESCONTOS", res["cont_desc"])):
+    blocos = []
+    if res.get("diario") is not None:
+        blocos.append(("Ocorrências do ponto (dias com falta ou desconto)", res["cont_diario"]))
+    if res["faltas"] or (res.get("diario") is None and not res["descontos"]):
+        blocos.append(("Planilha de FALTAS", res["cont_faltas"]))
+    if res["descontos"]:
+        blocos.append(("Planilha de DESCONTOS", res["cont_desc"]))
+    for titulo, cont in blocos:
         ws.append([titulo]); ws.cell(ws.max_row, 1).font = Font(bold=True)
         for k, v in cont.items():
             ws.append([CONF_STATUS[k][0], v])
@@ -4201,6 +4360,8 @@ def _conf_excel(res) -> bytes:
         for it in lista:
             det = (f'{it["situacao"]} · {it["quantitativo"]} dia(s)' if tipo == "desc" else it["motivo_ponto"])
             for i, a in _conf_linhas(it):
+                if tipo == "dia":
+                    det = i.get("detalhe", "")
                 per = ""
                 if a:
                     per = _fmt_data_br(a["ini"]) + (f' a {_fmt_data_br(a["fim"])}' if a["fim"] != a["ini"] else "")
@@ -4219,8 +4380,14 @@ def _conf_excel(res) -> bytes:
             for c in row:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
 
-    folha("Faltas x Sistema", res["faltas"], "falta")
-    folha("Descontos x Sistema", res["descontos"], "desc")
+    if res.get("diario") is not None:
+        folha("Ponto x Sistema", res["diario"], "dia")
+    if res["faltas"]:
+        folha("Faltas x Sistema", res["faltas"], "falta")
+    if res["descontos"]:
+        folha("Descontos x Sistema", res["descontos"], "desc")
+    if len(wb.sheetnames) == 1:
+        folha("Faltas x Sistema", res["faltas"], "falta")
     buf = BytesIO(); wb.save(buf)
     return buf.getvalue()
 
@@ -4251,10 +4418,14 @@ def form_conferencia_ponto(request: Request):
                 <label style="flex:1 1 120px;">Ano <input type="number" name="ano" value="{ano_ant}" min="2024" max="2035" required></label>
                 <label style="flex:2 1 220px;">Só a unidade que contém <input type="text" name="unidade" value="WALMIR"></label>
             </div>
+            <label><strong>Planilha do ponto — modelo "Consulta"</strong> (uma linha por dia/turno, com "Data Escala" e "Situação Frequencia")
+                <input type="file" name="arquivo_consulta" accept=".xlsx"></label>
+            <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px 0;">O mês é lido das datas da planilha. Só entram os dias com falta ou desconto; dias já deferidos pelo ponto e férias/licença lançadas na folha aparecem separados, sem contar como pendência.</p>
+            <details style="margin-bottom:10px;"><summary style="cursor:pointer;font-size:13px;">Modelos antigos (relação de frequência — faltas / descontos)</summary>
             <label>Planilha de FALTAS (relação de frequência — faltas)
                 <input type="file" name="arquivo_faltas" accept=".xlsx"></label>
             <label>Planilha de DESCONTOS (relação de frequência — descontos)
-                <input type="file" name="arquivo_descontos" accept=".xlsx"></label>
+                <input type="file" name="arquivo_descontos" accept=".xlsx"></label></details>
             <div class="tip">Pode subir só uma das duas. Na planilha de descontos, se a coluna "Dias" estiver preenchida (ex.: 16,23,30), o sistema confere dia a dia. As planilhas não ficam guardadas: o relatório gerado fica disponível por 24 horas para baixar.</div>
             <div class="page-actions"><button type="submit" class="btn btn-primary">Gerar relatório</button></div>
         </form>"""
@@ -4263,7 +4434,8 @@ def form_conferencia_ponto(request: Request):
 
 @app.post("/administrativo/conferencia-ponto", response_class=HTMLResponse)
 async def gerar_conferencia_ponto(request: Request, mes: int = Form(...), ano: int = Form(...), unidade: str = Form("WALMIR"),
-                                  arquivo_faltas: Optional[UploadFile] = File(None), arquivo_descontos: Optional[UploadFile] = File(None)):
+                                  arquivo_faltas: Optional[UploadFile] = File(None), arquivo_descontos: Optional[UploadFile] = File(None),
+                                  arquivo_consulta: Optional[UploadFile] = File(None)):
     prof = get_current_professor(request)
     if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
         return RedirectResponse("/", status_code=303)
@@ -4273,20 +4445,35 @@ async def gerar_conferencia_ponto(request: Request, mes: int = Form(...), ano: i
 
     if not (1 <= mes <= 12):
         return erro("Mês inválido.")
-    faltas, descontos = [], []
+    faltas, descontos, consulta = [], [], []
     filtro = _conf_norm(unidade)
     try:
-        if arquivo_faltas is not None and arquivo_faltas.filename:
-            faltas = [x for x in _conf_ler_planilha(await arquivo_faltas.read()) if filtro in _conf_norm(x["unidade"])]
-        if arquivo_descontos is not None and arquivo_descontos.filename:
-            descontos = [x for x in _conf_ler_planilha(await arquivo_descontos.read()) if filtro in _conf_norm(x["unidade"])]
+        # O modelo "Consulta" é reconhecido pelos títulos, em qualquer um dos três campos de arquivo.
+        for campo in (arquivo_consulta, arquivo_faltas, arquivo_descontos):
+            if campo is None or not campo.filename:
+                continue
+            dados = await campo.read()
+            if _conf_eh_consulta(dados):
+                consulta += [x for x in _conf_ler_consulta(dados) if filtro in _conf_norm(x["unidade"])]
+            elif campo is arquivo_faltas:
+                faltas = [x for x in _conf_ler_planilha(dados) if filtro in _conf_norm(x["unidade"])]
+            elif campo is arquivo_descontos:
+                descontos = [x for x in _conf_ler_planilha(dados) if filtro in _conf_norm(x["unidade"])]
+            else:
+                faltas = [x for x in _conf_ler_planilha(dados) if filtro in _conf_norm(x["unidade"])]
     except Exception as e:
         return erro(f"Problema ao ler a planilha: {e}")
-    if not faltas and not descontos:
-        return erro(f"Nenhuma linha encontrada. Confira se subiu ao menos uma planilha .xlsx e se a unidade '{unidade}' aparece nela.")
+    if not faltas and not descontos and not consulta:
+        return erro(f"Nenhuma linha com falta ou desconto encontrada. Confira se subiu ao menos uma planilha .xlsx e se a unidade '{unidade}' aparece nela (coluna Local/Unidade).")
 
     conn = get_db()
-    res = _conf_montar(conn, faltas, descontos, mes, ano)
+    res = _conf_montar(conn, faltas, descontos, mes, ano) if (faltas or descontos) else None
+    if consulta:
+        res_c = _conf_montar_consulta(conn, consulta, mes, ano)
+        if res is None:
+            res = res_c
+        else:
+            res["diario"] = res_c["diario"]; res["cont_diario"] = res_c["cont_diario"]; res["avisos"] += res_c["avisos"]
     conn.close()
 
     # guarda o Excel por 24h (pasta temporária do servidor) para o botão de download
