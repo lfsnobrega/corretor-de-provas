@@ -2797,6 +2797,15 @@ async def _worker_escaneamento(worker_num: int):
 @app.on_event("startup")
 async def _iniciar_workers_escaneamento():
     _garantir_fila_escaneamento()
+    try:
+        _c = get_db()
+        _n = _boletim_unificar_disciplinas(_c)
+        _c.commit()
+        _c.close()
+        if _n:
+            print(f"[boletim] {_n} registro(s) de nota/falta movidos para a disciplina padrão")
+    except Exception as _e:
+        print(f"[boletim] unificação de disciplinas falhou: {_e}")
 
 
 def _status_lote_escaneamento(lote_id: str) -> Optional[dict]:
@@ -11262,6 +11271,16 @@ BOLETIM_SUBJECT_MAP = {
     'ed digital': 'Educação Digital', 'educacao digital': 'Educação Digital', 'ed. digital': 'Educação Digital',
     'ciencias': 'Ciências', 'historia': 'História', 'geografia': 'Geografia',
     'ingles': 'Inglês', 'portugues': 'Português', 'matematica': 'Matemática', 'arte': 'Arte',
+    # Variações de nome que aparecem quando a disciplina é criada por outras telas
+    # (banco de questões, vínculo professor×turma) — 22/10/2026: faziam a nota lançada
+    # sumir do boletim (aparecia "—") porque o boletim só lê os nomes padrão.
+    'lingua portuguesa': 'Português', 'l. portuguesa': 'Português', 'lingua port.': 'Português',
+    'lingua inglesa': 'Inglês', 'l. inglesa': 'Inglês', 'ingles.': 'Inglês',
+    'artes': 'Arte', 'educacao artistica': 'Arte', 'arte e cultura': 'Arte',
+    'educacao fisica.': 'Ed. Física', 'ed.fisica': 'Ed. Física', 'edfisica': 'Ed. Física',
+    'ciencias da natureza': 'Ciências', 'ciencias naturais': 'Ciências',
+    'educacao digital.': 'Educação Digital', 'edu. digital': 'Educação Digital',
+    'informatica': 'Educação Digital', 'tecnologia': 'Educação Digital',
 }
 BOLETIM_CANONICAL_SUBJECTS = ['Português', 'Matemática', 'Ciências', 'História', 'Geografia',
                               'Inglês', 'Arte', 'Ed. Física', 'Educação Digital', 'Geral']
@@ -11438,6 +11457,61 @@ def _boletim_normalizar_disciplina(nome):
     return BOLETIM_SUBJECT_MAP.get(_boletim_normalizar(nome), str(nome or "").strip())
 
 
+def _boletim_disc_id_canonico(conn, disciplina_id):
+    """Dado o id de uma disciplina (do vínculo professor×turma, por exemplo), devolve o id
+    da disciplina PADRÃO do boletim (a que o boletim lê). Cria a padrão se não existir.
+    Se o nome já é o padrão (ou não tem equivalente), devolve o próprio id."""
+    row = conn.execute("SELECT nome FROM disciplinas WHERE id=?", (disciplina_id,)).fetchone()
+    if not row:
+        return disciplina_id
+    canon = _boletim_normalizar_disciplina(row["nome"])
+    if canon == row["nome"] or canon not in BOLETIM_CANONICAL_SUBJECTS:
+        return disciplina_id
+    r = conn.execute("SELECT id FROM disciplinas WHERE nome = ?", (canon,)).fetchone()
+    if r:
+        return r["id"]
+    return conn.execute("INSERT INTO disciplinas (nome) VALUES (?)", (canon,)).lastrowid
+
+
+def _boletim_unificar_disciplinas(conn):
+    """Migração (idempotente, roda no startup): notas e faltas gravadas em disciplinas com
+    nome fora do padrão (ex.: 'Língua Portuguesa', 'Artes', 'Matemática ' com espaço) são
+    movidas para a disciplina padrão que o boletim lê. Se já existir registro na padrão
+    para o mesmo aluno/trimestre/ano, o da padrão é mantido, a menos que esteja vazio.
+    Retorna quantos registros foram movidos."""
+    movidos = 0
+    discs = conn.execute("SELECT id, nome FROM disciplinas WHERE nome NOT LIKE '% | %'").fetchall()
+    for d in discs:
+        canon = _boletim_normalizar_disciplina(d["nome"])
+        if canon == d["nome"] or canon not in BOLETIM_CANONICAL_SUBJECTS:
+            continue
+        destino = _boletim_disc_id_canonico(conn, d["id"])
+        if destino == d["id"]:
+            continue
+        for r in conn.execute("SELECT * FROM boletim_medias WHERE disciplina_id=?", (d["id"],)).fetchall():
+            ex = conn.execute(
+                "SELECT id, nota, nota_texto FROM boletim_medias WHERE aluno_id=? AND disciplina_id=? AND trimestre=? AND ano=?",
+                (r["aluno_id"], destino, r["trimestre"], r["ano"])).fetchone()
+            if ex is None:
+                conn.execute("UPDATE boletim_medias SET disciplina_id=? WHERE id=?", (destino, r["id"]))
+                movidos += 1
+            else:
+                if ex["nota"] is None and not ex["nota_texto"] and (r["nota"] is not None or r["nota_texto"]):
+                    conn.execute("UPDATE boletim_medias SET nota=?, nota_texto=? WHERE id=?", (r["nota"], r["nota_texto"], ex["id"]))
+                    movidos += 1
+                conn.execute("DELETE FROM boletim_medias WHERE id=?", (r["id"],))
+        for r in conn.execute("SELECT * FROM boletim_faltas WHERE disciplina_id=?", (d["id"],)).fetchall():
+            ex = conn.execute(
+                "SELECT id FROM boletim_faltas WHERE aluno_id=? AND disciplina_id=? AND trimestre=? AND ano=?",
+                (r["aluno_id"], destino, r["trimestre"], r["ano"])).fetchone()
+            if ex is None:
+                conn.execute("UPDATE boletim_faltas SET disciplina_id=? WHERE id=?", (destino, r["id"]))
+                movidos += 1
+            else:
+                conn.execute("DELETE FROM boletim_faltas WHERE id=?", (r["id"],))
+    return movidos
+
+
 @app.get("/boletim/lancamento-manual", response_class=HTMLResponse)
 def lancamento_manual_lista(request: Request):
     """Lista as combinações turma+disciplina que o professor pode lançar nota/falta
@@ -11536,6 +11610,7 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
         conn.close()
         return HTMLResponse(render_page("Sem lançamento aqui", '<div class="empty">Essa é uma subdisciplina usada só pra organizar o banco de questões — não se lança nota nela. A nota vai na disciplina principal.</div><a href="/boletim/lancamento-manual" class="btn">Voltar</a>', active="lancamento-manual"))
 
+    disciplina_id = _boletim_disc_id_canonico(conn, disciplina_id)
     alunos = conn.execute(
         "SELECT * FROM alunos WHERE turma_id=? AND status='ativo' ORDER BY numero, nome", (turma_id,)
     ).fetchall()
@@ -11552,7 +11627,7 @@ def lancamento_manual_form(request: Request, turma_id: int, disciplina_id: int, 
     # Educação Digital não tem nota numérica — é um CONCEITO (PA/PS/PI), igual já é
     # tratado na importação do e-cidade. Nesse caso mostra um seletor em vez de campo
     # numérico, gravando em nota_texto (11/09/2026, a pedido de Felipe).
-    eh_conceito = disciplina["nome"] == "Educação Digital"
+    eh_conceito = _boletim_normalizar_disciplina(disciplina["nome"]) == "Educação Digital"
     opcoes_conceito = ["PA", "PS", "PI"]
 
     linhas = ""
@@ -11647,7 +11722,8 @@ async def lancamento_manual_salvar(request: Request, turma_id: int, disciplina_i
         conn.close()
         return RedirectResponse("/boletim/lancamento-manual", status_code=303)
     ano_letivo = turma["ano_letivo"]
-    eh_conceito = disciplina["nome"] == "Educação Digital"
+    disciplina_id = _boletim_disc_id_canonico(conn, disciplina_id)
+    eh_conceito = _boletim_normalizar_disciplina(disciplina["nome"]) == "Educação Digital"
 
     form = await request.form()
     trimestre = int(form.get("trimestre") or 2)
@@ -11746,12 +11822,13 @@ def painel_lancamentos(request: Request, trimestre: int = 2):
         ).fetchone()["c"]
         if total_alunos == 0:
             continue
+        did_canon = _boletim_disc_id_canonico(conn, combo["disciplina_id"])
         lancados = conn.execute("""
             SELECT COUNT(*) c FROM boletim_medias bm
             JOIN alunos a ON a.id = bm.aluno_id
             WHERE a.turma_id=? AND a.status='ativo' AND bm.disciplina_id=? AND bm.trimestre=? AND bm.ano=?
             AND (bm.nota IS NOT NULL OR bm.nota_texto IS NOT NULL)
-        """, (combo["turma_id"], combo["disciplina_id"], trimestre, combo["ano_letivo"])).fetchone()["c"]
+        """, (combo["turma_id"], did_canon, trimestre, combo["ano_letivo"])).fetchone()["c"]
         # Alunos de Educação Especial (AEE) ainda sem nota não entram no total esperado —
         # eles não são avaliados por nota numérica aqui, então não devem contar como
         # "pendente" (11/09/2026, a pedido de Felipe).
@@ -11762,7 +11839,7 @@ def painel_lancamentos(request: Request, trimestre: int = 2):
                 SELECT 1 FROM boletim_medias bm WHERE bm.aluno_id=a.id AND bm.disciplina_id=? AND bm.trimestre=? AND bm.ano=?
                 AND (bm.nota IS NOT NULL OR bm.nota_texto IS NOT NULL)
             )
-        """, (combo["turma_id"], combo["disciplina_id"], trimestre, combo["ano_letivo"])).fetchone()["c"]
+        """, (combo["turma_id"], did_canon, trimestre, combo["ano_letivo"])).fetchone()["c"]
         total_esperado = max(total_alunos - aee_sem_nota, 0)
         combo["lancados"] = lancados
         combo["total"] = total_esperado
@@ -13405,7 +13482,14 @@ def _boletim_dados_turma_multitrimestre(conn, ano, turma_id):
     """, [ano] + aluno_ids).fetchall()
     notas_por_aluno = {}
     for r in notas_rows:
-        notas_por_aluno.setdefault(r["aluno_id"], {}).setdefault(r["disc"], {})[r["trimestre"]] = (r["nota"], r["nota_texto"])
+        disc_canon = _boletim_normalizar_disciplina(r["disc"])
+        slot = notas_por_aluno.setdefault(r["aluno_id"], {}).setdefault(disc_canon, {})
+        atual = slot.get(r["trimestre"])
+        vazio_novo = r["nota"] is None and not r["nota_texto"]
+        # Se por algum motivo existirem 2 registros (ex.: disciplina duplicada), um registro
+        # vazio nunca esconde um que tenha nota.
+        if atual is None or (not vazio_novo):
+            slot[r["trimestre"]] = (r["nota"], r["nota_texto"])
 
     faltas_rows = conn.execute(f"""
         SELECT aluno_id, trimestre, SUM(faltas) AS total FROM boletim_faltas
@@ -13862,7 +13946,8 @@ def gerar_boletim_individual(ano: int, turma_id: str, aluno_id: Optional[str] = 
             GROUP BY bf.aluno_id, d.nome
         """, [ano] + aluno_ids_turma).fetchall()
         for r in faltas_disc_rows:
-            faltas_disc_por_aluno.setdefault(r["aluno_id"], {})[r["disc"]] = r["total"]
+            _dn = _boletim_normalizar_disciplina(r["disc"])
+            faltas_disc_por_aluno.setdefault(r["aluno_id"], {})[_dn] = faltas_disc_por_aluno.get(r["aluno_id"], {}).get(_dn, 0) + (r["total"] or 0)
     conn.close()
 
     # Médias da turma e ranking de faltas usam sempre a turma INTEIRA, mesmo que a página
