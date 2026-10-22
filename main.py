@@ -11512,6 +11512,90 @@ def _boletim_unificar_disciplinas(conn):
     return movidos
 
 
+@app.get("/boletim/diagnostico-aluno", response_class=HTMLResponse)
+def diagnostico_nota_aluno(request: Request, q: str = "", aluno_id: int = 0):
+    """Ferramenta da gestão pra descobrir POR QUE uma nota aparece como '—' no boletim
+    (22/10/2026): mostra o cadastro do aluno e TODAS as notas gravadas pra ele, com o nome
+    bruto da disciplina, trimestre e ano, e aponta o que está faltando."""
+    _r = _require_admin_or_403(request)
+    if _r is not None: return _r
+    conn = get_db()
+    q_norm = _boletim_normalizar(q)
+    achados = []
+    if q_norm and not aluno_id:
+        for a in conn.execute("""SELECT a.id, a.nome, t.nome AS turma, t.ano_letivo FROM alunos a
+                                 LEFT JOIN turmas t ON t.id=a.turma_id ORDER BY a.nome""").fetchall():
+            if q_norm in _boletim_normalizar(a["nome"]):
+                achados.append(a)
+    corpo = ""
+    if achados:
+        itens = "".join(
+            f'<li><a href="/boletim/diagnostico-aluno?aluno_id={a["id"]}">{html.escape(a["nome"])}</a> — turma {html.escape(str(a["turma"] or "?"))} ({a["ano_letivo"]})</li>'
+            for a in achados[:40])
+        corpo += f"<h3>Alunos encontrados</h3><ul>{itens}</ul>"
+    elif q_norm and not aluno_id:
+        corpo += '<div class="tip">Nenhum aluno encontrado com esse nome.</div>'
+    if aluno_id:
+        a = conn.execute("""SELECT a.*, t.nome AS turma_nome, t.ano_letivo FROM alunos a
+                            LEFT JOIN turmas t ON t.id=a.turma_id WHERE a.id=?""", (aluno_id,)).fetchone()
+        if not a:
+            corpo += '<div class="tip">Aluno não encontrado.</div>'
+        else:
+            avisos = []
+            if (a["status"] or "") != "ativo":
+                avisos.append(f"O aluno está com status <strong>{html.escape(str(a['status']))}</strong>: a tela de lançamento manual só mostra alunos <strong>ativos</strong>.")
+            if a["educacao_especial"]:
+                avisos.append("O aluno está marcado como <strong>Educação Especial (AEE)</strong>: a importação do e-cidade <strong>não grava nota</strong> pra ele e o lançamento manual bloqueia o campo de nota enquanto não houver nota. Se ele deve ter nota, desmarque AEE no cadastro do aluno e lance/importe de novo.")
+            rows = conn.execute("""SELECT bm.id, bm.disciplina_id, d.nome AS disc, bm.trimestre, bm.ano, bm.nota, bm.nota_texto
+                                   FROM boletim_medias bm JOIN disciplinas d ON d.id=bm.disciplina_id
+                                   WHERE bm.aluno_id=? ORDER BY bm.ano, bm.trimestre, d.nome""", (aluno_id,)).fetchall()
+            tem = {(_boletim_normalizar_disciplina(r["disc"]), r["trimestre"], r["ano"]) for r in rows
+                   if r["nota"] is not None or (r["nota_texto"] or "").strip()}
+            ano = a["ano_letivo"]
+            faltando = []
+            for disc in BOLETIM_ORDEM_DISCIPLINAS:
+                for t in (1, 2):
+                    if (disc, t, ano) not in tem:
+                        faltando.append(f"{disc} — {t}º tri")
+            if faltando:
+                avisos.append("Sem nota gravada (ano " + str(ano) + "): " + ", ".join(faltando) + ".")
+            anos_notas = sorted({r["ano"] for r in rows})
+            if anos_notas and ano not in anos_notas:
+                avisos.append(f"As notas dele estão no(s) ano(s) {anos_notas}, mas a turma é de {ano}.")
+            linhas = "".join(
+                f'<tr><td style="padding:6px;">{html.escape(r["disc"])} <span style="color:var(--text-muted);">(id {r["disciplina_id"]})</span></td>'
+                f'<td style="padding:6px;text-align:center;">{r["trimestre"]}º</td><td style="padding:6px;text-align:center;">{r["ano"]}</td>'
+                f'<td style="padding:6px;text-align:center;">{"" if r["nota"] is None else r["nota"]}</td>'
+                f'<td style="padding:6px;text-align:center;">{html.escape(r["nota_texto"] or "")}</td></tr>' for r in rows
+            ) or '<tr><td colspan="5" style="padding:10px;">Nenhuma nota gravada para este aluno.</td></tr>'
+            lanc = ""
+            if a["turma_id"]:
+                lanc = " ".join(
+                    f'<a class="btn" style="padding:3px 10px;font-size:11px;" href="/boletim/lancamento-manual/{a["turma_id"]}/{d["id"]}?trimestre=1">{html.escape(d["nome"])} — 1º tri</a>'
+                    for d in conn.execute("SELECT id, nome FROM disciplinas WHERE nome IN (" + ",".join("?"*len(BOLETIM_ORDEM_DISCIPLINAS)) + ")", BOLETIM_ORDEM_DISCIPLINAS).fetchall())
+            avisos_html = "".join(f"<li>{x}</li>" for x in avisos) or "<li>Nada de errado encontrado no cadastro.</li>"
+            corpo += f"""
+            <div class="card" style="padding:16px;margin-bottom:14px;">
+              <h3 style="margin-top:0;">{html.escape(a["nome"])}</h3>
+              <p>Turma {html.escape(str(a["turma_nome"] or "?"))} ({ano}) · status: {html.escape(str(a["status"]))} · AEE: {"sim" if a["educacao_especial"] else "não"} · código da rede: {html.escape(str(a["codigo_rede"] or "—"))}</p>
+              <ul style="line-height:1.7;">{avisos_html}</ul>
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+              <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px;text-align:left;">Disciplina (nome gravado)</th><th>Trimestre</th><th>Ano</th><th>Nota</th><th>Conceito</th></tr></thead>
+              <tbody>{linhas}</tbody></table>
+            <p style="margin-top:14px;"><strong>Lançar manualmente (1º trimestre):</strong> {lanc}</p>"""
+    conn.close()
+    content = f"""
+        <div class="page-header"><h1>🔎 Diagnóstico de notas do aluno</h1>
+        <p class="subtitle">Descubra por que uma nota aparece como "—" no boletim.</p></div>
+        <form method="get" style="display:flex;gap:8px;margin-bottom:16px;">
+            <input type="text" name="q" value="{html.escape(q)}" placeholder="Parte do nome do aluno" style="flex:1;">
+            <button class="btn btn-primary" type="submit">Buscar</button>
+        </form>
+        {corpo}"""
+    return HTMLResponse(render_page("Diagnóstico de notas", content, active="lancamento-manual"))
+
+
 @app.get("/boletim/lancamento-manual", response_class=HTMLResponse)
 def lancamento_manual_lista(request: Request):
     """Lista as combinações turma+disciplina que o professor pode lançar nota/falta
@@ -11575,6 +11659,7 @@ def lancamento_manual_lista(request: Request):
         <h1>📝 Lançamento Manual — Nota Final e Faltas</h1>
         <p class="subtitle">Enquanto o sistema da rede está fora do ar. Escolha a turma/disciplina pra lançar o 2º trimestre.</p>
     </div>
+    {('<p><a href="/boletim/diagnostico-aluno" class="btn">🔎 Diagnóstico: por que a nota de um aluno aparece como —?</a></p>' if sou_gestao else '')}
     <div class="tip">Isso grava direto no Boletim do sistema — assim que você salvar, já atualiza os dashboards, o risco de repetência e o Conselho de Classe. Dá pra voltar aqui e corrigir quantas vezes precisar.</div>
     <div style="margin-top:16px;">{linhas}</div>
     """
