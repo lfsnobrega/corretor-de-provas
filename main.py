@@ -5126,7 +5126,6 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
     <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px; flex-wrap:wrap; gap:28px 16px;">
         {blocos_prof}
         <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Assinatura do Aluno</div>
-        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Responsável pelo aluno</div>
     </div>
 
     <div style="font-size:9px; color:#888; border-top:1px solid #ddd; padding-top:5px; margin-top:30px; text-align:center;">
