@@ -14785,12 +14785,70 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
     return render_page("Estudantes", content, active="boletim-estudantes")
 
 
+def _soma_tri_calcular(dados, alvo_f, disciplinas):
+    """Para cada disciplina, monta as linhas {numero, nome, tris:[...], soma, situ, nivel} e os
+    totais. nivel: ok | amarelo | laranja | vermelho | sem."""
+    soma_alvo = alvo_f * 3
+
+    def fmt(v):
+        return f"{v:.1f}"
+
+    def nome_tri_restantes(faltam):
+        return " e ".join(f"{t}º" for t in faltam) + (" tri" if len(faltam) == 1 else " tris")
+
+    secoes = []
+    for disc in disciplinas:
+        linhas, n_ok, n_falta, n_sem = [], 0, 0, 0
+        for e in dados:
+            tri = e["notas"].get(disc, {})
+            vals = {t: tri[t][0] for t in (1, 2, 3) if t in tri and tri[t][0] is not None}
+            cel = []
+            for t in (1, 2, 3):
+                if t in vals:
+                    cel.append((fmt(vals[t]), vals[t] < 5))
+                elif t in tri and tri[t][1]:
+                    cel.append((str(tri[t][1]), False))
+                else:
+                    cel.append(("—", False))
+            lin = {"numero": e["numero"] or "", "nome": e["nome"], "tris": cel}
+            if not vals:
+                n_sem += 1
+                lin.update(soma="—", situ="Sem nota lançada", nivel="sem")
+                linhas.append(lin)
+                continue
+            soma = sum(vals.values())
+            faltam = [t for t in (1, 2, 3) if t not in vals]
+            falta = soma_alvo - soma
+            lin["soma"] = fmt(soma)
+            if falta <= 1e-9:
+                n_ok += 1
+                lin.update(situ=("Média anual " + fmt(soma / 3) + " — atingiu") if not faltam else "Já atingiu a média anual", nivel="ok")
+            elif not faltam:
+                n_falta += 1
+                lin.update(situ=f"Média anual {fmt(soma / 3)} — faltaram {fmt(falta)} ponto(s)", nivel="vermelho")
+            else:
+                n_falta += 1
+                por_tri = falta / len(faltam)
+                if por_tri > 10:
+                    lin.update(situ=f"Não alcança, nem com 10 no {nome_tri_restantes(faltam)} (faltam {fmt(falta)} pontos)", nivel="vermelho")
+                elif len(faltam) == 1:
+                    lin.update(situ=f"Precisa de {fmt(falta)} no {nome_tri_restantes(faltam)}",
+                               nivel="laranja" if por_tri >= 7 else "amarelo")
+                else:
+                    lin.update(situ=f"Faltam {fmt(falta)} pontos: {fmt(por_tri)} em cada um dos {nome_tri_restantes(faltam)}",
+                               nivel="laranja" if por_tri >= 7 else "amarelo")
+            linhas.append(lin)
+        if linhas and (n_sem < len(linhas) or len(disciplinas) == 1):
+            secoes.append({"disc": disc, "linhas": linhas, "ok": n_ok, "falta": n_falta, "sem": n_sem})
+    return secoes
+
+
 @app.get("/boletim/soma-trimestres", response_class=HTMLResponse)
 def boletim_soma_trimestres(request: Request, ano: Optional[int] = None, turma_id: Optional[str] = None,
-                            disciplina: Optional[str] = None, alvo: Optional[str] = None):
+                            disciplina: Optional[str] = None, alvo: Optional[str] = None, imprimir: Optional[int] = None):
     """Relatório por turma (22/10/2026, a pedido de Felipe): pra cada disciplina mostra a nota de
-    cada trimestre, a SOMA e QUANTO FALTA pra fechar a média anual (soma dos 3 trimestres ÷ 3).
-    A média mínima é escolhida na tela (padrão 5,0 — mesma régua do alerta de repetência)."""
+    cada trimestre, a SOMA e a SITUAÇÃO (quanto falta pra fechar a média anual = soma dos 3
+    trimestres ÷ 3). Tem visualização de tela e versão de impressão (?imprimir=1)."""
     prof = get_current_professor(request)
     if not prof:
         return RedirectResponse("/login", status_code=303)
@@ -14800,7 +14858,6 @@ def boletim_soma_trimestres(request: Request, ano: Optional[int] = None, turma_i
     except ValueError:
         alvo_f = 5.0
     alvo_f = min(max(alvo_f, 0.1), 10.0)
-    soma_alvo = alvo_f * 3
 
     conn = get_db()
     if ano is None:
@@ -14810,117 +14867,128 @@ def boletim_soma_trimestres(request: Request, ano: Optional[int] = None, turma_i
     if turma_id is None and turmas:
         turma_id = turmas[0]["id"]
     dados = _boletim_dados_turma_multitrimestre(conn, ano, turma_id) if turma_id else []
-    turma_nome = next((t["nome"] for t in turmas if t["id"] == turma_id), "?")
+    turma_nome = html.escape(str(next((t["nome"] for t in turmas if t["id"] == turma_id), "?")))
     conn.close()
 
-    def fmt(v):
-        return f"{v:.1f}"
-
     discs = [d for d in BOLETIM_DISC_NUMERICAS if not disciplina or disciplina == d]
-    secoes = ""
-    for disc in discs:
-        linhas = ""
-        n_ok = n_falta = n_sem = 0
-        for e in dados:
-            tri = e["notas"].get(disc, {})
-            vals = {t: tri[t][0] for t in (1, 2, 3) if t in tri and tri[t][0] is not None}
-            textos = [tri[t][1] for t in (1, 2, 3) if t in tri and tri[t][0] is None and tri[t][1]]
-            celulas = ""
-            for t in (1, 2, 3):
-                if t in vals:
-                    cor = "color:#dc2626;font-weight:600;" if vals[t] < 5 else ""
-                    celulas += f'<td style="text-align:center;{cor}">{fmt(vals[t])}</td>'
-                elif t in tri and tri[t][1]:
-                    celulas += f'<td style="text-align:center;">{html.escape(str(tri[t][1]))}</td>'
-                else:
-                    celulas += '<td style="text-align:center;color:#999;">—</td>'
-            if not vals:
-                n_sem += 1
-                linhas += (f'<tr><td style="text-align:center;">{e["numero"] or ""}</td><td>{html.escape(e["nome"])}</td>{celulas}'
-                           f'<td style="text-align:center;">—</td><td style="text-align:center;">—</td>'
-                           f'<td style="text-align:center;">—</td><td style="color:#666;">{"Sem nota numérica" if textos else "Sem nota lançada"}</td></tr>')
-                continue
-            soma = sum(vals.values())
-            restantes = 3 - len(vals)
-            falta = soma_alvo - soma
-            if restantes == 0:
-                media = soma / 3
-                if falta <= 1e-9:
-                    n_ok += 1
-                    situ, cor_s = f"✅ Média anual {fmt(media)} — atingiu", "#16a34a"
-                else:
-                    n_falta += 1
-                    situ, cor_s = f"❌ Média anual {fmt(media)} — faltaram {fmt(falta)} pontos", "#dc2626"
-                falta_txt = "0.0" if falta <= 1e-9 else fmt(falta)
-                precisa = "—"
-            else:
-                media = soma / 3  # média parcial: trimestres que faltam contam 0 por enquanto
-                if falta <= 1e-9:
-                    n_ok += 1
-                    situ, cor_s = "✅ Já atingiu a média anual", "#16a34a"
-                    falta_txt, precisa = "0.0", "0.0"
-                else:
-                    por_tri = falta / restantes
-                    falta_txt = fmt(falta)
-                    precisa = fmt(por_tri)
-                    n_falta += 1
-                    if por_tri > 10:
-                        situ, cor_s = f"⚠️ Não alcança, nem com 10 em tudo", "#dc2626"
-                    elif por_tri >= 7:
-                        situ, cor_s = f"🟠 Precisa de {fmt(por_tri)} em cada trimestre restante", "#ea580c"
-                    else:
-                        situ, cor_s = f"🟡 Precisa de {fmt(por_tri)} em cada trimestre restante", "#ca8a04"
-            linhas += (f'<tr><td style="text-align:center;">{e["numero"] or ""}</td><td>{html.escape(e["nome"])}</td>{celulas}'
-                       f'<td style="text-align:center;font-weight:700;">{fmt(soma)}</td>'
-                       f'<td style="text-align:center;font-weight:700;">{falta_txt}</td>'
-                       f'<td style="text-align:center;">{precisa}</td>'
-                       f'<td style="color:{cor_s};font-weight:600;">{situ}</td></tr>')
-        if not linhas:
-            continue
-        secoes += f"""
-        <h3>{disc} <small style="font-weight:400;color:#666;">· {n_ok} já atingiram · {n_falta} ainda precisam · {n_sem} sem nota</small></h3>
-        <table><thead><tr><th style="width:36px;">Nº</th><th>Aluno</th><th>1º Tri</th><th>2º Tri</th><th>3º Tri</th>
-            <th>Soma</th><th>Falta p/ {fmt(soma_alvo)}</th><th>Precisa por tri restante</th><th style="text-align:left;">Situação</th></tr></thead>
-        <tbody>{linhas}</tbody></table>"""
-    if not secoes:
-        secoes = '<p style="color:#666;">Nenhuma nota lançada para esta turma.</p>'
+    secoes = _soma_tri_calcular(dados, alvo_f, discs)
+    alvo_txt = f"{alvo_f:.1f}"
+    soma_txt = f"{alvo_f * 3:.1f}"
+    regra = f"Média anual mínima {alvo_txt} = soma dos 3 trimestres ÷ 3 (a soma precisa chegar a {soma_txt} pontos)."
 
-    turma_opts = "".join(f'<option value="{t["id"]}"{" selected" if t["id"]==turma_id else ""}>Turma {t["nome"]}</option>' for t in turmas)
+    # -------- versão para IMPRESSÃO: preto e branco, A4, sem menus --------
+    if imprimir:
+        blocos = ""
+        simbolo = {"ok": "✔", "amarelo": "▲", "laranja": "▲", "vermelho": "✖", "sem": "—"}
+        for sec in secoes:
+            trs = ""
+            for l in sec["linhas"]:
+                tds = "".join(
+                    f'<td class="c{" b" if baixo else ""}">{html.escape(v)}</td>' for v, baixo in l["tris"])
+                trs += (f'<tr class="{l["nivel"]}"><td class="c">{l["numero"]}</td><td>{html.escape(l["nome"])}</td>{tds}'
+                        f'<td class="c b">{l["soma"]}</td><td>{simbolo[l["nivel"]]} {html.escape(l["situ"])}</td></tr>')
+            blocos += (f'<section><h3>{sec["disc"]} <span>— {sec["ok"]} atingiram · {sec["falta"]} ainda precisam'
+                       f'{" · " + str(sec["sem"]) + " sem nota" if sec["sem"] else ""}</span></h3>'
+                       '<table><thead><tr><th style="width:28px;">Nº</th><th>Aluno</th><th style="width:44px;">1º Tri</th>'
+                       '<th style="width:44px;">2º Tri</th><th style="width:44px;">3º Tri</th><th style="width:48px;">Soma</th>'
+                       f'<th style="width:42%;">Situação</th></tr></thead><tbody>{trs}</tbody></table></section>')
+        if not blocos:
+            blocos = "<p>Nenhuma nota lançada para esta turma.</p>"
+        return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Soma dos trimestres — Turma {turma_nome} {ano}</title>
+<style>
+  @page {{ size: A4 portrait; margin: 12mm; }}
+  body {{ font-family: Arial, Helvetica, sans-serif; color:#000; font-size:11px; margin:0; }}
+  .cab {{ display:flex; align-items:center; gap:12px; border-bottom:2px solid #000; padding-bottom:6px; margin-bottom:8px; }}
+  .cab img {{ height:46px; }} .cab h1 {{ font-size:15px; margin:0; }} .cab div {{ font-size:11px; color:#333; }}
+  .regra {{ font-size:10.5px; margin:0 0 8px 0; color:#222; }}
+  section {{ margin-bottom:14px; page-break-inside:avoid; }}
+  h3 {{ font-size:13px; margin:0 0 3px 0; background:#e5e5e5; padding:3px 6px; border:1px solid #999; }}
+  h3 span {{ font-weight:normal; font-size:10.5px; }}
+  table {{ width:100%; border-collapse:collapse; }}
+  th, td {{ border:1px solid #888; padding:2px 5px; }} th {{ background:#f2f2f2; font-size:10.5px; }}
+  td.c {{ text-align:center; }} .b {{ font-weight:bold; }}
+  tr {{ page-break-inside:avoid; }}
+  tr.vermelho td:last-child {{ font-weight:bold; }} tr.ok td:last-child {{ color:#000; }}
+  .no-print {{ margin-bottom:10px; padding:8px; background:#f3f4f6; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head><body>
+  <div class="no-print"><button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="/boletim/soma-trimestres?ano={ano}&turma_id={turma_id or ''}&disciplina={html.escape(disciplina or '')}&alvo={alvo_txt}">← Voltar para a tela</a></div>
+  <div class="cab"><img src="/static/imagens/logo_walmir.png" alt="">
+    <div><h1>Soma dos trimestres e situação para a média anual</h1>
+    E.M. Walmir de Freitas Monteiro · Turma {turma_nome} · {ano}</div></div>
+  <p class="regra">{regra} Notas abaixo de 5,0 em negrito. ✔ atingiu · ▲ ainda precisa · ✖ não atingiu / não alcança.</p>
+  {blocos}
+<script>window.addEventListener('load', function() {{ setTimeout(function() {{ window.print(); }}, 400); }});</script>
+</body></html>""")
+
+    # -------- versão de TELA: dentro do sistema, com cartões e cores --------
+    cores = {"ok": ("var(--green)", "var(--green-bg)"), "amarelo": ("#a16207", "#fef9c3"), "laranja": ("#c2410c", "#ffedd5"),
+             "vermelho": ("var(--red)", "var(--red-bg)"), "sem": ("var(--text-muted)", "transparent")}
+    total_ok = sum(x["ok"] for x in secoes); total_falta = sum(x["falta"] for x in secoes)
+    cards = ""
+    for sec in secoes:
+        tot = sec["ok"] + sec["falta"]
+        pct = round(100 * sec["ok"] / tot) if tot else 0
+        cards += (f'<a href="#d-{BOLETIM_DISC_NUMERICAS.index(sec["disc"])}" class="sm-card"><div class="sm-card-t">{sec["disc"]}</div>'
+                  f'<div class="sm-card-n"><span style="color:var(--green);">{sec["ok"]}</span> / <span style="color:var(--red);">{sec["falta"]}</span></div>'
+                  f'<div class="sm-bar"><div style="width:{pct}%;"></div></div><div class="sm-card-s">atingiram / ainda precisam</div></a>')
+    blocos = ""
+    for sec in secoes:
+        trs = ""
+        for l in sec["linhas"]:
+            tds = "".join(
+                f'<td class="sm-c{" sm-baixo" if baixo else ""}">{html.escape(v)}</td>' for v, baixo in l["tris"])
+            cor, fundo = cores[l["nivel"]]
+            trs += (f'<tr><td class="sm-c sm-muted">{l["numero"]}</td><td><strong>{html.escape(l["nome"])}</strong></td>{tds}'
+                    f'<td class="sm-c"><strong>{l["soma"]}</strong></td>'
+                    f'<td><span class="sm-pill" style="color:{cor};background:{fundo};">{html.escape(l["situ"])}</span></td></tr>')
+        blocos += (f'<div class="card sm-sec" id="d-{BOLETIM_DISC_NUMERICAS.index(sec["disc"])}">'
+                   f'<h3>{sec["disc"]} <small>{sec["ok"]} atingiram · {sec["falta"]} ainda precisam'
+                   f'{" · " + str(sec["sem"]) + " sem nota" if sec["sem"] else ""}</small></h3>'
+                   '<div style="overflow-x:auto;"><table class="sm-tab"><thead><tr><th class="sm-c">Nº</th><th>Aluno</th>'
+                   '<th class="sm-c">1º Tri</th><th class="sm-c">2º Tri</th><th class="sm-c">3º Tri</th><th class="sm-c">Soma</th><th>Situação</th></tr></thead>'
+                   f'<tbody>{trs}</tbody></table></div></div>')
+    if not blocos:
+        blocos = '<div class="empty">Nenhuma nota lançada para esta turma.</div>'
+    turma_opts = "".join(f'<option value="{t["id"]}"{" selected" if t["id"]==turma_id else ""}>Turma {html.escape(str(t["nome"]))}</option>' for t in turmas)
     disc_opts = '<option value="">Todas as disciplinas</option>' + "".join(
         f'<option value="{d}"{" selected" if disciplina==d else ""}>{d}</option>' for d in BOLETIM_DISC_NUMERICAS)
-    alvo_txt = fmt(alvo_f)
-    pagina = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Soma dos trimestres — Turma {html.escape(str(turma_nome))} {ano}</title>
-<style>
-  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
-  table {{ width:100%; border-collapse:collapse; font-size:12.5px; margin-bottom:18px; }}
-  th, td {{ border:1px solid #ccc; padding:4px 7px; }}
-  th {{ background:#f0f0f0; }}
-  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:14px; }}
-  h3 {{ margin:22px 0 6px 0; page-break-after:avoid; }}
-  tr {{ page-break-inside:avoid; }}
-  @media print {{ .no-print {{ display:none; }} body {{ margin:10mm; }} }}
-</style></head><body>
-  <div class="header">
-    <img src="/static/imagens/logo_walmir.png" style="max-height:56px;" alt="">
-    <div>
-      <h2 style="margin:0;">Soma dos trimestres e quanto falta para a média anual</h2>
-      <div style="color:#555;font-size:13px;">E.M. Walmir de Freitas Monteiro · Turma {html.escape(str(turma_nome))} · {ano} · média anual mínima {alvo_txt} (soma dos 3 trimestres ÷ 3 = {fmt(soma_alvo)} pontos)</div>
-    </div>
-  </div>
-  <form class="no-print" method="get" action="/boletim/soma-trimestres" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;background:#f6f7f9;padding:10px 12px;border-radius:6px;">
-    <input type="hidden" name="ano" value="{ano}">
-    <label style="font-size:12px;">Turma<br><select name="turma_id" onchange="this.form.submit()">{turma_opts}</select></label>
-    <label style="font-size:12px;">Disciplina<br><select name="disciplina" onchange="this.form.submit()">{disc_opts}</select></label>
-    <label style="font-size:12px;">Média anual mínima<br><input type="number" name="alvo" value="{alvo_txt}" step="0.1" min="0.1" max="10" style="width:80px;"></label>
-    <button type="submit">Atualizar</button>
-    <button type="button" onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
-    <a href="/boletim/estudantes">← Voltar ao Mapa de notas</a>
-  </form>
-  <p style="font-size:12px;color:#555;margin:0 0 6px 0;">Quando faltam trimestres, "Precisa por tri restante" é a nota que o aluno precisa tirar em cada trimestre que ainda não foi lançado para fechar a média. Notas abaixo de 5,0 aparecem em vermelho.</p>
-  {secoes}
-</body></html>"""
-    return HTMLResponse(pagina)
+    url_imp = f"/boletim/soma-trimestres?ano={ano}&turma_id={turma_id or ''}&disciplina={html.escape(disciplina or '')}&alvo={alvo_txt}&imprimir=1"
+    content = f"""
+    <style>
+      .sm-cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:18px; }}
+      .sm-card {{ display:block; text-decoration:none; color:inherit; border:1px solid var(--border); border-radius:10px; padding:10px 12px; background:var(--card); }}
+      .sm-card:hover {{ border-color:var(--accent); }} .sm-card-t {{ font-weight:700; font-size:13px; }}
+      .sm-card-n {{ font-size:22px; font-weight:800; margin:2px 0; }} .sm-card-s {{ font-size:10.5px; color:var(--text-muted); }}
+      .sm-bar {{ height:6px; background:var(--bg-subtle); border-radius:4px; overflow:hidden; margin:4px 0; }}
+      .sm-bar div {{ height:100%; background:var(--green); }}
+      .sm-sec {{ padding:14px 16px; margin-bottom:16px; }} .sm-sec h3 {{ margin:0 0 10px 0; }} .sm-sec h3 small {{ font-weight:400; color:var(--text-muted); font-size:12px; margin-left:8px; }}
+      .sm-tab {{ width:100%; border-collapse:collapse; font-size:13px; }}
+      .sm-tab th {{ background:var(--bg-subtle); padding:8px; text-align:left; font-size:12px; position:sticky; top:0; }}
+      .sm-tab td {{ padding:7px 8px; border-top:1px solid var(--border); }}
+      .sm-tab tbody tr:hover {{ background:var(--bg-subtle); }}
+      .sm-c {{ text-align:center !important; width:64px; }} .sm-muted {{ color:var(--text-muted); }}
+      .sm-baixo {{ color:var(--red); font-weight:700; }}
+      .sm-pill {{ display:inline-block; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:600; }}
+    </style>
+    <div class="page-header"><h1>➕ Soma dos trimestres — Turma {turma_nome}</h1>
+      <p class="subtitle">{regra} {total_ok} atingiram · {total_falta} ainda precisam (somando as disciplinas mostradas).</p></div>
+    <form method="get" action="/boletim/soma-trimestres" style="background:var(--bg-subtle);padding:12px 16px;border-radius:8px;margin-bottom:16px;">
+      <input type="hidden" name="ano" value="{ano}">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+        <label style="margin:0;flex:1 1 160px;">Turma<select name="turma_id" onchange="this.form.submit()">{turma_opts}</select></label>
+        <label style="margin:0;flex:1 1 200px;">Disciplina<select name="disciplina" onchange="this.form.submit()">{disc_opts}</select></label>
+        <label style="margin:0;flex:0 1 150px;">Média anual mínima<input type="number" name="alvo" value="{alvo_txt}" step="0.1" min="0.1" max="10"></label>
+        <button type="submit" class="btn">Atualizar</button>
+        <a class="btn btn-primary" href="{url_imp}" target="_blank">🖨️ Versão para impressão</a>
+        <a class="btn" href="/boletim/estudantes">← Mapa de notas</a>
+      </div>
+    </form>
+    <div class="sm-cards">{cards}</div>
+    {blocos}"""
+    return HTMLResponse(render_page("Soma dos trimestres", content, active="boletim-soma-trimestres"))
 
 
 @app.get("/boletim/relatorio-geral", response_class=HTMLResponse)
