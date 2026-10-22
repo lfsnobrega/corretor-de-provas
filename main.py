@@ -2306,6 +2306,9 @@ def init_db():
     if "medida_disciplinar" not in cols_ocorr:
         # Medida aplicada conforme Art. 80 do regimento — 02/09/2026.
         conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN medida_disciplinar TEXT")
+    if "assinantes_json" not in cols_ocorr:
+        # Profissionais que assinam o documento (lista de {nome, cargo}) — 22/10/2026.
+        conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN assinantes_json TEXT")
 
     # ============ DOCUMENTO NORTEADOR (planejamento bimestral/trimestral) — 04/09/2026 ============
     # Referencial Curricular: disciplina → ano → trimestre → unidade temática, com objetos
@@ -4624,6 +4627,70 @@ def _pode_editar_ocorrencias(prof) -> bool:
     return bool(prof and (prof.get("is_admin") or prof.get("is_gestor") or prof.get("papel") == "gestao"))
 
 
+def _assinantes_normalizar(nomes, cargos):
+    """Monta a lista [{nome, cargo}] a partir dos campos do formulário, ignorando linhas
+    sem nome (22/10/2026)."""
+    out = []
+    nomes = nomes or []
+    cargos = cargos or []
+    for i, n in enumerate(nomes):
+        n = (n or "").strip()
+        if not n:
+            continue
+        c = (cargos[i] if i < len(cargos) else "") or ""
+        out.append({"nome": n[:120], "cargo": c.strip()[:120]})
+    return out[:8]
+
+
+def _assinantes_carregar(valor):
+    try:
+        lista = json.loads(valor) if valor else []
+    except Exception:
+        return []
+    return [x for x in lista if isinstance(x, dict) and x.get("nome")]
+
+
+def _assinantes_widget_html(conn, assinantes_iniciais):
+    """Bloco do formulário 'Profissionais que assinarão o documento': linhas com Nome +
+    Cargo; o nome sugere os profissionais cadastrados (preenche o cargo sozinho) mas aceita
+    qualquer nome digitado (ex.: psicólogo, conselheiro tutelar, convidado)."""
+    profs = conn.execute("SELECT nome, cargo FROM professores ORDER BY nome").fetchall()
+    cargos_por_nome = {p["nome"]: (p["cargo"] or "") for p in profs}
+    opts = "".join(f'<option value="{html.escape(p["nome"])}"></option>' for p in profs)
+    iniciais = assinantes_iniciais or [{"nome": "", "cargo": ""}]
+    tpl = """
+    <fieldset id="assin-box" style="margin-top:14px;">
+        <legend>✍️ Profissionais que assinarão o documento</legend>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px 0;">Comece a digitar para escolher um profissional cadastrado (o cargo preenche sozinho) ou escreva qualquer nome. Aparecem na linha de assinaturas do documento impresso, junto com a assinatura do aluno e do responsável.</p>
+        <datalist id="assin-lista">__OPTS__</datalist>
+        <div id="assin-linhas"></div>
+        <button type="button" class="btn" onclick="assinAdd('','')">➕ Adicionar profissional</button>
+    </fieldset>
+    <script>
+    var ASSIN_CARGOS = __CARGOS__;
+    function assinAdd(nome, cargo) {
+        var d = document.createElement('div');
+        d.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center;';
+        d.innerHTML = '<input type="text" name="assin_nome" list="assin-lista" placeholder="Nome do profissional" style="flex:2 1 220px;margin:0;">'
+            + '<input type="text" name="assin_cargo" placeholder="Cargo / função" style="flex:1 1 180px;margin:0;">'
+            + '<button type="button" class="btn" title="Remover" style="padding:2px 10px;">✕</button>';
+        var inputs = d.querySelectorAll('input');
+        inputs[0].value = nome || ''; inputs[1].value = cargo || '';
+        inputs[0].addEventListener('change', function() {
+            if (ASSIN_CARGOS[inputs[0].value] !== undefined && !inputs[1].value) inputs[1].value = ASSIN_CARGOS[inputs[0].value];
+        });
+        d.querySelector('button').addEventListener('click', function() { d.remove(); });
+        document.getElementById('assin-linhas').appendChild(d);
+    }
+    var ASSIN_INICIAIS = __INICIAIS__;
+    ASSIN_INICIAIS.forEach(function(a) { assinAdd(a.nome, a.cargo); });
+    </script>
+    """
+    return (tpl.replace("__OPTS__", opts)
+               .replace("__CARGOS__", json.dumps(cargos_por_nome, ensure_ascii=False).replace("</", "<\\/"))
+               .replace("__INICIAIS__", json.dumps(iniciais, ensure_ascii=False).replace("</", "<\\/")))
+
+
 @app.get("/orientacao/ocorrencias/novo", response_class=HTMLResponse)
 def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
     prof = get_current_professor(request)
@@ -4633,6 +4700,8 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
     conn = get_db()
     turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     alunos_todos = conn.execute("SELECT id, turma_id, nome FROM alunos ORDER BY nome").fetchall()
+    _eu = conn.execute("SELECT nome, cargo FROM professores WHERE id=?", (prof["id"],)).fetchone()
+    assinantes_html = _assinantes_widget_html(conn, [{"nome": _eu["nome"], "cargo": _eu["cargo"] or ""}] if _eu else [])
     conn.close()
     opts_turmas = "".join(f'<option value="{t["id"]}" data-nome="{t["nome"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
     opts_tipo = "".join(f'<option value="{k}">{v}</option>' for k, v in TIPOS_OCORRENCIA.items())
@@ -4726,6 +4795,7 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
             <label>Encaminhamento (opcional)
                 <textarea name="encaminhamento" rows="3" placeholder="Providências tomadas, conversa com responsáveis, etc."></textarea>
             </label>
+            {assinantes_html}
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Registrar</button>
                 <a href="/orientacao/ocorrencias" class="btn">Ver registros anteriores</a>
@@ -4789,7 +4859,8 @@ async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: st
                             data_ocorrencia: str = Form(...), descricao: str = Form(...),
                             encaminhamento: str = Form(""), natureza_registro: str = Form("ocorrencia"),
                             outro_aluno_envolvido: str = Form(""), natureza_ato: str = Form(""),
-                            medida_disciplinar: str = Form("")):
+                            medida_disciplinar: str = Form(""),
+                            assin_nome: List[str] = Form([]), assin_cargo: List[str] = Form([])):
     prof = get_current_professor(request)
     if not _pode_ver_ocorrencias(prof):
         return RedirectResponse("/", status_code=303)
@@ -4810,10 +4881,11 @@ async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: st
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Aluno não encontrado.</p><a href="/orientacao/ocorrencias/novo" class="btn">Voltar</a>', active="ocorrencias-novo"))
 
     cursor = conn.execute("""
-        INSERT INTO ocorrencias_alunos (aluno_id, tipo, data_ocorrencia, descricao, encaminhamento, criado_por_professor_id, natureza_registro, outro_aluno_envolvido, natureza_ato, medida_disciplinar)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ocorrencias_alunos (aluno_id, tipo, data_ocorrencia, descricao, encaminhamento, criado_por_professor_id, natureza_registro, outro_aluno_envolvido, natureza_ato, medida_disciplinar, assinantes_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (aluno_id, tipo, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None, prof["id"],
-          natureza_registro, outro_aluno_envolvido.strip() or None, natureza_ato.strip() or None, medida_disciplinar.strip() or None))
+          natureza_registro, outro_aluno_envolvido.strip() or None, natureza_ato.strip() or None, medida_disciplinar.strip() or None,
+          json.dumps(_assinantes_normalizar(assin_nome, assin_cargo), ensure_ascii=False)))
     ocorrencia_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -5014,6 +5086,17 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
     if r["registrado_por"] and ("cargo_registrado_por" in r.keys()) and r["cargo_registrado_por"]:
         cargo_assinatura_html = f'<div style="font-size:10px; color:#666; margin-top:2px;">{r["cargo_registrado_por"]}</div>'
 
+    # Profissionais escolhidos no formulário (22/10/2026); sem escolha, mantém o antigo
+    # (quem registrou).
+    assinantes = _assinantes_carregar(r["assinantes_json"] if "assinantes_json" in r.keys() else None)
+    if assinantes:
+        blocos_prof = "".join(
+            f'<div style="border-top:1px solid #333; padding-top:4px; width:200px;">{html.escape(x["nome"])}'
+            + (f'<div style="font-size:10px; color:#666; margin-top:2px;">{html.escape(x.get("cargo") or "")}</div>' if x.get("cargo") else "")
+            + '</div>' for x in assinantes)
+    else:
+        blocos_prof = f'<div style="border-top:1px solid #333; padding-top:4px; width:200px;">{nome_assinatura}{cargo_assinatura_html}</div>'
+
     html_completo = f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <title>{titulo_doc} · {r["aluno_nome"]}</title>
@@ -5040,8 +5123,8 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
     <p style="white-space:pre-wrap; font-size:13px; line-height:1.6;">{html.escape(r["descricao"])}</p>
     {encaminhamento_html}
 
-    <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px; flex-wrap:wrap; gap:16px;">
-        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">{nome_assinatura}{cargo_assinatura_html}</div>
+    <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px; flex-wrap:wrap; gap:28px 16px;">
+        {blocos_prof}
         <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Assinatura do Aluno</div>
         <div style="border-top:1px solid #333; padding-top:4px; width:200px;">Responsável pelo aluno</div>
     </div>
@@ -5065,6 +5148,7 @@ def form_editar_ocorrencia(request: Request, ocorrencia_id: int):
         SELECT oc.*, al.nome AS aluno_nome FROM ocorrencias_alunos oc
         JOIN alunos al ON al.id = oc.aluno_id WHERE oc.id = ?
     """, (ocorrencia_id,)).fetchone()
+    assinantes_html = _assinantes_widget_html(conn, _assinantes_carregar(r["assinantes_json"]) if r else [])
     conn.close()
     if not r:
         return HTMLResponse(render_page("Erro", '<div class="empty">Ocorrência não encontrada.</div>', active=""))
@@ -5097,6 +5181,7 @@ def form_editar_ocorrencia(request: Request, ocorrencia_id: int):
             </div>
             <label>Descrição<textarea name="descricao" rows="6" required>{r["descricao"]}</textarea></label>
             <label>Encaminhamento<textarea name="encaminhamento" rows="3">{r["encaminhamento"] or ""}</textarea></label>
+            {assinantes_html}
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar alterações</button>
                 <a href="/orientacao/ocorrencias" class="btn">Cancelar</a>
@@ -5111,7 +5196,8 @@ async def salvar_edicao_ocorrencia(request: Request, ocorrencia_id: int, tipo: s
                                     data_ocorrencia: str = Form(...), descricao: str = Form(...),
                                     encaminhamento: str = Form(""), natureza_registro: str = Form("ocorrencia"),
                                     outro_aluno_envolvido: str = Form(""), natureza_ato: str = Form(""),
-                                    medida_disciplinar: str = Form("")):
+                                    medida_disciplinar: str = Form(""),
+                                    assin_nome: List[str] = Form([]), assin_cargo: List[str] = Form([])):
     prof = get_current_professor(request)
     if not _pode_editar_ocorrencias(prof):
         return RedirectResponse("/", status_code=303)
@@ -5122,10 +5208,11 @@ async def salvar_edicao_ocorrencia(request: Request, ocorrencia_id: int, tipo: s
     conn = get_db()
     conn.execute("""UPDATE ocorrencias_alunos SET tipo=?, data_ocorrencia=?, descricao=?, encaminhamento=?,
                      natureza_registro=?, outro_aluno_envolvido=?, natureza_ato=?, medida_disciplinar=?,
-                     atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                     assinantes_json=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
                  (tipo_final, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None,
                   natureza_registro, outro_aluno_envolvido.strip() or None, natureza_ato_final,
-                  medida_disciplinar.strip() or None, ocorrencia_id))
+                  medida_disciplinar.strip() or None,
+                  json.dumps(_assinantes_normalizar(assin_nome, assin_cargo), ensure_ascii=False), ocorrencia_id))
     conn.commit()
     conn.close()
     return RedirectResponse("/orientacao/ocorrencias", status_code=303)
