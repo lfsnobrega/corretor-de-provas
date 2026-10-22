@@ -2236,6 +2236,28 @@ def init_db():
         # (06/09/2026, a pedido de Felipe).
         conn.execute("ALTER TABLE afastamentos ADD COLUMN horas_compensar TEXT")
 
+    # Avisos da gestão para toda a plataforma (22/10/2026)
+    conn.execute("""CREATE TABLE IF NOT EXISTS avisos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        titulo TEXT NOT NULL,
+        mensagem TEXT NOT NULL,
+        tipo TEXT NOT NULL DEFAULT 'info',
+        inicio TEXT,
+        fim TEXT,
+        link_texto TEXT,
+        link_url TEXT,
+        fixado INTEGER NOT NULL DEFAULT 0,
+        ativo INTEGER NOT NULL DEFAULT 1,
+        criado_por_professor_id INTEGER,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS avisos_dispensados (
+        aviso_id INTEGER NOT NULL,
+        professor_id INTEGER NOT NULL,
+        dispensado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(aviso_id, professor_id)
+    )""")
+
     # Atestado médico de ALUNOS — mesma estrutura dos afastamentos de profissionais,
     # cadastrado por Apoio/Gestão. Anexo salvo numa pasta separada do Drive (27/08/2026).
     conn.execute("""CREATE TABLE IF NOT EXISTS atestados_alunos (
@@ -2902,7 +2924,8 @@ async def auth_middleware(request: Request, call_next):
             "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos", "/trocar-senha",
             "/administrativo/atestados-alunos/novo", "/administrativo/atestados-alunos",
         }
-        if path not in rotas_permitidas_apoio and path not in ONBOARDING_ISENTAS:
+        eh_dispensar_aviso = path.startswith("/avisos/") and path.endswith("/dispensar")
+        if path not in rotas_permitidas_apoio and not eh_dispensar_aviso and path not in ONBOARDING_ISENTAS:
             return RedirectResponse("/administrativo/afastamentos/novo", status_code=303)
     # Orientação Educacional só acessa suas próprias justificativas de ponto e o módulo
     # de ocorrências disciplinares — nenhuma outra área (28/08/2026, a pedido). A rota de
@@ -2914,7 +2937,8 @@ async def auth_middleware(request: Request, call_next):
             "/orientacao/ocorrencias/novo", "/orientacao/ocorrencias",
         }
         eh_documento_ocorrencia = path.startswith("/orientacao/ocorrencias/") and path.endswith("/documento")
-        if path not in rotas_permitidas_orientacao and not eh_documento_ocorrencia and path not in ONBOARDING_ISENTAS:
+        eh_dispensar_aviso = path.startswith("/avisos/") and path.endswith("/dispensar")
+        if path not in rotas_permitidas_orientacao and not eh_documento_ocorrencia and not eh_dispensar_aviso and path not in ONBOARDING_ISENTAS:
             return RedirectResponse("/orientacao/ocorrencias/novo", status_code=303)
     request.state.professor = prof
     token = _current_prof_ctx.set(prof)
@@ -3521,6 +3545,776 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+# ============ AVISOS DA GESTÃO PARA TODA A PLATAFORMA (22/10/2026, a pedido de Felipe) ============
+# A gestão (admin/gestor) cria avisos que aparecem no topo da tela inicial de TODOS os usuários.
+# Cada pessoa pode dispensar o aviso (some só para ela), exceto os "fixados". Têm data de início
+# e fim opcionais e podem ser desativados ou excluídos.
+AVISO_TIPOS = {
+    "info":       ("ℹ️ Informativo", "#2563eb", "rgba(37,99,235,0.10)"),
+    "importante": ("⚠️ Importante", "#ca8a04", "rgba(202,138,4,0.14)"),
+    "urgente":    ("🚨 Urgente", "#dc2626", "rgba(220,38,38,0.12)"),
+}
+
+
+def _aviso_url_segura(url: str) -> str:
+    """Só aceita endereço interno (/...) ou http(s)://… — nada de javascript:."""
+    u = (url or "").strip()
+    if u.startswith("/") and not u.startswith("//"):
+        return u
+    if u.lower().startswith(("http://", "https://")):
+        return u
+    return ""
+
+
+def _aviso_hoje_sql():
+    return date.today().isoformat()
+
+
+def _aviso_status(a) -> str:
+    """'ativo' | 'agendado' | 'expirado' | 'desativado'."""
+    hoje = _aviso_hoje_sql()
+    if not a["ativo"]:
+        return "desativado"
+    if a["inicio"] and a["inicio"] > hoje:
+        return "agendado"
+    if a["fim"] and a["fim"] < hoje:
+        return "expirado"
+    return "ativo"
+
+
+def _aviso_banner_html(a, com_dispensar: bool) -> str:
+    esc = html.escape
+    rotulo, cor, fundo = AVISO_TIPOS.get(a["tipo"], AVISO_TIPOS["info"])
+    msg = esc(a["mensagem"] or "").replace("\r", "").replace("\n", "<br>")
+    link = ""
+    url = _aviso_url_segura(a["link_url"] or "")
+    if url:
+        ext = ' target="_blank" rel="noopener"' if url.startswith("http") else ""
+        link = (f'<a href="{esc(url)}"{ext} class="btn" style="margin-top:8px;display:inline-block;padding:4px 12px;font-size:12px;">'
+                f'{esc(a["link_texto"] or "Saiba mais")} →</a>')
+    botao = ""
+    if com_dispensar and not a["fixado"]:
+        botao = (f'<form method="post" action="/avisos/{a["id"]}/dispensar" style="margin:0;">'
+                 f'<button type="submit" title="Não mostrar mais este aviso para mim" '
+                 f'style="background:none;border:1px solid {cor};color:{cor};border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap;font-family:inherit;">'
+                 f'✓ Entendi</button></form>')
+    return (
+        f'<div class="aviso-gestao" style="display:flex;gap:14px;align-items:flex-start;border-left:5px solid {cor};background:{fundo};'
+        f'border-radius:8px;padding:12px 16px;margin-bottom:12px;">'
+        f'<div style="flex:1;min-width:0;">'
+        f'<div style="font-size:11px;font-weight:700;color:{cor};letter-spacing:.04em;text-transform:uppercase;">{rotulo}</div>'
+        f'<div style="font-weight:700;font-size:15px;margin:2px 0 4px;">{esc(a["titulo"])}</div>'
+        f'<div style="font-size:13.5px;line-height:1.5;">{msg}</div>{link}</div>{botao}</div>'
+    )
+
+
+def _avisos_home_html(conn, prof) -> str:
+    """Avisos ativos que a pessoa ainda não dispensou — vão no topo da tela inicial."""
+    if not prof:
+        return ""
+    hoje = _aviso_hoje_sql()
+    rows = conn.execute("""
+        SELECT * FROM avisos
+        WHERE ativo = 1 AND (inicio IS NULL OR inicio = '' OR inicio <= ?) AND (fim IS NULL OR fim = '' OR fim >= ?)
+          AND (fixado = 1 OR id NOT IN (SELECT aviso_id FROM avisos_dispensados WHERE professor_id = ?))
+        ORDER BY CASE tipo WHEN 'urgente' THEN 0 WHEN 'importante' THEN 1 ELSE 2 END, id DESC
+    """, (hoje, hoje, prof["id"])).fetchall()
+    return "".join(_aviso_banner_html(a, True) for a in rows)
+
+
+def _avisos_so_gestao(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return None, RedirectResponse("/login", status_code=303)
+    if not (prof.get("is_admin") or prof.get("is_gestor")):
+        return None, RedirectResponse("/", status_code=303)
+    return prof, None
+
+
+@app.get("/avisos", response_class=HTMLResponse)
+def listar_avisos(request: Request, ok: Optional[str] = None):
+    prof, redir = _avisos_so_gestao(request)
+    if redir:
+        return redir
+    esc = html.escape
+    conn = get_db()
+    avisos = conn.execute("""
+        SELECT a.*, p.nome AS autor,
+               (SELECT COUNT(*) FROM avisos_dispensados d WHERE d.aviso_id = a.id) AS n_dispensaram
+        FROM avisos a LEFT JOIN professores p ON p.id = a.criado_por_professor_id
+        ORDER BY a.id DESC
+    """).fetchall()
+    conn.close()
+    cores_status = {"ativo": ("var(--green)", "🟢 No ar"), "agendado": ("var(--accent)", "🕒 Agendado"),
+                    "expirado": ("var(--text-muted)", "⌛ Encerrado"), "desativado": ("var(--text-muted)", "⏸️ Desativado")}
+    linhas = ""
+    for a in avisos:
+        st = _aviso_status(a)
+        cor, rot = cores_status[st]
+        periodo = "Sem prazo"
+        if a["inicio"] or a["fim"]:
+            periodo = f'{_fmt_data_br(a["inicio"]) if a["inicio"] else "já"} até {_fmt_data_br(a["fim"]) if a["fim"] else "sem fim"}'
+        alternar = ("⏸️ Desativar" if a["ativo"] else "▶️ Reativar")
+        linhas += f"""
+        <div style="border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px;background:var(--card);">
+            <div style="display:flex;gap:10px;justify-content:space-between;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+                <div style="font-size:13px;"><strong style="color:{cor};">{rot}</strong> · {periodo}
+                    {' · 📌 fixado' if a['fixado'] else ''} · {a['n_dispensaram']} pessoa(s) clicaram em "Entendi"
+                    <span style="color:var(--text-muted);">· por {esc(a['autor'] or '—')}</span></div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <a href="/avisos/{a['id']}/editar" class="btn" style="padding:4px 10px;font-size:12px;">✏️ Editar</a>
+                    <form method="post" action="/avisos/{a['id']}/alternar" style="margin:0;"><button class="btn" style="padding:4px 10px;font-size:12px;">{alternar}</button></form>
+                    <form method="post" action="/avisos/{a['id']}/excluir" style="margin:0;" onsubmit="return confirm('Excluir este aviso para todos? Não dá para desfazer.');">
+                        <button class="btn" style="padding:4px 10px;font-size:12px;color:var(--red);border-color:var(--red);">🗑️ Excluir</button></form>
+                </div>
+            </div>
+            {_aviso_banner_html(a, False)}
+        </div>"""
+    if not linhas:
+        linhas = '<div class="empty">Nenhum aviso criado ainda. Clique em “+ Novo aviso”.</div>'
+    msg = {"criado": "✅ Aviso publicado. Ele já aparece na tela inicial de todos.", "editado": "✅ Aviso atualizado.",
+           "excluido": "🗑️ Aviso excluído."}.get(ok or "", "")
+    msg_html = f'<div class="tip" style="border-color:var(--green);margin-bottom:14px;">{msg}</div>' if msg else ""
+    content = f"""
+        <div class="page-header"><h1>📢 Avisos da gestão</h1>
+            <p class="subtitle">Mensagens que aparecem no topo da tela inicial de todos os usuários da plataforma.</p>
+            <div class="page-actions"><a href="/avisos/novo" class="btn btn-primary">+ Novo aviso</a></div></div>
+        {msg_html}{linhas}"""
+    return HTMLResponse(render_page("Avisos da gestão", content, active="avisos"))
+
+
+def _form_aviso_html(a, acao: str, titulo_pg: str) -> str:
+    esc = html.escape
+    v = lambda k: esc(str(a[k])) if (a is not None and a[k] not in (None, "")) else ""
+    tipo_atual = a["tipo"] if a is not None else "info"
+    opts = "".join(f'<option value="{k}"{" selected" if k == tipo_atual else ""}>{AVISO_TIPOS[k][0]}</option>' for k in AVISO_TIPOS)
+    fixado = " checked" if (a is not None and a["fixado"]) else ""
+    return f"""
+        <div class="page-header"><h1>{titulo_pg}</h1></div>
+        <form method="post" action="{acao}" style="max-width:720px;">
+            <label>Título <input type="text" name="titulo" value="{v('titulo')}" maxlength="120" required placeholder="Ex.: Reunião pedagógica na sexta"></label>
+            <label>Mensagem <textarea name="mensagem" rows="5" required placeholder="Escreva o aviso. Quebras de linha são mantidas.">{v('mensagem')}</textarea></label>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                <label style="flex:1 1 180px;">Tipo <select name="tipo">{opts}</select></label>
+                <label style="flex:1 1 150px;">Mostrar a partir de <input type="date" name="inicio" value="{v('inicio')}"></label>
+                <label style="flex:1 1 150px;">Mostrar até <input type="date" name="fim" value="{v('fim')}"></label>
+            </div>
+            <small style="color:var(--text-muted);">Datas em branco = aparece já e fica até você desativar ou excluir.</small>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;">
+                <label style="flex:1 1 200px;">Texto do botão (opcional) <input type="text" name="link_texto" value="{v('link_texto')}" maxlength="40" placeholder="Ex.: Ver calendário"></label>
+                <label style="flex:2 1 260px;">Endereço do botão (opcional) <input type="text" name="link_url" value="{v('link_url')}" placeholder="/painel-gestao  ou  https://..."></label>
+            </div>
+            <label style="font-weight:400;display:flex;align-items:center;gap:8px;margin-top:10px;">
+                <input type="checkbox" name="fixado" value="1" style="width:auto;"{fixado}> 📌 Fixar: a pessoa <strong>não pode</strong> dispensar este aviso (some só ao fim do prazo ou quando você desativar)
+            </label>
+            <div class="page-actions" style="margin-top:16px;">
+                <button type="submit" class="btn btn-primary">💾 Salvar e publicar</button>
+                <a href="/avisos" class="btn">Cancelar</a>
+            </div>
+        </form>"""
+
+
+@app.get("/avisos/novo", response_class=HTMLResponse)
+def form_novo_aviso(request: Request):
+    prof, redir = _avisos_so_gestao(request)
+    if redir:
+        return redir
+    return HTMLResponse(render_page("Novo aviso", _form_aviso_html(None, "/avisos/novo", "📢 Novo aviso"), active="avisos"))
+
+
+def _aviso_validar(titulo, mensagem, tipo, inicio, fim):
+    if not titulo.strip() or not mensagem.strip():
+        return "Preencha o título e a mensagem."
+    if tipo not in AVISO_TIPOS:
+        return "Tipo de aviso inválido."
+    try:
+        di = date.fromisoformat(inicio) if inicio else None
+        df = date.fromisoformat(fim) if fim else None
+    except ValueError:
+        return "Data inválida."
+    if di and df and df < di:
+        return "A data final não pode ser antes da inicial."
+    return ""
+
+
+def _aviso_erro(msg):
+    return HTMLResponse(render_page("Aviso", f'<div class="page-header"><h1>Não foi possível salvar</h1></div><div class="tip" style="border-color:var(--red);">{html.escape(msg)}</div><a href="javascript:history.back()" class="btn btn-primary">← Voltar e corrigir</a>', active="avisos"), status_code=400)
+
+
+@app.post("/avisos/novo")
+def criar_aviso(request: Request, titulo: str = Form(...), mensagem: str = Form(...), tipo: str = Form("info"),
+                inicio: str = Form(""), fim: str = Form(""), link_texto: str = Form(""), link_url: str = Form(""), fixado: str = Form("")):
+    prof, redir = _avisos_so_gestao(request)
+    if redir:
+        return redir
+    erro = _aviso_validar(titulo, mensagem, tipo, inicio, fim)
+    if erro:
+        return _aviso_erro(erro)
+    conn = get_db()
+    conn.execute("""INSERT INTO avisos (titulo, mensagem, tipo, inicio, fim, link_texto, link_url, fixado, ativo, criado_por_professor_id)
+                    VALUES (?,?,?,?,?,?,?,?,1,?)""",
+                 (titulo.strip(), mensagem.strip(), tipo, inicio or None, fim or None, link_texto.strip() or None,
+                  _aviso_url_segura(link_url) or None, 1 if fixado else 0, prof["id"]))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/avisos?ok=criado", status_code=303)
+
+
+@app.get("/avisos/{aviso_id}/editar", response_class=HTMLResponse)
+def form_editar_aviso(request: Request, aviso_id: int):
+    prof, redir = _avisos_so_gestao(request)
+    if redir:
+        return redir
+    conn = get_db()
+    a = conn.execute("SELECT * FROM avisos WHERE id = ?", (aviso_id,)).fetchone()
+    conn.close()
+    if not a:
+        return RedirectResponse("/avisos", status_code=303)
+    return HTMLResponse(render_page("Editar aviso", _form_aviso_html(a, f"/avisos/{aviso_id}/editar", "✏️ Editar aviso"), active="avisos"))
+
+
+@app.post("/avisos/{aviso_id}/editar")
+def salvar_aviso(request: Request, aviso_id: int, titulo: str = Form(...), mensagem: str = Form(...), tipo: str = Form("info"),
+                 inicio: str = Form(""), fim: str = Form(""), link_texto: str = Form(""), link_url: str = Form(""), fixado: str = Form("")):
+    prof, redir = _avisos_so_gestao(request)
+    if redir:
+        return redir
+    erro = _aviso_validar(titulo, mensagem, tipo, inicio, fim)
+    if erro:
+        return _aviso_erro(erro)
+    conn = get_db()
+    conn.execute("""UPDATE avisos SET titulo=?, mensagem=?, tipo=?, inicio=?, fim=?, link_texto=?, link_url=?, fixado=? WHERE id=?""",
+                 (titulo.strip(), mensagem.strip(), tipo, inicio or None, fim or None, link_texto.strip() or None,
+                  _aviso_url_segura(link_url) or None, 1 if fixado else 0, aviso_id))
+    # aviso editado volta a aparecer para quem já tinha dispensado a versão antiga
+    conn.execute("DELETE FROM avisos_dispensados WHERE aviso_id = ?", (aviso_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/avisos?ok=editado", status_code=303)
+
+
+@app.post("/avisos/{aviso_id}/alternar")
+def alternar_aviso(request: Request, aviso_id: int):
+    prof, redir = _avisos_so_gestao(request)
+    if redir:
+        return redir
+    conn = get_db()
+    conn.execute("UPDATE avisos SET ativo = CASE ativo WHEN 1 THEN 0 ELSE 1 END WHERE id = ?", (aviso_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/avisos", status_code=303)
+
+
+@app.post("/avisos/{aviso_id}/excluir")
+def excluir_aviso(request: Request, aviso_id: int):
+    prof, redir = _avisos_so_gestao(request)
+    if redir:
+        return redir
+    conn = get_db()
+    conn.execute("DELETE FROM avisos_dispensados WHERE aviso_id = ?", (aviso_id,))
+    conn.execute("DELETE FROM avisos WHERE id = ?", (aviso_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/avisos?ok=excluido", status_code=303)
+
+
+@app.post("/avisos/{aviso_id}/dispensar")
+def dispensar_aviso(request: Request, aviso_id: int):
+    """'✓ Entendi' — o aviso some só para quem clicou (não vale para avisos fixados)."""
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    a = conn.execute("SELECT fixado FROM avisos WHERE id = ?", (aviso_id,)).fetchone()
+    if a and not a["fixado"]:
+        conn.execute("INSERT OR IGNORE INTO avisos_dispensados (aviso_id, professor_id) VALUES (?, ?)", (aviso_id, prof["id"]))
+        conn.commit()
+    conn.close()
+    return RedirectResponse("/", status_code=303)
+
+
+# ============ CONFERÊNCIA COM O PONTO ELETRÔNICO (20/10/2026, a pedido de Felipe) ============
+# Todo mês a prefeitura devolve planilhas do ponto eletrônico (faltas e descontos). Esta tela cruza
+# essas planilhas com as Justificativas que os profissionais cadastraram em "Justificativas para o
+# Ponto" (tabela afastamentos) e devolve um relatório com o link do documento e o que foi escrito.
+
+CONF_DIAS_INTEIROS = {"atestado_medico", "abono_1_3", "abono_2_3", "folga_tre", "abono_integral"}
+CONF_STATUS = {
+    "ok":           ("✅ Justificado", "#16a34a"),
+    "parcial":      ("🟡 Só justificativa parcial (por horário)", "#ca8a04"),
+    "fora":         ("🟠 Há justificativa no mês, mas não cobre este dia", "#ea580c"),
+    "nenhuma":      ("❌ Nenhuma justificativa cadastrada", "#dc2626"),
+    "sem_cadastro": ("❓ Pessoa não encontrada no sistema", "#6b7280"),
+    "sem_dia":      ("⚪ Planilha sem os dias — conferir", "#6b7280"),
+}
+
+
+def _conf_norm(txt) -> str:
+    """Maiúsculas, sem acento e com espaços simples — para comparar nomes."""
+    t = unicodedata.normalize("NFKD", str(txt or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"\s+", " ", t).strip().upper()
+
+
+def _conf_matricula(v) -> str:
+    """Só os dígitos da matrícula, sem zeros à esquerda ('481009', 481009 e '0481009' viram '481009')."""
+    s = re.sub(r"\D", "", str(v or "").split(".")[0] if isinstance(v, float) else str(v or ""))
+    return s.lstrip("0")
+
+
+def _conf_ler_planilha(conteudo: bytes) -> list:
+    """Lê a primeira aba de uma planilha do ponto e devolve uma lista de dicts. Acha as colunas pelo
+    nome do cabeçalho (Matrícula, Nome, Cargo, Unidade..., Situação funcional, Quantitativo, Dias /
+    'Dia e motivo'); a coluna logo depois de 'Dias' é lida como observação."""
+    wb = load_workbook(BytesIO(conteudo), data_only=True)
+    ws = wb.active
+    linhas = list(ws.iter_rows(values_only=True))
+    idx_cab = None
+    for i, r in enumerate(linhas[:15]):
+        if any("MATRIC" in _conf_norm(c) for c in r if c):
+            idx_cab = i
+            break
+    if idx_cab is None:
+        raise ValueError("Não encontrei a linha de títulos (a coluna 'Matrícula') na planilha.")
+    cab = [_conf_norm(c) for c in linhas[idx_cab]]
+
+    def col(*chaves, inicio=False):
+        for j, c in enumerate(cab):
+            for k in chaves:
+                if (c.startswith(k) if inicio else k in c):
+                    return j
+        return None
+
+    c_mat = col("MATRIC"); c_nome = col("NOME"); c_cargo = col("CARGO")
+    c_uni = col("UNIDADE", inicio=True); c_sit = col("SITUACAO")
+    c_qtd = col("QUANTITATIVO"); c_dias = col("DIA", inicio=True)
+    if c_mat is None or c_nome is None:
+        raise ValueError("A planilha precisa ter as colunas 'Matrícula' e 'Nome'.")
+    c_obs = (c_dias + 1) if (c_dias is not None and c_dias + 1 < len(cab)) else None
+
+    def cel(r, j):
+        return r[j] if (j is not None and j < len(r)) else None
+
+    saida = []
+    for r in linhas[idx_cab + 1:]:
+        if not r or not cel(r, c_nome) or not _conf_matricula(cel(r, c_mat)):
+            continue
+        saida.append({
+            "matricula": _conf_matricula(cel(r, c_mat)),
+            "nome": re.sub(r"\s+", " ", str(cel(r, c_nome)).strip()),
+            "cargo": re.sub(r"\s+", " ", str(cel(r, c_cargo) or "").strip()),
+            "unidade": re.sub(r"\s+", " ", str(cel(r, c_uni) or "").strip()),
+            "situacao": re.sub(r"\s+", " ", str(cel(r, c_sit) or "").strip()),
+            "quantitativo": cel(r, c_qtd),
+            "dias_bruto": cel(r, c_dias),
+            "obs": str(cel(r, c_obs)).strip() if cel(r, c_obs) not in (None, "") else "",
+        })
+    return saida
+
+
+def _conf_dias_faltas(texto) -> tuple:
+    """Planilha de faltas: 'dias 3, 18 e 25/09 - não justificados' -> ([(3,9),(18,9),(25,9)], 'não justificados').
+    Aceita '29/09 - ...', 'dias 3 e 09/09 - ...' e 'dia 3/09 e 5/09'."""
+    t = str(texto or "").strip()
+    dias = []
+    for m in re.finditer(r"(\d{1,2}(?:\s*(?:,|e)\s*\d{1,2})*)\s*/\s*(\d{1,2})", t):
+        mes = int(m.group(2))
+        for d in re.findall(r"\d{1,2}", m.group(1)):
+            dias.append((int(d), mes))
+    motivo = t.split(" - ", 1)[1].strip() if " - " in t else ""
+    return dias, motivo
+
+
+def _conf_dias_descontos(valor) -> tuple:
+    """Planilha de descontos: '16,23,30' ou '24.25' (= dias 24 e 25) ou o número 1.8 (= dias 1 e 8).
+    Devolve (lista de dias, aviso). Número decimal terminado em 1, 2 ou 3 é ambíguo
+    (2.2 pode ser dias 2 e 2... ou 2 e 20, porque o Excel corta o zero final) e gera aviso."""
+    if valor in (None, ""):
+        return [], ""
+    aviso = ""
+    if isinstance(valor, (int, float)):
+        txt = repr(float(valor)) if isinstance(valor, float) else str(valor)
+        if txt.endswith(".0"):
+            txt = txt[:-2]
+        if isinstance(valor, float) and "." in txt and len(txt.split(".")[1]) == 1 and txt.split(".")[1] in ("1", "2", "3"):
+            aviso = f"o valor '{txt}' pode ser os dias {txt.split('.')[0]} e {txt.split('.')[1]} ou {txt.split('.')[0]} e {txt.split('.')[1]}0 — confira"
+    else:
+        txt = str(valor)
+    dias = [int(d) for d in re.findall(r"\d{1,2}", txt) if 1 <= int(d) <= 31]
+    return dias, aviso
+
+
+def _conf_indices_pessoas(conn):
+    profs = conn.execute("SELECT id, nome, email, matricula FROM professores").fetchall()
+    por_mat, por_nome = {}, {}
+    for p in profs:
+        m = _conf_matricula(_matricula_professor(p))
+        if m:
+            por_mat.setdefault(m, p)
+        por_nome.setdefault(_conf_norm(p["nome"]), p)
+    return profs, por_mat, por_nome
+
+
+def _conf_achar_pessoa(matricula, nome, profs, por_mat, por_nome):
+    """(professor|None, como_achou). Tenta matrícula, depois nome igual e por fim nome truncado
+    (o ponto corta o nome em ~35 letras)."""
+    if matricula in por_mat:
+        return por_mat[matricula], "matrícula"
+    n = _conf_norm(nome)
+    if n in por_nome:
+        return por_nome[n], "nome (matrícula diferente)"
+    if len(n) >= 20:
+        cands = [p for p in profs if _conf_norm(p["nome"]).startswith(n) or n.startswith(_conf_norm(p["nome"]))]
+        if len(cands) == 1:
+            return cands[0], "nome parcial"
+    return None, ""
+
+
+def _conf_afastamentos_do_mes(conn, mes, ano):
+    import calendar
+    ult = calendar.monthrange(ano, mes)[1]
+    ini, fim = f"{ano:04d}-{mes:02d}-01", f"{ano:04d}-{mes:02d}-{ult:02d}"
+    rows = conn.execute(
+        """SELECT * FROM afastamentos WHERE data_inicio <= ? AND data_fim >= ? ORDER BY data_inicio""", (fim, ini)).fetchall()
+    por_prof = {}
+    for r in rows:
+        por_prof.setdefault(r["professor_id"], []).append({
+            "id": r["id"], "tipo": r["tipo"], "tipo_label": TIPOS_AFASTAMENTO.get(r["tipo"], r["tipo"]),
+            "ini": r["data_inicio"], "fim": r["data_fim"], "horario": _fmt_horario_afastamento(r),
+            "obs": r["observacao"] or "", "link": r["arquivo_drive_link"] or "",
+            "arquivo_nome": r["arquivo_nome"] or "", "status_upload": r["status_upload"],
+            "criado_em": str(r["criado_em"] or "")[:16],
+        })
+    return por_prof
+
+
+def _conf_cobertura(afs, data_iso):
+    """(status, [afastamentos que cobrem o dia])."""
+    cobre = [a for a in afs if a["ini"] <= data_iso <= a["fim"]]
+    if any(a["tipo"] in CONF_DIAS_INTEIROS for a in cobre):
+        return "ok", cobre
+    if cobre:
+        return "parcial", cobre
+    return ("fora" if afs else "nenhuma"), []
+
+
+def _conf_montar(conn, faltas, descontos, mes, ano):
+    profs, por_mat, por_nome = _conf_indices_pessoas(conn)
+    afs_por_prof = _conf_afastamentos_do_mes(conn, mes, ano)
+    avisos = []
+
+    def base(item):
+        prof, via = _conf_achar_pessoa(item["matricula"], item["nome"], profs, por_mat, por_nome)
+        return prof, via, (afs_por_prof.get(prof["id"], []) if prof else [])
+
+    res_faltas = []
+    for it in faltas:
+        prof, via, afs = base(it)
+        dias, motivo = _conf_dias_faltas(it["dias_bruto"])
+        itens = []
+        for d, m in dias:
+            try:
+                dt = date(ano, m, d)
+            except ValueError:
+                avisos.append(f"{it['nome']}: dia inválido '{d}/{m:02d}' na planilha de faltas.")
+                continue
+            if m != mes:
+                avisos.append(f"{it['nome']}: a planilha cita {d:02d}/{m:02d}, mas o mês escolhido é {mes:02d}/{ano}.")
+            if not prof:
+                st, cob = "sem_cadastro", []
+            else:
+                st, cob = _conf_cobertura(afs, dt.isoformat())
+            itens.append({"dia": dt.strftime("%d/%m/%Y"), "status": st, "cobertura": cob})
+        if not itens:
+            itens.append({"dia": "—", "status": "sem_dia" if prof else "sem_cadastro", "cobertura": []})
+        res_faltas.append({**it, "prof": prof, "via": via, "afs": afs, "motivo_ponto": motivo or str(it["dias_bruto"] or ""), "itens": itens})
+
+    res_desc = []
+    for it in descontos:
+        prof, via, afs = base(it)
+        dias, aviso = _conf_dias_descontos(it["dias_bruto"])
+        if aviso:
+            avisos.append(f"{it['nome']}: {aviso}.")
+        itens = []
+        for d in dias:
+            try:
+                dt = date(ano, mes, d)
+            except ValueError:
+                avisos.append(f"{it['nome']}: dia {d} não existe em {mes:02d}/{ano}.")
+                continue
+            if not prof:
+                st, cob = "sem_cadastro", []
+            else:
+                st, cob = _conf_cobertura(afs, dt.isoformat())
+            itens.append({"dia": dt.strftime("%d/%m/%Y"), "status": st, "cobertura": cob})
+        if not itens:
+            if not prof:
+                st = "sem_cadastro"
+            else:
+                st = "sem_dia" if afs else "nenhuma"
+            itens.append({"dia": "—", "status": st, "cobertura": []})
+        res_desc.append({**it, "prof": prof, "via": via, "afs": afs, "itens": itens})
+
+    def contar(lista):
+        c = {k: 0 for k in CONF_STATUS}
+        for x in lista:
+            for i in x["itens"]:
+                c[i["status"]] += 1
+        return c
+    return {"mes": mes, "ano": ano, "faltas": res_faltas, "descontos": res_desc, "avisos": avisos,
+            "cont_faltas": contar(res_faltas), "cont_desc": contar(res_desc)}
+
+
+def _conf_linhas(item):
+    """Linhas planas (uma por dia × justificativa) usadas na tela e no Excel."""
+    linhas = []
+    for i in item["itens"]:
+        regs = i["cobertura"] or (item["afs"] if i["status"] in ("fora", "sem_dia") else [])
+        if not regs:
+            linhas.append((i, None))
+        for a in regs:
+            linhas.append((i, a))
+    return linhas
+
+
+def _conf_html(res, token):
+    esc = html.escape
+    meses = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+
+    def chip(st):
+        txt, cor = CONF_STATUS[st]
+        return f'<span class="cf-chip" style="background:{cor};">{txt}</span>'
+
+    def cards(cont, titulo):
+        total = sum(cont.values())
+        partes = "".join(
+            f'<div class="cf-card"><div class="cf-num" style="color:{CONF_STATUS[k][1]};">{v}</div>'
+            f'<div class="cf-lbl">{CONF_STATUS[k][0]}</div></div>' for k, v in cont.items() if v)
+        return f'<h3 style="margin:22px 0 8px;">{titulo} <small style="font-weight:400;color:var(--text-muted);">({total} ocorrência(s))</small></h3><div class="cf-cards">{partes or "<em>Nada nesta planilha.</em>"}</div>'
+
+    def tabela(lista, tipo):
+        if not lista:
+            return '<p style="color:var(--text-muted);">Nenhuma linha desta unidade na planilha.</p>'
+        cab_extra = "Desconto" if tipo == "desc" else "Motivo no ponto"
+        out = ['<div style="overflow-x:auto;"><table class="cf-tab"><thead><tr>'
+               f'<th>Servidor</th><th>{cab_extra}</th><th>Dia</th><th>Conferência</th>'
+               '<th>Justificativa cadastrada</th><th>O que o servidor escreveu</th><th>Documento</th></tr></thead><tbody>']
+        for k, it in enumerate(lista):
+            zebra = "cf-z1" if k % 2 else "cf-z0"
+            sit = esc(it["situacao"]) if tipo == "desc" else esc(it["motivo_ponto"])
+            if tipo == "desc":
+                sit += f' · {esc(str(it["quantitativo"]))} dia(s)'
+                if it["obs"]:
+                    sit += f'<br><small>Obs. da planilha: {esc(it["obs"])}</small>'
+            linhas = _conf_linhas(it)
+            for n, (i, a) in enumerate(linhas):
+                # nome e motivo em todas as linhas, para o filtro "só pendências" nunca esconder quem é a pessoa
+                pessoa = (f'<strong>{esc(it["nome"])}</strong><br><small>Mat. {esc(it["matricula"])} · {esc(it["cargo"])}'
+                          + (f'<br>achado por {esc(it["via"])}' if it["via"] and it["via"] != "matrícula" else "") + '</small>')
+                detalhe = sit
+                if a:
+                    per = f'{_fmt_data_br(a["ini"])}' + (f' a {_fmt_data_br(a["fim"])}' if a["fim"] != a["ini"] else "")
+                    just = f'<strong>{esc(a["tipo_label"])}</strong><br>{per}' + (f' · {esc(a["horario"])}' if a["horario"] and a["horario"] != "—" else "")
+                    obs = esc(a["obs"]) or '<em style="color:var(--text-muted);">sem observação</em>'
+                    if a["link"]:
+                        doc = f'<a href="{esc(a["link"])}" target="_blank">📎 Abrir documento</a>'
+                    elif a["status_upload"] == "erro":
+                        doc = "⚠️ falha no envio ao Drive"
+                    else:
+                        doc = '<span style="color:var(--text-muted);">sem documento anexado</span>'
+                    doc += f' · <a href="/administrativo/afastamentos/{a["id"]}/editar" target="_blank">ver cadastro</a>'
+                else:
+                    just = obs = doc = '<span style="color:var(--text-muted);">—</span>'
+                out.append(f'<tr class="{zebra}" data-st="{i["status"]}"><td>{pessoa}</td><td>{detalhe}</td><td style="white-space:nowrap;">{i["dia"]}</td>'
+                           f'<td>{chip(i["status"])}</td><td>{just}</td><td>{obs}</td><td>{doc}</td></tr>')
+        out.append('</tbody></table></div>')
+        return "".join(out)
+
+    avisos = ""
+    if res["avisos"]:
+        avisos = ('<div class="tip" style="border-color:var(--orange);margin:14px 0;"><strong>Atenção:</strong><ul style="margin:6px 0 0 18px;">' +
+                  "".join(f"<li>{esc(a)}</li>" for a in res["avisos"][:30]) + '</ul></div>')
+    css = """<style>
+    .cf-cards{display:flex;gap:10px;flex-wrap:wrap}.cf-card{border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:150px;background:var(--card)}
+    .cf-num{font-size:26px;font-weight:800}.cf-lbl{font-size:12px;color:var(--text-muted)}
+    .cf-chip{display:inline-block;color:#fff;border-radius:12px;padding:2px 9px;font-size:11px;font-weight:600;white-space:nowrap}
+    .cf-tab{width:100%;border-collapse:collapse;font-size:12.5px}.cf-tab th{background:var(--bg-subtle);padding:7px;text-align:left;position:sticky;top:0}
+    .cf-tab td{padding:7px;vertical-align:top;border-top:1px solid var(--border)}.cf-z1{background:var(--bg-subtle)}
+    </style>"""
+    js = """<script>
+    function cfFiltrar(v){document.querySelectorAll('.cf-tab tbody tr').forEach(function(tr){
+      var st=tr.getAttribute('data-st'); var pend=(st!=='ok');
+      tr.style.display=(v==='todos'||pend)?'':'none';});}
+    </script>"""
+    topo = (f'<div class="page-header"><h1>🔎 Conferência com o Ponto — {meses[res["mes"]]}/{res["ano"]}</h1></div>'
+            f'<div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px;">'
+            f'<a class="btn btn-primary" href="/administrativo/conferencia-ponto/excel/{token}">📥 Baixar relatório em Excel</a>'
+            f'<a class="btn" href="/administrativo/conferencia-ponto">← Nova conferência</a>'
+            f'<label style="margin:0 0 0 auto;font-size:13px;">Mostrar <select onchange="cfFiltrar(this.value)"><option value="todos">Tudo</option><option value="pend">Só pendências (tudo que não está ✅)</option></select></label></div>')
+    return (css + topo + avisos +
+            cards(res["cont_faltas"], "Planilha de FALTAS") + tabela(res["faltas"], "falta") +
+            cards(res["cont_desc"], "Planilha de DESCONTOS") + tabela(res["descontos"], "desc") + js)
+
+
+def _conf_excel(res) -> bytes:
+    wb = Workbook()
+    meses = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+    cores = {"ok": "DCFCE7", "parcial": "FEF9C3", "fora": "FFEDD5", "nenhuma": "FEE2E2", "sem_cadastro": "E5E7EB", "sem_dia": "E5E7EB"}
+    cab_fill = PatternFill(start_color="4B5563", end_color="4B5563", fill_type="solid")
+
+    ws = wb.active
+    ws.title = "Resumo"
+    ws.append([f"Conferência com o ponto — {meses[res['mes']]}/{res['ano']}"]); ws["A1"].font = Font(bold=True, size=14)
+    ws.append([])
+    for titulo, cont in (("Planilha de FALTAS", res["cont_faltas"]), ("Planilha de DESCONTOS", res["cont_desc"])):
+        ws.append([titulo]); ws.cell(ws.max_row, 1).font = Font(bold=True)
+        for k, v in cont.items():
+            ws.append([CONF_STATUS[k][0], v])
+        ws.append([])
+    if res["avisos"]:
+        ws.append(["Avisos"]); ws.cell(ws.max_row, 1).font = Font(bold=True)
+        for a in res["avisos"]:
+            ws.append([a])
+    ws.column_dimensions["A"].width = 70
+
+    def folha(nome, lista, tipo):
+        w = wb.create_sheet(nome)
+        cab = ["Matrícula", "Nome", "Cargo", "Desconto / motivo no ponto", "Obs. da planilha", "Dia", "Conferência",
+               "Justificativa cadastrada", "Período cadastrado", "Horário", "O que o servidor escreveu",
+               "Link do documento", "Envio ao Drive", "Cadastrada em", "Como achei a pessoa"]
+        w.append(cab)
+        for c in w[1]:
+            c.font = Font(bold=True, color="FFFFFF"); c.fill = cab_fill; c.alignment = Alignment(horizontal="center", wrap_text=True)
+        for it in lista:
+            det = (f'{it["situacao"]} · {it["quantitativo"]} dia(s)' if tipo == "desc" else it["motivo_ponto"])
+            for i, a in _conf_linhas(it):
+                per = ""
+                if a:
+                    per = _fmt_data_br(a["ini"]) + (f' a {_fmt_data_br(a["fim"])}' if a["fim"] != a["ini"] else "")
+                w.append([it["matricula"], it["nome"], it["cargo"], det, it["obs"], i["dia"], CONF_STATUS[i["status"]][0],
+                          a["tipo_label"] if a else "", per, (a["horario"] if a and a["horario"] != "—" else ""),
+                          a["obs"] if a else "", a["link"] if a else "",
+                          {"enviado": "enviado", "erro": "FALHA no envio", "sem_documento": "sem documento"}.get(a["status_upload"], a["status_upload"]) if a else "",
+                          a["criado_em"] if a else "", it["via"] or "não encontrado"])
+                w.cell(w.max_row, 7).fill = PatternFill(start_color=cores[i["status"]], end_color=cores[i["status"]], fill_type="solid")
+                if a and a["link"]:
+                    c = w.cell(w.max_row, 12); c.hyperlink = a["link"]; c.font = Font(color="0563C1", underline="single")
+        for n, larg in enumerate([11, 34, 22, 30, 24, 12, 34, 24, 24, 14, 44, 44, 14, 16, 18], start=1):
+            w.column_dimensions[get_column_letter(n)].width = larg
+        w.freeze_panes = "C2"
+        for row in w.iter_rows(min_row=2):
+            for c in row:
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+
+    folha("Faltas x Sistema", res["faltas"], "falta")
+    folha("Descontos x Sistema", res["descontos"], "desc")
+    buf = BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+
+def _conf_dir():
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "conferencia_ponto")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@app.get("/administrativo/conferencia-ponto", response_class=HTMLResponse)
+def form_conferencia_ponto(request: Request):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    hoje = date.today()
+    mes_ant = hoje.month - 1 or 12
+    ano_ant = hoje.year if hoje.month > 1 else hoje.year - 1
+    meses = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+    opts = "".join(f'<option value="{i}"{" selected" if i == mes_ant else ""}>{meses[i]}</option>' for i in range(1, 13))
+    content = f"""
+        <div class="page-header"><h1>🔎 Conferência com o Ponto</h1>
+        <p class="subtitle">Suba as planilhas do ponto eletrônico e o sistema cruza com as Justificativas cadastradas pelos servidores.</p></div>
+        <form action="/administrativo/conferencia-ponto" method="post" enctype="multipart/form-data" style="max-width:640px;">
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                <label style="flex:1 1 160px;">Mês das planilhas <select name="mes">{opts}</select></label>
+                <label style="flex:1 1 120px;">Ano <input type="number" name="ano" value="{ano_ant}" min="2024" max="2035" required></label>
+                <label style="flex:2 1 220px;">Só a unidade que contém <input type="text" name="unidade" value="WALMIR"></label>
+            </div>
+            <label>Planilha de FALTAS (relação de frequência — faltas)
+                <input type="file" name="arquivo_faltas" accept=".xlsx"></label>
+            <label>Planilha de DESCONTOS (relação de frequência — descontos)
+                <input type="file" name="arquivo_descontos" accept=".xlsx"></label>
+            <div class="tip">Pode subir só uma das duas. Na planilha de descontos, se a coluna "Dias" estiver preenchida (ex.: 16,23,30), o sistema confere dia a dia. As planilhas não ficam guardadas: o relatório gerado fica disponível por 24 horas para baixar.</div>
+            <div class="page-actions"><button type="submit" class="btn btn-primary">Gerar relatório</button></div>
+        </form>"""
+    return HTMLResponse(render_page("Conferência com o Ponto", content, active="administrativo-conferencia"))
+
+
+@app.post("/administrativo/conferencia-ponto", response_class=HTMLResponse)
+async def gerar_conferencia_ponto(request: Request, mes: int = Form(...), ano: int = Form(...), unidade: str = Form("WALMIR"),
+                                  arquivo_faltas: Optional[UploadFile] = File(None), arquivo_descontos: Optional[UploadFile] = File(None)):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+
+    def erro(msg):
+        return HTMLResponse(render_page("Conferência com o Ponto", f'<div class="page-header"><h1>Não consegui gerar</h1></div><p>{html.escape(msg)}</p><a href="/administrativo/conferencia-ponto" class="btn">Voltar</a>', active="administrativo-conferencia"))
+
+    if not (1 <= mes <= 12):
+        return erro("Mês inválido.")
+    faltas, descontos = [], []
+    filtro = _conf_norm(unidade)
+    try:
+        if arquivo_faltas is not None and arquivo_faltas.filename:
+            faltas = [x for x in _conf_ler_planilha(await arquivo_faltas.read()) if filtro in _conf_norm(x["unidade"])]
+        if arquivo_descontos is not None and arquivo_descontos.filename:
+            descontos = [x for x in _conf_ler_planilha(await arquivo_descontos.read()) if filtro in _conf_norm(x["unidade"])]
+    except Exception as e:
+        return erro(f"Problema ao ler a planilha: {e}")
+    if not faltas and not descontos:
+        return erro(f"Nenhuma linha encontrada. Confira se subiu ao menos uma planilha .xlsx e se a unidade '{unidade}' aparece nela.")
+
+    conn = get_db()
+    res = _conf_montar(conn, faltas, descontos, mes, ano)
+    conn.close()
+
+    # guarda o Excel por 24h (pasta temporária do servidor) para o botão de download
+    pasta = _conf_dir()
+    import time as _t
+    for f in os.listdir(pasta):
+        fp = os.path.join(pasta, f)
+        try:
+            if _t.time() - os.path.getmtime(fp) > 86400:
+                os.remove(fp)
+        except OSError:
+            pass
+    token = secrets.token_urlsafe(16)
+    with open(os.path.join(pasta, f"{token}.xlsx"), "wb") as fh:
+        fh.write(_conf_excel(res))
+    with open(os.path.join(pasta, f"{token}.nome"), "w") as fh:
+        fh.write(f"conferencia_ponto_{ano}_{mes:02d}.xlsx")
+    return HTMLResponse(render_page("Conferência com o Ponto", _conf_html(res, token), active="administrativo-conferencia"))
+
+
+@app.get("/administrativo/conferencia-ponto/excel/{token}")
+def baixar_conferencia_ponto(request: Request, token: str):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,40}", token):
+        return RedirectResponse("/administrativo/conferencia-ponto", status_code=303)
+    caminho = os.path.join(_conf_dir(), f"{token}.xlsx")
+    if not os.path.exists(caminho):
+        return HTMLResponse(render_page("Conferência com o Ponto", '<div class="page-header"><h1>Relatório expirado</h1></div><p>Os relatórios ficam disponíveis por 24 horas. Gere novamente.</p><a href="/administrativo/conferencia-ponto" class="btn btn-primary">Nova conferência</a>', active="administrativo-conferencia"))
+    nome = "conferencia_ponto.xlsx"
+    try:
+        nome = open(os.path.join(_conf_dir(), f"{token}.nome")).read().strip() or nome
+    except OSError:
+        pass
+    with open(caminho, "rb") as fh:
+        dados = fh.read()
+    return StreamingResponse(BytesIO(dados), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f"attachment; filename={nome}"})
+
 
 
 # ============ ATESTADOS MÉDICOS DE ALUNOS (27/08/2026) ============
@@ -6459,6 +7253,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
         nav_body = f"""
                 {nav_item("/", "home", "🏠", "Início")}
                 {nav_item("/painel-rapido", "painel-rapido", "📱", "Resumo Rápido") if professor else ""}
+                {nav_item("/avisos", "avisos", "📢", "Avisos da gestão") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 <div class="sidebar-section">Banco de questões</div>
                 {nav_item("/questoes", "questoes", "✏️", "Cadastrar questão")}
                 <div class="sidebar-section">Tarefas</div>
@@ -6478,7 +7273,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
                 {secao_boletim}
                 {secao_configuracoes}
-                {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
+                {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") + nav_item("/administrativo/conferencia-ponto", "administrativo-conferencia", "🔎", "Conferência com o Ponto") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {('<div class="sidebar-section">Atestados de Alunos</div>' + nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado") + nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")) if _pode_ver_atestados_alunos(professor) else ""}
                 {('<div class="sidebar-section">Ocorrências Disciplinares</div>' + nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência") + nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")) if _pode_ver_ocorrencias(professor) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
@@ -6708,7 +7503,7 @@ def _limpar_texto_compartilhado_orfao(conn, tid):
         conn.execute("DELETE FROM textos_compartilhados WHERE id = ?", (tid,))
 
 
-def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False, pode_editar=True, autor_nome=None):
+def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False, pode_editar=True, autor_nome=None, ctx_texto=None, extra_acoes_html=""):
     """
     pode_editar: se False, esconde botões Editar/Excluir mesmo com mostrar_acoes=True.
     autor_nome: se passado, exibe badge 'Por: <nome>' (usado quando admin lista questões alheias).
@@ -6719,7 +7514,11 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
     habilidades = conn.execute("SELECT h.codigo FROM questao_habilidades qh JOIN habilidades_bncc h ON h.id = qh.habilidade_id WHERE qh.questao_id = ? ORDER BY h.codigo", (q["id"],)).fetchall()
     ano_q = q["ano"] if "ano" in q.keys() and q["ano"] else None
 
-    textos_html = _html_texto_compartilhado_card(conn, q)
+    if ctx_texto is not None:
+        # visão de PROVA: o texto compartilhado aparece uma vez só (na 1ª questão do conjunto)
+        textos_html = _html_texto_compartilhado(conn, q["id"], numero, ctx_texto)
+    else:
+        textos_html = _html_texto_compartilhado_card(conn, q)
     for t in textos:
         fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
         textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
@@ -6842,9 +7641,12 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'<div class="question-header" style="margin:0;">Q{q["id"]} · {q["disciplina_nome"]}{ano_badge}{tipo_badge}{autor_badge_inline}{anulada_badge}{habs_inline}</div>'
             f'<div style="margin-top:6px; color:var(--text); font-size:14px; line-height:1.5;">{preview}</div>'
             f'</div>'
+            f'<div style="display:flex; flex-direction:column; gap:6px; align-items:stretch;">'
             f'<button type="button" onclick="toggleQuestao({q["id"]})" id="q-toggle-{q["id"]}" '
             f'style="background:none; border:1px solid var(--border); border-radius:4px; padding:4px 10px; color:var(--text-muted); cursor:pointer; font-size:11px; white-space:nowrap; font-family:inherit;">'
             f'Ver completa ▾</button>'
+            f'{extra_acoes_html}'
+            f'</div>'
             f'</div>'
             f'<div id="q-detalhes-{q["id"]}" style="display:none; margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">'
             f'{textos_html}{imagens_html}'
@@ -7088,6 +7890,7 @@ def home(request: Request):
 
     # Atalho "Novo atestado de aluno" — seleção de turma+aluno direto na tela inicial,
     # que já leva pro cadastro com o aluno pré-selecionado (27/08/2026, a pedido).
+    avisos_home_html = _avisos_home_html(conn, prof)
     atestado_widget_dados = None
     if _pode_ver_atestados_alunos(prof):
         turmas_widget = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
@@ -7106,6 +7909,7 @@ def home(request: Request):
         ("📄", "Nova Justificativa", "/administrativo/afastamentos/novo", True),
         ("📋", "Minhas Justificativas", "/administrativo/afastamentos", True),
         ("📊", "Relatório", "/administrativo/relatorio", is_admin or is_gestor),
+        ("🔎", "Conferência com o Ponto", "/administrativo/conferencia-ponto", is_admin or is_gestor),
     ])
     grupo_atestados_alunos = ("Atestados de Alunos", "#0d9488", [
         ("🩺", "Novo atestado", "/administrativo/atestados-alunos/novo", True),
@@ -7150,6 +7954,7 @@ def home(request: Request):
             grupo_ocorrencias,
             ("Gestão", "#7c3aed", [
                 ("🏛️", "Painel gestão", "/painel-gestao", is_admin or is_gestor),
+                ("📢", "Avisos", "/avisos", is_admin or is_gestor),
                 ("👤", "Usuários", "/admin/usuarios", is_admin),
             ]),
         ] if g]
@@ -7350,55 +8155,8 @@ def home(request: Request):
         </div>
         """
 
-    destaque_lancamento_manual = ""
-    if prof and not eh_apoio_restrito and not eh_orientacao_restrito:
-        # Banner em destaque pro Lançamento Manual de nota/falta (11/09/2026) — sistema
-        # da rede (e-cidade) fora do ar, professores precisam achar isso rápido, sem
-        # procurar no menu. Fica bem no topo da tela inicial, antes de tudo o mais.
-        destaque_lancamento_manual = """
-        <a href="/boletim/lancamento-manual" class="destaque-urgente">
-            <div class="destaque-urgente-icon">📝</div>
-            <div class="destaque-urgente-texto">
-                <div class="destaque-urgente-titulo">Lançamento Manual de Nota e Falta — 2º Trimestre</div>
-                <div class="destaque-urgente-sub">Sistema da rede fora do ar? Lance aqui — atualiza os dashboards, risco de repetência e Conselho de Classe na hora.</div>
-            </div>
-            <div class="destaque-urgente-seta">→</div>
-        </a>
-        <style>
-        .destaque-urgente {
-            display: flex; align-items: center; gap: 14px;
-            background: linear-gradient(135deg, #ea580c, #dc2626);
-            color: white; text-decoration: none;
-            padding: 14px 18px; border-radius: 12px; margin-bottom: 20px;
-            box-shadow: 0 4px 14px rgba(220,38,38,0.35);
-            transition: transform 0.12s ease, box-shadow 0.12s ease;
-        }
-        .destaque-urgente:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(220,38,38,0.45); }
-        .destaque-urgente-icon { font-size: 28px; line-height: 1; flex-shrink: 0; }
-        .destaque-urgente-texto { flex: 1; min-width: 0; }
-        .destaque-urgente-titulo { font-weight: 700; font-size: 14px; }
-        .destaque-urgente-sub { font-size: 12px; opacity: 0.92; margin-top: 2px; }
-        .destaque-urgente-seta { font-size: 20px; flex-shrink: 0; }
-        </style>
-        """
-        if is_admin or is_gestor:
-            # Gestão/admin também ganha um atalho pro painel de acompanhamento (% de
-            # turma×disciplina já lançada) — cor diferente pra não confundir com o
-            # banner de lançar nota em si (11/09/2026).
-            destaque_lancamento_manual += """
-            <a href="/boletim/painel-lancamentos" class="destaque-urgente destaque-urgente-gestao">
-                <div class="destaque-urgente-icon">📊</div>
-                <div class="destaque-urgente-texto">
-                    <div class="destaque-urgente-titulo">Painel de Lançamentos</div>
-                    <div class="destaque-urgente-sub">Veja o % de turmas/disciplinas com nota já lançada e quais ainda faltam.</div>
-                </div>
-                <div class="destaque-urgente-seta">→</div>
-            </a>
-            <style>
-            .destaque-urgente-gestao { background: linear-gradient(135deg, #4C6EF5, #7c3aed); box-shadow: 0 4px 14px rgba(76,110,245,0.35); }
-            .destaque-urgente-gestao:hover { box-shadow: 0 6px 18px rgba(76,110,245,0.45); }
-            </style>
-            """
+    # (22/10/2026) Os balões fixos "Lançamento Manual de Nota e Falta" e "Painel de Lançamentos"
+    # foram retirados da tela inicial. Agora o topo mostra os AVISOS criados pela gestão (/avisos).
 
     content = f"""
         <div class="page-header">
@@ -7407,7 +8165,7 @@ def home(request: Request):
         </div>
         <div class="home-layout">
             <div class="home-layout-main">
-                {destaque_lancamento_manual}
+                {avisos_home_html}
                 {mobile_launcher_html}
                 {aplicacoes_abertas_html}
             </div>
@@ -7786,6 +8544,7 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
     # Montar query com filtros aplicados — agora trazendo também o autor
     sql = """
         SELECT DISTINCT q.id, q.enunciado, q.ano, q.criada_por_professor_id, q.tipo,
+               q.texto_compartilhado_id, q.anulada,
                d.id AS disciplina_id, d.nome AS disciplina_nome,
                aut.nome AS autor_nome
         FROM questoes q
@@ -7908,6 +8667,33 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
         f'</div></form>'
     )
 
+    # Provas em que o professor pode incluir questões direto do banco (rascunho/devolvida e ainda
+    # sem aplicação em turma) — alimenta a barra "➕ Adicionar à prova" e os botões dos cards.
+    provas_alvo = []
+    esc_banco = {"restrito": False, "ids": set()}
+    if prof:
+        if prof.get("is_admin") or prof.get("is_gestor"):
+            # Admin e gestão veem TODAS as provas (de qualquer autor e em qualquer situação)
+            provas_alvo = conn.execute("""
+                SELECT p.id, p.titulo, (SELECT COUNT(*) FROM prova_questoes WHERE prova_id = p.id) AS n,
+                       pr.nome AS autor
+                FROM provas p LEFT JOIN professores pr ON pr.id = p.criada_por_professor_id
+                ORDER BY p.id DESC LIMIT 300
+            """).fetchall()
+        else:
+            provas_alvo = conn.execute("""
+                SELECT p.id, p.titulo, (SELECT COUNT(*) FROM prova_questoes WHERE prova_id = p.id) AS n,
+                       NULL AS autor
+                FROM provas p
+                WHERE p.criada_por_professor_id = ?
+                  AND COALESCE(p.status_revisao, 'rascunho') IN ('rascunho', 'devolvida')
+                  AND p.id NOT IN (SELECT prova_id FROM aplicacoes)
+                ORDER BY p.id DESC LIMIT 40
+            """, (prof["id"],)).fetchall()
+        esc_banco = _escopo_disciplinas_prof(conn, prof)
+    tc_contagem = {r["tid"]: r["c"] for r in conn.execute(
+        "SELECT texto_compartilhado_id AS tid, COUNT(*) AS c FROM questoes WHERE texto_compartilhado_id IS NOT NULL GROUP BY texto_compartilhado_id").fetchall()}
+
     if questoes:
         cards_list = []
         for qx in questoes:
@@ -7915,9 +8701,19 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
             # Badge "Por: X" só pra admin (e quando o autor é diferente do admin logado)
             mostrar_autor = is_admin and qx["autor_nome"] and qx["criada_por_professor_id"] != prof["id"]
             autor_nome_card = qx["autor_nome"] if mostrar_autor else None
+            extra = ""
+            if provas_alvo and ((not esc_banco["restrito"]) or qx["disciplina_id"] in esc_banco["ids"]):
+                extra = (f'<button type="button" class="btn btn-add-prova" id="add-{qx["id"]}" '
+                         f'style="padding:4px 10px; font-size:11px; white-space:nowrap;" '
+                         f'onclick="adicionarAProva({qx["id"]}, false, this)">➕ Adicionar à prova</button>')
+                if qx["texto_compartilhado_id"] and tc_contagem.get(qx["texto_compartilhado_id"], 0) > 1:
+                    extra += (f'<button type="button" class="btn btn-add-prova" '
+                              f'style="padding:4px 10px; font-size:11px; white-space:nowrap;" '
+                              f'onclick="adicionarAProva({qx["id"]}, true, this)" title="Adiciona todas as questões que usam o mesmo texto">'
+                              f'➕ As {tc_contagem[qx["texto_compartilhado_id"]]} do texto</button>')
             cards_list.append(render_questao_card(
                 conn, qx, mostrar_acoes=True, compact=True,
-                pode_editar=pode_ed, autor_nome=autor_nome_card
+                pode_editar=pode_ed, autor_nome=autor_nome_card, extra_acoes_html=extra
             ))
         cards = "".join(cards_list)
     else:
@@ -7948,11 +8744,70 @@ def listar_questoes(request: Request, disciplina: Optional[str] = None, ano: Opt
     </script>
     """
 
+    barra_prova = ""
+    if prof:
+        if provas_alvo:
+            opts_p = "".join(
+                f'<option value="{pr["id"]}">{html.escape(pr["titulo"])}'
+                f'{(" — " + html.escape(pr["autor"])) if pr["autor"] else ""} ({pr["n"]} questões)</option>'
+                for pr in provas_alvo)
+            barra_prova = (
+                '<div id="barra-prova" style="position:sticky; top:0; z-index:5; background:var(--accent-bg); border:1px solid var(--accent); '
+                'border-radius:8px; padding:10px 14px; margin-bottom:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">'
+                '<strong>➕ Adicionar à prova:</strong>'
+                f'<select id="prova-alvo" style="margin:0; min-width:220px; flex:1 1 220px;" onchange="salvarProvaAlvo()">{opts_p}</select>'
+                '<a id="prova-alvo-ver" href="#" target="_blank" class="btn" style="margin:0;">👁️ Ver como será impressa</a>'
+                '<a href="/provas/nova" class="btn" style="margin:0;">+ Nova prova</a>'
+                '<span id="prova-alvo-msg" style="flex-basis:100%; font-size:13px;"></span>'
+                '</div>'
+            )
+        else:
+            barra_prova = ('<div style="background:var(--bg-subtle); border:1px dashed var(--border); border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px;">'
+                           '➕ Para adicionar questões direto do banco, crie uma prova ou tarefa em rascunho: '
+                           '<a href="/provas/nova">+ Nova prova</a>. (Provas já aprovadas ou aplicadas em turmas não aceitam novas questões.)</div>')
+    js_prova = r"""
+    <script>
+    function salvarProvaAlvo() {
+        var sel = document.getElementById('prova-alvo'); if (!sel) return;
+        try { localStorage.setItem('prova_alvo', sel.value); } catch (e) {}
+        atualizarLinkProva();
+    }
+    function atualizarLinkProva() {
+        var sel = document.getElementById('prova-alvo'), a = document.getElementById('prova-alvo-ver');
+        if (sel && a) a.href = '/provas/' + sel.value + '/imprimir';
+    }
+    (function() {
+        var sel = document.getElementById('prova-alvo'); if (!sel) return;
+        try { var g = localStorage.getItem('prova_alvo'); if (g && sel.querySelector('option[value="' + g + '"]')) sel.value = g; } catch (e) {}
+        atualizarLinkProva();
+    })();
+    function adicionarAProva(qid, conjunto, btn) {
+        var sel = document.getElementById('prova-alvo'), msg = document.getElementById('prova-alvo-msg');
+        if (!sel || !sel.value) { alert('Escolha primeiro a prova na barra azul, no topo da página.'); return; }
+        var fd = new FormData(); fd.append('questao_id', qid); fd.append('conjunto', conjunto ? '1' : '0');
+        var antes = btn.textContent; btn.disabled = true; btn.textContent = 'Adicionando...';
+        fetch('/provas/' + sel.value + '/adicionar-questao', {method: 'POST', body: fd, credentials: 'same-origin'})
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (msg) { msg.style.color = d.ok ? 'var(--green)' : 'var(--red)'; msg.textContent = (d.ok ? '✅ ' : '⚠️ ') + d.msg; }
+                if (d.ok) {
+                    btn.textContent = '✓ Adicionada'; btn.style.opacity = '0.6';
+                    var op = sel.options[sel.selectedIndex];
+                    if (op && d.total !== undefined) op.textContent = op.textContent.replace(/\(\d+ questões\)/, '(' + d.total + ' questões)');
+                } else { btn.disabled = false; btn.textContent = antes; }
+            })
+            .catch(function() {
+                if (msg) { msg.style.color = 'var(--red)'; msg.textContent = '⚠️ Não consegui adicionar. Verifique a conexão e tente de novo.'; }
+                btn.disabled = false; btn.textContent = antes;
+            });
+    }
+    </script>
+    """
     content = (
         f'<div class="page-header"><h1>Banco de questões</h1>'
         f'<p class="subtitle">{subtitle}</p>'
         f'<div class="page-actions"><a href="/questoes/nova" class="btn btn-primary">+ Nova questão</a> <a href="/questoes/conjunto/nova" class="btn">📖 Questões com texto compartilhado</a> <a href="/questoes/importar-docx" class="btn">📄 Importar de Word</a></div></div>'
-        f'{matriz_html}{filtros_html}{cards}{toggle_js}'
+        f'{barra_prova}{matriz_html}{filtros_html}{cards}{toggle_js}{js_prova}'
     )
     return render_page("Questões", content, active="questoes", head_extra=MATHJAX)
 
@@ -8894,21 +9749,104 @@ def ver_texto_compartilhado(tid: int, request: Request, novo: Optional[int] = No
     return render_page("Texto compartilhado", content, active="questoes", head_extra=MATHJAX)
 
 
+def _prova_add_questoes(conn, prova_id, qids):
+    """Acrescenta questões a uma prova sem repetir. Questões de um mesmo texto compartilhado
+    ficam juntas (entram logo depois das que já estão na prova). Devolve (novas, ja_estavam)."""
+    atuais = [r["questao_id"] for r in conn.execute(
+        "SELECT questao_id FROM prova_questoes WHERE prova_id = ? ORDER BY ordem, id", (prova_id,)).fetchall()]
+    todos = list(dict.fromkeys(atuais + list(qids)))
+    ph = ",".join("?" * len(todos)) if todos else "NULL"
+    tc = {r["id"]: r["tid"] for r in conn.execute(
+        f"SELECT id, texto_compartilhado_id AS tid FROM questoes WHERE id IN ({ph})", todos).fetchall()}
+    ordem, novas, ja = list(atuais), [], 0
+    for q in qids:
+        if q in ordem:
+            ja += 1
+            continue
+        t = tc.get(q)
+        pos = len(ordem)
+        if t:
+            idx = [i for i, x in enumerate(ordem) if tc.get(x) == t]
+            if idx:
+                pos = idx[-1] + 1
+        ordem.insert(pos, q)
+        novas.append(q)
+    if novas:
+        for q in novas:
+            conn.execute("INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?,?,?)", (prova_id, q, 9999))
+        for i, q in enumerate(ordem):
+            conn.execute("UPDATE prova_questoes SET ordem = ? WHERE prova_id = ? AND questao_id = ?", (i, prova_id, q))
+        conn.commit()
+    return novas, ja
+
+
+def _prova_pode_receber_questoes(conn, prof, prova_id):
+    """(ok, mensagem, prova). Dono da prova (ou gestão/admin) pode mexer, desde que ela não esteja
+    enviada/aprovada pela gestão nem já aplicada a turmas (isso mudaria resultados já lançados)."""
+    prova = conn.execute("SELECT * FROM provas WHERE id = ?", (prova_id,)).fetchone()
+    if not prova:
+        return False, "Prova não encontrada.", None
+    gestao = bool(prof.get("is_admin") or prof.get("is_gestor"))
+    if not gestao and prova["criada_por_professor_id"] != prof["id"]:
+        return False, "Esta prova é de outro professor.", prova
+    status = (prova["status_revisao"] if "status_revisao" in prova.keys() else None) or "rascunho"
+    if not gestao and status in ("submetida", "aprovada"):
+        return False, f"A prova está {'aguardando revisão' if status == 'submetida' else 'aprovada'} e não pode mais receber questões.", prova
+    n_apl = conn.execute("SELECT COUNT(*) AS c FROM aplicacoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
+    if not gestao and n_apl:
+        return False, "Esta prova já foi aplicada a turmas; não dá para mudar as questões.", prova
+    return True, "", prova
+
+
 @app.post("/textos-compartilhados/{tid}/adicionar-a-prova")
 def adicionar_conjunto_a_prova(tid: int, request: Request, prova_id: int = Form(...)):
     prof = get_current_professor(request)
     if not prof:
         return RedirectResponse("/login", status_code=303)
     conn = get_db()
-    qids = [r["id"] for r in conn.execute("SELECT id FROM questoes WHERE texto_compartilhado_id = ? ORDER BY id", (tid,)).fetchall()]
-    prox = conn.execute("SELECT COALESCE(MAX(ordem), -1) + 1 AS n FROM prova_questoes WHERE prova_id = ?", (prova_id,)).fetchone()["n"]
-    for qid in qids:
-        if not conn.execute("SELECT id FROM prova_questoes WHERE prova_id = ? AND questao_id = ?", (prova_id, qid)).fetchone():
-            conn.execute("INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?,?,?)", (prova_id, qid, prox))
-            prox += 1
-    conn.commit()
+    ok, msg, _prova = _prova_pode_receber_questoes(conn, prof, prova_id)
+    if not ok:
+        conn.close()
+        return _tc_erro(msg, f"/textos-compartilhados/{tid}")
+    qids = [r["id"] for r in conn.execute("SELECT id, disciplina_id FROM questoes WHERE texto_compartilhado_id = ? ORDER BY id", (tid,)).fetchall()
+            if _prof_pode_disciplina(conn, prof, r["disciplina_id"])]
+    _prova_add_questoes(conn, prova_id, qids)
     conn.close()
     return RedirectResponse(f"/provas/{prova_id}", status_code=303)
+
+
+@app.post("/provas/{prova_id}/adicionar-questao")
+def adicionar_questao_a_prova_json(prova_id: int, request: Request, questao_id: int = Form(...), conjunto: str = Form("0")):
+    """Botão '➕ Adicionar à prova' do Banco de questões (responde JSON, sem recarregar a página).
+    conjunto=1 -> adiciona todas as questões do mesmo texto compartilhado."""
+    prof = get_current_professor(request)
+    if not prof:
+        return JSONResponse({"ok": False, "msg": "Faça login novamente."}, status_code=401)
+    conn = get_db()
+    ok, msg, prova = _prova_pode_receber_questoes(conn, prof, prova_id)
+    if not ok:
+        conn.close()
+        return JSONResponse({"ok": False, "msg": msg})
+    q = conn.execute("SELECT id, disciplina_id, texto_compartilhado_id AS tid FROM questoes WHERE id = ?", (questao_id,)).fetchone()
+    if not q:
+        conn.close()
+        return JSONResponse({"ok": False, "msg": "Essa questão não existe mais."})
+    if conjunto == "1" and q["tid"]:
+        cand = conn.execute("SELECT id, disciplina_id FROM questoes WHERE texto_compartilhado_id = ? ORDER BY id", (q["tid"],)).fetchall()
+    else:
+        cand = [q]
+    permitidas = [c["id"] for c in cand if _prof_pode_disciplina(conn, prof, c["disciplina_id"])]
+    if not permitidas:
+        conn.close()
+        return JSONResponse({"ok": False, "msg": "Essa questão é de uma disciplina que não está no seu cadastro."})
+    novas, ja = _prova_add_questoes(conn, prova_id, permitidas)
+    total = conn.execute("SELECT COUNT(*) AS c FROM prova_questoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
+    conn.close()
+    if novas:
+        texto = f"{len(novas)} questão(ões) adicionada(s)" + (f" ({ja} já estava(m) na prova)" if ja else "")
+    else:
+        texto = "Essa questão já estava na prova."
+    return JSONResponse({"ok": True, "msg": f"{texto} · a prova agora tem {total} questão(ões).", "total": total, "novas": len(novas)})
 
 
 @app.get("/textos-compartilhados/{tid}/editar", response_class=HTMLResponse)
@@ -9284,6 +10222,7 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
                     </div>
                     <div style="display:flex; gap:6px; flex-shrink:0;">
                         <a href="/provas/{p["id"]}" class="btn" style="padding:4px 10px; font-size:12px;">Abrir</a>
+                        <a href="/provas/{p["id"]}/imprimir" class="btn" style="padding:4px 10px; font-size:12px;" target="_blank" title="Ver como será impressa">👁️ Prévia</a>
                         <a href="/provas/{p["id"]}/editar" class="btn" style="padding:4px 10px; font-size:12px;">Editar</a>
                         <form action="/provas/{p["id"]}/deletar" method="post" style="margin:0;" onsubmit="return confirm('Excluir esta prova | tarefa? Se ela tiver aplicações, a exclusão será bloqueada.');">
                             <button type="submit" class="btn" style="padding:4px 10px; font-size:12px; background:var(--red); color:white; border-color:var(--red);">Excluir</button>
@@ -9357,17 +10296,25 @@ def _render_picker_questoes(conn, selected_ids=None):
         ids_sel = [int(x) for x in selected_ids]
         ph_s = ",".join("?" * len(ids_sel)) if ids_sel else "NULL"
         questoes_db = conn.execute(f"""
-            SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome
+            SELECT q.id, q.enunciado, q.ano, q.tipo, q.texto_compartilhado_id AS tcid, d.nome AS disciplina_nome
             FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
             WHERE q.disciplina_id IN ({ph_d}) OR q.id IN ({ph_s})
             ORDER BY d.nome, q.id
         """, list(esc["ids"]) + ids_sel).fetchall()
     else:
         questoes_db = conn.execute("""
-            SELECT q.id, q.enunciado, q.ano, q.tipo, d.nome AS disciplina_nome
+            SELECT q.id, q.enunciado, q.ano, q.tipo, q.texto_compartilhado_id AS tcid, d.nome AS disciplina_nome
             FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
             ORDER BY d.nome, q.id
         """).fetchall()
+
+    # Textos compartilhados (1 texto -> várias questões): vão uma vez só para a página
+    textos_map = {}
+    tc_ids = sorted({q["tcid"] for q in questoes_db if q["tcid"]})
+    if tc_ids:
+        ph_t = ",".join("?" * len(tc_ids))
+        for r in conn.execute(f"SELECT id, titulo, conteudo FROM textos_compartilhados WHERE id IN ({ph_t})", tc_ids).fetchall():
+            textos_map[r["id"]] = {"titulo": r["titulo"] or "", "texto": _preview_enunciado(r["conteudo"] or "", max_chars=600)}
 
     bncc_map = {}
     for row in conn.execute("""
@@ -9405,11 +10352,13 @@ def _render_picker_questoes(conn, selected_ids=None):
             "enunciado": q["enunciado"],
             "preview": _preview_enunciado(q["enunciado"], max_chars=120),
             "bnccs": bncc_map.get(q["id"], []),
+            "tcid": q["tcid"] or 0,
         }
         for q in questoes_db
     ]
     questoes_json = json.dumps(questoes_payload, ensure_ascii=False)
     selected_json = json.dumps(list(selected_ids))
+    textos_json = json.dumps(textos_map, ensure_ascii=False).replace("</", "<\\/")
 
     disciplinas_opts = '<option value="">Todas</option>' + "".join(
         f'<option value="{d["nome"]}">{d["nome"]}</option>' for d in disciplinas
@@ -9442,12 +10391,26 @@ __AVISO_ESCOPO__
     <div style="position:sticky; top:20px;">
         <h3 style="margin-top:0;">Selecionadas (<span id="picker-counter">0</span>)</h3>
         <div id="picker-selecionadas" style="max-height:600px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; padding:8px;"></div>
+        <button type="submit" formaction="/provas/previa" formmethod="post" formtarget="_blank" formnovalidate class="btn btn-primary" style="margin-top:10px; width:100%;">👁️ Ver a prova como será impressa</button>
+        <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Abre uma prévia em outra aba, sem salvar.</div>
     </div>
 </div>
 
 <script>
 const TODAS_QUESTOES = __QUESTOES_JSON__;
+const TEXTOS = __TEXTOS_JSON__;
+const POR_ID = {};
+TODAS_QUESTOES.forEach(function(q){ POR_ID[q.id] = q; });
 let selecionadas = __SELECTED_JSON__;
+
+function textoDe(quest) {
+    const t = quest.tcid ? TEXTOS[quest.tcid] : null;
+    return t ? (t.titulo + ' ' + t.texto) : '';
+}
+function tituloTexto(quest) {
+    const t = quest.tcid ? TEXTOS[quest.tcid] : null;
+    return t && t.titulo ? '«' + t.titulo + '»' : 'compartilhado';
+}
 
 function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -9467,7 +10430,7 @@ function renderPicker() {
         if (disc && quest.disciplina !== disc) return false;
         if (ano && quest.ano !== ano) return false;
         if (bncc && !quest.bnccs.some(function(c){ return c.includes(bncc); })) return false;
-        if (q && !semAcento(quest.enunciado).includes(semAcento(q))) return false;
+        if (q && !(semAcento(quest.enunciado) + ' ' + semAcento(textoDe(quest))).includes(semAcento(q))) return false;
         return true;
     });
 
@@ -9479,19 +10442,28 @@ function renderPicker() {
     } else {
         dispDiv.innerHTML = filtradas.map(function(quest) {
             const isSelected = selecionadas.includes(quest.id);
+            let tcLinha = '';
+            if (quest.tcid) {
+                const doTexto = TODAS_QUESTOES.filter(function(x){ return x.tcid === quest.tcid; });
+                const faltam = doTexto.filter(function(x){ return !selecionadas.includes(x.id); }).length;
+                tcLinha = '<div style="font-size:11px; margin-top:6px; padding:4px 8px; background:var(--accent-bg); border-radius:4px;">📖 Usa o texto ' +
+                    escapeHtml(tituloTexto(quest)) + ' (' + doTexto.length + ' questões neste texto) ' +
+                    (faltam > 0 ? '<button type="button" onclick="adicionarConjunto(' + quest.tcid + ')" class="btn" style="padding:1px 8px; font-size:11px; margin-left:6px;">+ Adicionar as ' + faltam + ' do texto</button>' : '· ✓ todas já adicionadas') +
+                    '</div>';
+            }
             const badgeAno = quest.ano ? ' · ' + escapeHtml(quest.ano) : '';
             const badgesBncc = quest.bnccs.map(function(c){ return '<span class="badge" style="font-size:10px;">' + escapeHtml(c) + '</span>'; }).join(' ');
             if (isSelected) {
                 return '<div style="padding:8px 10px; margin-bottom:6px; background:var(--bg-muted); border-radius:4px; opacity:0.6;">' +
                     '<div style="font-size:11px; color:var(--text-muted);">Q' + quest.id + ' · ' + escapeHtml(quest.disciplina) + badgeAno + ' ' + badgesBncc + '</div>' +
-                    '<div style="font-size:13px; margin-top:4px;">' + escapeHtml(quest.preview) + '</div>' +
+                    '<div style="font-size:13px; margin-top:4px;">' + escapeHtml(quest.preview) + '</div>' + tcLinha +
                     '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">✓ Já adicionada</div>' +
                     '</div>';
             }
             return '<div style="padding:8px 10px; margin-bottom:6px; background:var(--bg); border:1px solid var(--border); border-radius:4px; display:flex; gap:8px; align-items:flex-start;">' +
                 '<div style="flex:1; min-width:0;">' +
                 '<div style="font-size:11px; color:var(--text-muted);">Q' + quest.id + ' · ' + escapeHtml(quest.disciplina) + badgeAno + ' ' + badgesBncc + '</div>' +
-                '<div style="font-size:13px; margin-top:4px;">' + escapeHtml(quest.preview) + '</div>' +
+                '<div style="font-size:13px; margin-top:4px;">' + escapeHtml(quest.preview) + '</div>' + tcLinha +
                 '</div>' +
                 '<button type="button" onclick="adicionar(' + quest.id + ')" class="btn" style="padding:4px 10px; font-size:12px; white-space:nowrap;">+ Adicionar</button>' +
                 '</div>';
@@ -9514,7 +10486,7 @@ function renderPicker() {
             return '<div style="padding:8px 10px; margin-bottom:6px; background:var(--bg); border:1px solid var(--border); border-radius:4px; display:flex; gap:8px; align-items:flex-start;">' +
                 '<div style="flex:0 0 26px; font-weight:600;">' + (idx + 1) + '.</div>' +
                 '<div style="flex:1; min-width:0;">' +
-                '<div style="font-size:11px; color:var(--text-muted);">Q' + quest.id + ' · ' + escapeHtml(quest.disciplina) + badgeAno + '</div>' +
+                '<div style="font-size:11px; color:var(--text-muted);">Q' + quest.id + ' · ' + escapeHtml(quest.disciplina) + badgeAno + (quest.tcid ? ' · 📖 texto ' + escapeHtml(tituloTexto(quest)) : '') + '</div>' +
                 '<div style="font-size:12px; margin-top:2px;">' + escapeHtml(quest.preview.slice(0, 80)) + (quest.preview.length > 80 ? '...' : '') + '</div>' +
                 '</div>' +
                 '<div style="display:flex; flex-direction:column; gap:2px;">' +
@@ -9536,7 +10508,22 @@ function limparFiltrosPicker() {
     document.getElementById('filtro-q').value = '';
     renderPicker();
 }
-function adicionar(id) { if (!selecionadas.includes(id)) selecionadas.push(id); renderPicker(); }
+function adicionar(id) {
+    if (selecionadas.includes(id)) return;
+    const quest = POR_ID[id];
+    // questão de um texto compartilhado entra logo depois das outras questões do mesmo texto
+    let pos = selecionadas.length;
+    if (quest && quest.tcid) {
+        let ultimo = -1;
+        selecionadas.forEach(function(sid, i){ if (POR_ID[sid] && POR_ID[sid].tcid === quest.tcid) ultimo = i; });
+        if (ultimo >= 0) pos = ultimo + 1;
+    }
+    selecionadas.splice(pos, 0, id);
+    renderPicker();
+}
+function adicionarConjunto(tcid) {
+    TODAS_QUESTOES.filter(function(x){ return x.tcid === tcid; }).forEach(function(x){ adicionar(x.id); });
+}
 function remover(id) { selecionadas = selecionadas.filter(function(x){ return x !== id; }); renderPicker(); }
 function mover(idx, delta) {
     const newIdx = idx + delta;
@@ -9558,6 +10545,7 @@ renderPicker();
     return (template
         .replace("__QUESTOES_JSON__", questoes_json)
         .replace("__SELECTED_JSON__", selected_json)
+        .replace("__TEXTOS_JSON__", textos_json)
         .replace("__DISC_OPTS__", disciplinas_opts)
         .replace("__ANOS_OPTS__", anos_opts)
         .replace("__AVISO_ESCOPO__", aviso_escopo))
@@ -9638,7 +10626,8 @@ def criar_prova(request: Request, titulo: str = Form(...), descricao: str = Form
             <h1 style="font-size:22px; margin-bottom:6px;">Atividade criada!</h1>
             <p style="color:var(--text-muted); margin-bottom:32px;">O que deseja fazer agora?</p>
             <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-bottom:32px;">
-                <a href="/provas/{prova_id}" class="btn btn-primary">👁️ Ver atividade</a>
+                <a href="/provas/{prova_id}/imprimir" class="btn btn-primary" target="_blank">👁️ Ver como será impressa</a>
+                <a href="/provas/{prova_id}" class="btn">📋 Abrir atividade</a>
                 <a href="/provas/nova" class="btn">📝 Criar outra atividade</a>
                 <a href="/questoes/nova" class="btn">✏️ Criar questão</a>
             </div>
@@ -9658,9 +10647,12 @@ def ver_prova(prova_id: int):
     if not prova:
         conn.close()
         return HTMLResponse(render_page("Não encontrada", '<h1>Prova | tarefa não encontrada</h1><p><a href="/provas">← Voltar</a></p>', active="provas"), status_code=404)
-    questoes = conn.execute("SELECT q.id, q.enunciado, q.ano, d.nome AS disciplina_nome FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id WHERE pq.prova_id = ? ORDER BY pq.ordem", (prova_id,)).fetchall()
+    # q.* traz também 'tipo' e 'texto_compartilhado_id' (antes faltavam: o texto-base não aparecia e
+    # questões discursivas/V-F/associação eram desenhadas como múltipla escolha)
+    questoes = conn.execute("SELECT q.*, d.nome AS disciplina_nome FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id WHERE pq.prova_id = ? ORDER BY pq.ordem", (prova_id,)).fetchall()
     n_aplicacoes = conn.execute("SELECT COUNT(*) AS c FROM aplicacoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
-    questoes_html = "".join(render_questao_card(conn, q, numero=idx) for idx, q in enumerate(questoes, start=1))
+    _ctx_tc_v = _ctx_textos_compartilhados(conn, [qq["id"] for qq in questoes])
+    questoes_html = "".join(render_questao_card(conn, q, numero=idx, ctx_texto=_ctx_tc_v) for idx, q in enumerate(questoes, start=1))
     conn.close()
     desc_html = f'<p class="subtitle">{prova["descricao"]}</p>' if prova["descricao"] else ""
     comparativo_btn = ""
@@ -9679,7 +10671,9 @@ def ver_prova(prova_id: int):
     if eh_dono and status_rev in ("rascunho", "devolvida"):
         submeter_btn = f'<form method="post" action="/provas/{prova_id}/submeter" style="margin:0;" onsubmit="return confirm(\'Submeter para revisão da gestão?\')"><button type="submit" class="btn btn-primary" style="background:var(--orange); border-color:var(--orange);">📤 Submeter para revisão</button></form>'
     imprimir_btn = f'<a href="/provas/{prova_id}/imprimir" class="btn btn-primary" target="_blank">🖨️ Imprimir prova</a><a href="/provas/{prova_id}/imprimir?caixa_alta=1" class="btn" target="_blank">🔠 Imprimir em CAIXA ALTA</a>' if (status_rev == "aprovada" or eh_gestor_ou_admin) else ""
-    acoes_html = f'<div class="page-actions" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">{imprimir_btn}{comparativo_btn}{submeter_btn}{status_badge_html}{obs_html}</div>'
+    previa_btn = f'<a href="/provas/{prova_id}/imprimir" class="btn btn-primary" target="_blank">👁️ Ver como será impressa</a>'
+    editar_btn = f'<a href="/provas/{prova_id}/editar" class="btn">✏️ Editar questões</a>' if eh_dono else ""
+    acoes_html = f'<div class="page-actions" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">{previa_btn}{editar_btn}{imprimir_btn}{comparativo_btn}{submeter_btn}{status_badge_html}{obs_html}</div>'
     content = f'<div class="page-header"><h1>{prova["titulo"]}</h1><p class="subtitle">{len(questoes)} questões</p>{desc_html}{acoes_html}</div><hr>{questoes_html}'
     return render_page(prova["titulo"], content, active="provas", head_extra=MATHJAX)
 
@@ -17314,7 +18308,8 @@ document.addEventListener('DOMContentLoaded', function() {
 def imprimir_prova(prova_id: int, caixa_alta: Optional[int] = None):
     """Versão da prova otimizada pra impressão (sem gabarito visível).
     ?caixa_alta=1 imprime tudo em maiúsculas (preservando fórmulas e unidades).
-    Também é a tela usada para imprimir as atividades/avaliações aplicadas pelos docentes."""
+    Também é a tela usada para imprimir as atividades/avaliações aplicadas pelos docentes
+    e para o professor VER a prova exatamente como será impressa."""
     conn = get_db()
     prova = conn.execute("SELECT * FROM provas WHERE id = ?", (prova_id,)).fetchone()
     if not prova:
@@ -17328,7 +18323,35 @@ def imprimir_prova(prova_id: int, caixa_alta: Optional[int] = None):
         JOIN disciplinas d ON d.id = q.disciplina_id
         WHERE pq.prova_id = ? ORDER BY pq.ordem
     """, (prova_id,)).fetchall()
+    resp = _montar_prova_impressa(conn, prova["titulo"], prova["descricao"], questoes, prova_id, caixa_alta, previa=False)
+    conn.close()
+    return resp
 
+
+@app.post("/provas/previa", response_class=HTMLResponse)
+def previa_prova_nao_salva(titulo: str = Form(""), descricao: str = Form(""), questoes_serializadas: str = Form("")):
+    """Prévia da prova COMO SERÁ IMPRESSA, antes de salvar (botão '👁️ Ver como será impressa'
+    dentro do formulário de nova prova/editar prova). Não grava nada."""
+    ids, vistos = [], set()
+    for x in questoes_serializadas.split(","):
+        x = x.strip()
+        if x.isdigit() and int(x) not in vistos:
+            vistos.add(int(x)); ids.append(int(x))
+    conn = get_db()
+    questoes = []
+    if ids:
+        ph = ",".join("?" * len(ids))
+        por_id = {r["id"]: r for r in conn.execute(f"""
+            SELECT q.id, q.enunciado, q.tipo, d.nome AS disciplina_nome
+            FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id WHERE q.id IN ({ph})""", ids).fetchall()}
+        questoes = [por_id[i] for i in ids if i in por_id]
+    resp = _montar_prova_impressa(conn, titulo.strip() or "(prova sem título)", descricao.strip() or None, questoes, None, None, previa=True)
+    conn.close()
+    return resp
+
+
+def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, caixa_alta=None, previa=False):
+    """Monta a página de impressão da prova. 'previa=True' = prova ainda não salva (sem botão de imprimir)."""
     questoes_html = ""
     _ctx_tc = _ctx_textos_compartilhados(conn, [qq["id"] for qq in questoes])
     for idx, q in enumerate(questoes, start=1):
@@ -17399,15 +18422,26 @@ def imprimir_prova(prova_id: int, caixa_alta: Optional[int] = None):
         </div>
         """
 
-    conn.close()
+    desc_html = f'<p style="margin:6px 0 0; color:#555;">{descricao}</p>' if descricao else ""
 
-    desc_html = f'<p style="margin:6px 0 0; color:#555;">{prova["descricao"]}</p>' if prova["descricao"] else ""
+    if previa:
+        faixa_previa = ('<div class="no-print" style="background:#fff7ed;border:1px solid #fdba74;color:#9a3412;padding:10px 14px;'
+                        'border-radius:8px;margin-bottom:12px;font-size:13px;">👁️ <strong>PRÉVIA</strong> — é assim que a prova vai sair na impressão. '
+                        'Ela ainda <strong>não foi salva</strong>: volte para a aba anterior para continuar editando e salvar.</div>')
+        botao_imprimir = ""
+        botao_voltar = '<a href="javascript:window.close()" class="btn btn-secondary">✖ Fechar prévia</a>'
+    else:
+        faixa_previa = ('<div class="no-print" style="background:#eff6ff;border:1px solid #93c5fd;color:#1e40af;padding:8px 14px;'
+                        'border-radius:8px;margin-bottom:12px;font-size:13px;">👁️ Esta é a prova <strong>como será impressa</strong>. '
+                        'O gabarito não aparece aqui.</div>')
+        botao_imprimir = '<button onclick="imprimirComCaixaAlta()" class="btn">🖨️ Imprimir / Salvar PDF</button>'
+        botao_voltar = f'<a href="/provas/{prova_id}" class="btn btn-secondary">← Voltar</a>'
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="utf-8">
-    <title>{prova["titulo"]} — Versão impressa</title>
+    <title>{titulo} — Versão impressa</title>
     {INTER_FONT}
     {MATHJAX}
     <style>
@@ -17454,12 +18488,13 @@ def imprimir_prova(prova_id: int, caixa_alta: Optional[int] = None):
     </style>
 </head>
 <body class="{'caixa-alta' if caixa_alta else ''}">
+    {faixa_previa}
     <div class="actions no-print" style="align-items:center;">
-        <button onclick="imprimirComCaixaAlta()" class="btn">🖨️ Imprimir / Salvar PDF</button>
+        {botao_imprimir}
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
             <input type="checkbox" id="chk-caixa-alta" onchange="alternarCaixaAlta(this.checked)" {'checked' if caixa_alta else ''}> 🔠 Tudo em CAIXA ALTA
         </label>
-        <a href="/provas/{prova_id}" class="btn btn-secondary">← Voltar</a>
+        {botao_voltar}
     </div>
     <div class="inst-header">
         <img src="/static/imagens/brasao_vr.png" alt="Brasão Volta Redonda">
@@ -17471,7 +18506,7 @@ def imprimir_prova(prova_id: int, caixa_alta: Optional[int] = None):
         </div>
     </div>
     <div class="header">
-        <h1>{prova["titulo"]}</h1>
+        <h1>{titulo}</h1>
         {desc_html}
         <div class="student-info">
             <div><small>Nome:</small></div>
