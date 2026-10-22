@@ -7549,7 +7549,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/norteador/calendario", "norteador-calendario", "📅", "Calendário do Trimestre") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 <div class="sidebar-section">Análises pedagógicas</div>
                 {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
-                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Mapa de notas") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma")) if professor else ""}
+                {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Mapa de notas") + nav_item("/boletim/soma-trimestres", "boletim-soma-trimestres", "➕", "Soma dos trimestres") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma")) if professor else ""}
                 {nav_item("/boletim/produtividade", "boletim-produtividade", "📈", "Produtividade SME") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
                 {secao_boletim}
@@ -14748,6 +14748,7 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
             <h1>👥 Estudantes</h1>
             <p class="subtitle">{len(lista)} estudante(s) · {trimestre}º Trimestre {ano}</p>
         </div>
+        <div style="margin-bottom:12px;"><a class="btn" href="/boletim/soma-trimestres?ano={ano}{('&turma_id=' + str(turma_id)) if turma_id else ''}">➕ Relatório por turma: soma dos trimestres e quanto falta para a média anual</a></div>
         <form method="get" action="/boletim/estudantes" style="background:var(--bg-subtle); padding:12px 16px; border-radius:8px; margin-bottom:18px;">
             <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
                 <label style="margin:0; flex:1 1 180px;">Trimestre
@@ -14782,6 +14783,144 @@ def boletim_estudantes(request: Request, trimestre: Optional[int] = None, ano: O
         </div>
     """
     return render_page("Estudantes", content, active="boletim-estudantes")
+
+
+@app.get("/boletim/soma-trimestres", response_class=HTMLResponse)
+def boletim_soma_trimestres(request: Request, ano: Optional[int] = None, turma_id: Optional[str] = None,
+                            disciplina: Optional[str] = None, alvo: Optional[str] = None):
+    """Relatório por turma (22/10/2026, a pedido de Felipe): pra cada disciplina mostra a nota de
+    cada trimestre, a SOMA e QUANTO FALTA pra fechar a média anual (soma dos 3 trimestres ÷ 3).
+    A média mínima é escolhida na tela (padrão 5,0 — mesma régua do alerta de repetência)."""
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    turma_id = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
+    try:
+        alvo_f = float((alvo or "5").replace(",", "."))
+    except ValueError:
+        alvo_f = 5.0
+    alvo_f = min(max(alvo_f, 0.1), 10.0)
+    soma_alvo = alvo_f * 3
+
+    conn = get_db()
+    if ano is None:
+        row = conn.execute("SELECT ano FROM boletim_medias GROUP BY ano ORDER BY ano DESC LIMIT 1").fetchone()
+        ano = row["ano"] if row else date.today().year
+    turmas = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
+    if turma_id is None and turmas:
+        turma_id = turmas[0]["id"]
+    dados = _boletim_dados_turma_multitrimestre(conn, ano, turma_id) if turma_id else []
+    turma_nome = next((t["nome"] for t in turmas if t["id"] == turma_id), "?")
+    conn.close()
+
+    def fmt(v):
+        return f"{v:.1f}"
+
+    discs = [d for d in BOLETIM_DISC_NUMERICAS if not disciplina or disciplina == d]
+    secoes = ""
+    for disc in discs:
+        linhas = ""
+        n_ok = n_falta = n_sem = 0
+        for e in dados:
+            tri = e["notas"].get(disc, {})
+            vals = {t: tri[t][0] for t in (1, 2, 3) if t in tri and tri[t][0] is not None}
+            textos = [tri[t][1] for t in (1, 2, 3) if t in tri and tri[t][0] is None and tri[t][1]]
+            celulas = ""
+            for t in (1, 2, 3):
+                if t in vals:
+                    cor = "color:#dc2626;font-weight:600;" if vals[t] < 5 else ""
+                    celulas += f'<td style="text-align:center;{cor}">{fmt(vals[t])}</td>'
+                elif t in tri and tri[t][1]:
+                    celulas += f'<td style="text-align:center;">{html.escape(str(tri[t][1]))}</td>'
+                else:
+                    celulas += '<td style="text-align:center;color:#999;">—</td>'
+            if not vals:
+                n_sem += 1
+                linhas += (f'<tr><td style="text-align:center;">{e["numero"] or ""}</td><td>{html.escape(e["nome"])}</td>{celulas}'
+                           f'<td style="text-align:center;">—</td><td style="text-align:center;">—</td>'
+                           f'<td style="text-align:center;">—</td><td style="color:#666;">{"Sem nota numérica" if textos else "Sem nota lançada"}</td></tr>')
+                continue
+            soma = sum(vals.values())
+            restantes = 3 - len(vals)
+            falta = soma_alvo - soma
+            if restantes == 0:
+                media = soma / 3
+                if falta <= 1e-9:
+                    n_ok += 1
+                    situ, cor_s = f"✅ Média anual {fmt(media)} — atingiu", "#16a34a"
+                else:
+                    n_falta += 1
+                    situ, cor_s = f"❌ Média anual {fmt(media)} — faltaram {fmt(falta)} pontos", "#dc2626"
+                falta_txt = "0.0" if falta <= 1e-9 else fmt(falta)
+                precisa = "—"
+            else:
+                media = soma / 3  # média parcial: trimestres que faltam contam 0 por enquanto
+                if falta <= 1e-9:
+                    n_ok += 1
+                    situ, cor_s = "✅ Já atingiu a média anual", "#16a34a"
+                    falta_txt, precisa = "0.0", "0.0"
+                else:
+                    por_tri = falta / restantes
+                    falta_txt = fmt(falta)
+                    precisa = fmt(por_tri)
+                    n_falta += 1
+                    if por_tri > 10:
+                        situ, cor_s = f"⚠️ Não alcança, nem com 10 em tudo", "#dc2626"
+                    elif por_tri >= 7:
+                        situ, cor_s = f"🟠 Precisa de {fmt(por_tri)} em cada trimestre restante", "#ea580c"
+                    else:
+                        situ, cor_s = f"🟡 Precisa de {fmt(por_tri)} em cada trimestre restante", "#ca8a04"
+            linhas += (f'<tr><td style="text-align:center;">{e["numero"] or ""}</td><td>{html.escape(e["nome"])}</td>{celulas}'
+                       f'<td style="text-align:center;font-weight:700;">{fmt(soma)}</td>'
+                       f'<td style="text-align:center;font-weight:700;">{falta_txt}</td>'
+                       f'<td style="text-align:center;">{precisa}</td>'
+                       f'<td style="color:{cor_s};font-weight:600;">{situ}</td></tr>')
+        if not linhas:
+            continue
+        secoes += f"""
+        <h3>{disc} <small style="font-weight:400;color:#666;">· {n_ok} já atingiram · {n_falta} ainda precisam · {n_sem} sem nota</small></h3>
+        <table><thead><tr><th style="width:36px;">Nº</th><th>Aluno</th><th>1º Tri</th><th>2º Tri</th><th>3º Tri</th>
+            <th>Soma</th><th>Falta p/ {fmt(soma_alvo)}</th><th>Precisa por tri restante</th><th style="text-align:left;">Situação</th></tr></thead>
+        <tbody>{linhas}</tbody></table>"""
+    if not secoes:
+        secoes = '<p style="color:#666;">Nenhuma nota lançada para esta turma.</p>'
+
+    turma_opts = "".join(f'<option value="{t["id"]}"{" selected" if t["id"]==turma_id else ""}>Turma {t["nome"]}</option>' for t in turmas)
+    disc_opts = '<option value="">Todas as disciplinas</option>' + "".join(
+        f'<option value="{d}"{" selected" if disciplina==d else ""}>{d}</option>' for d in BOLETIM_DISC_NUMERICAS)
+    alvo_txt = fmt(alvo_f)
+    pagina = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Soma dos trimestres — Turma {html.escape(str(turma_nome))} {ano}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
+  table {{ width:100%; border-collapse:collapse; font-size:12.5px; margin-bottom:18px; }}
+  th, td {{ border:1px solid #ccc; padding:4px 7px; }}
+  th {{ background:#f0f0f0; }}
+  .header {{ display:flex; align-items:center; gap:16px; margin-bottom:14px; }}
+  h3 {{ margin:22px 0 6px 0; page-break-after:avoid; }}
+  tr {{ page-break-inside:avoid; }}
+  @media print {{ .no-print {{ display:none; }} body {{ margin:10mm; }} }}
+</style></head><body>
+  <div class="header">
+    <img src="/static/imagens/logo_walmir.png" style="max-height:56px;" alt="">
+    <div>
+      <h2 style="margin:0;">Soma dos trimestres e quanto falta para a média anual</h2>
+      <div style="color:#555;font-size:13px;">E.M. Walmir de Freitas Monteiro · Turma {html.escape(str(turma_nome))} · {ano} · média anual mínima {alvo_txt} (soma dos 3 trimestres ÷ 3 = {fmt(soma_alvo)} pontos)</div>
+    </div>
+  </div>
+  <form class="no-print" method="get" action="/boletim/soma-trimestres" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;background:#f6f7f9;padding:10px 12px;border-radius:6px;">
+    <input type="hidden" name="ano" value="{ano}">
+    <label style="font-size:12px;">Turma<br><select name="turma_id" onchange="this.form.submit()">{turma_opts}</select></label>
+    <label style="font-size:12px;">Disciplina<br><select name="disciplina" onchange="this.form.submit()">{disc_opts}</select></label>
+    <label style="font-size:12px;">Média anual mínima<br><input type="number" name="alvo" value="{alvo_txt}" step="0.1" min="0.1" max="10" style="width:80px;"></label>
+    <button type="submit">Atualizar</button>
+    <button type="button" onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+    <a href="/boletim/estudantes">← Voltar ao Mapa de notas</a>
+  </form>
+  <p style="font-size:12px;color:#555;margin:0 0 6px 0;">Quando faltam trimestres, "Precisa por tri restante" é a nota que o aluno precisa tirar em cada trimestre que ainda não foi lançado para fechar a média. Notas abaixo de 5,0 aparecem em vermelho.</p>
+  {secoes}
+</body></html>"""
+    return HTMLResponse(pagina)
 
 
 @app.get("/boletim/relatorio-geral", response_class=HTMLResponse)
