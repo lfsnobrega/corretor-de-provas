@@ -2262,6 +2262,26 @@ def init_db():
         UNIQUE(aviso_id, professor_id)
     )""")
 
+    # Folgas e abonos do TRE (serviço à Justiça Eleitoral) — 27/10/2026.
+    conn.execute("""CREATE TABLE IF NOT EXISTS tre_registros (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        professor_id INTEGER NOT NULL,
+        eleicao TEXT NOT NULL,
+        funcao TEXT,
+        dias_servico_json TEXT NOT NULL DEFAULT '[]',
+        folgas_direito INTEGER,
+        folgas_usufruidas_json TEXT NOT NULL DEFAULT '[]',
+        observacao TEXT,
+        arquivo_nome TEXT,
+        arquivo_drive_id TEXT,
+        arquivo_drive_link TEXT,
+        status_upload TEXT NOT NULL DEFAULT 'sem_documento',
+        criado_por_professor_id INTEGER,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP,
+        FOREIGN KEY (professor_id) REFERENCES professores(id)
+    )""")
+
     # Atestado médico de ALUNOS — mesma estrutura dos afastamentos de profissionais,
     # cadastrado por Apoio/Gestão. Anexo salvo numa pasta separada do Drive (27/08/2026).
     conn.execute("""CREATE TABLE IF NOT EXISTS atestados_alunos (
@@ -3851,6 +3871,338 @@ def dispensar_aviso(request: Request, aviso_id: int):
     return RedirectResponse("/", status_code=303)
 
 
+# ============ FOLGAS E ABONOS DO TRE (27/10/2026, a pedido de Felipe) ============
+# Servidor convocado pela Justiça Eleitoral (mesário, presidente, treinamento etc.): os dias de
+# serviço são ABONADOS e, pela Lei 9.504/97 (art. 98), dão direito a folgas — por padrão 2 dias de
+# folga para cada dia de serviço (o número pode ser ajustado em cada registro). A gestão cadastra o
+# servidor, os dias de serviço, o direito de folgas e as folgas já usufruídas; o saldo é calculado.
+# Esses dias também contam como justificados na Conferência com o Ponto.
+
+TRE_FUNCOES = ["Mesário(a)", "Presidente de mesa", "Primeiro(a) mesário(a)", "Segundo(a) mesário(a)",
+               "Secretário(a)", "Apoio logístico / Justiça Eleitoral", "Treinamento", "Outra"]
+
+
+def _tre_pode(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor")))
+
+
+def _tre_datas(valor) -> list:
+    try:
+        lista = json.loads(valor) if valor else []
+    except Exception:
+        return []
+    out = []
+    for d in lista:
+        try:
+            date.fromisoformat(str(d))
+            out.append(str(d))
+        except ValueError:
+            pass
+    return sorted(set(out))
+
+
+def _tre_datas_form(valores) -> list:
+    out = []
+    for d in valores or []:
+        d = (d or "").strip()
+        try:
+            date.fromisoformat(d)
+            out.append(d)
+        except ValueError:
+            pass
+    return sorted(set(out))
+
+
+def _tre_direito(r) -> int:
+    """Folgas a que o servidor tem direito: o valor informado ou 2 por dia de serviço."""
+    if r["folgas_direito"] is not None:
+        return int(r["folgas_direito"])
+    return 2 * len(_tre_datas(r["dias_servico_json"]))
+
+
+def _tre_widget_datas(nome_campo: str, rotulo: str, ajuda: str, iniciais: list) -> str:
+    """Lista dinâmica de campos de data (adicionar/remover), enviada como vários campos 'nome_campo'."""
+    tpl = """
+    <fieldset style="margin-top:12px;">
+        <legend>__ROTULO__</legend>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px 0;">__AJUDA__</p>
+        <div id="dt-__ID__"></div>
+        <button type="button" class="btn" onclick="dtAdd___ID__('')">➕ Adicionar data</button>
+    </fieldset>
+    <script>
+    function dtAdd___ID__(v) {
+        var d = document.createElement('div');
+        d.style.cssText = 'display:flex;gap:8px;margin-bottom:6px;align-items:center;';
+        d.innerHTML = '<input type="date" name="__CAMPO__" style="margin:0;max-width:200px;"><button type="button" class="btn" style="padding:2px 10px;" title="Remover">✕</button>';
+        d.querySelector('input').value = v || '';
+        d.querySelector('button').addEventListener('click', function() { d.remove(); });
+        document.getElementById('dt-__ID__').appendChild(d);
+    }
+    __INICIAIS__.forEach(function(v) { dtAdd___ID__(v); });
+    if (!document.querySelector('#dt-__ID__ input')) dtAdd___ID__('');
+    </script>"""
+    return (tpl.replace("__ID__", nome_campo).replace("__CAMPO__", nome_campo)
+               .replace("__ROTULO__", rotulo).replace("__AJUDA__", ajuda)
+               .replace("__INICIAIS__", json.dumps(iniciais)))
+
+
+async def _tre_processar_arquivo(arquivo, nome_base: str):
+    """Compacta (se imagem) e envia o documento ao Drive. Retorna (nome, drive_id, link, status, aviso)."""
+    if arquivo is None or not arquivo.filename:
+        return None, None, None, None, ""
+    conteudo = await arquivo.read()
+    if not conteudo:
+        return None, None, None, None, ""
+    ext = os.path.splitext(arquivo.filename or "")[1] or ".pdf"
+    mime = arquivo.content_type or "application/octet-stream"
+    aviso = ""
+    if ext.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic") or mime.startswith("image/"):
+        novo, ok_cmp = _compactar_imagem_ate(conteudo)
+        if novo is not conteudo and ok_cmp:
+            conteudo, ext, mime = novo, ".jpg", "image/jpeg"
+        elif not ok_cmp:
+            aviso = f"Não foi possível reduzir a imagem para {LIMITE_ANEXO_KB} KB."
+    drive_id, drive_link, erro = _drive_upload_arquivo(f"{nome_base}{ext}", conteudo, mime)
+    if erro:
+        aviso = (aviso + " " if aviso else "") + f"O documento não foi enviado ao Drive: {erro}"
+    return arquivo.filename, drive_id, drive_link, ("enviado" if drive_id else "erro"), aviso
+
+
+def _tre_form_html(conn, r=None) -> str:
+    profs = conn.execute("SELECT id, nome FROM professores ORDER BY nome").fetchall()
+    sel = r["professor_id"] if r else None
+    opts = '<option value="">— selecione o servidor —</option>' + "".join(
+        f'<option value="{p["id"]}"{" selected" if p["id"] == sel else ""}>{html.escape(p["nome"])}</option>' for p in profs)
+    funcoes = "".join(f'<option value="{html.escape(f)}"></option>' for f in TRE_FUNCOES)
+    dias_serv = _tre_datas(r["dias_servico_json"]) if r else []
+    folgas = _tre_datas(r["folgas_usufruidas_json"]) if r else []
+    w1 = _tre_widget_datas("dia_servico", "📅 Dias de serviço à Justiça Eleitoral (abonados)",
+                           "Dia da eleição, dias de treinamento e outros dias em que o servidor esteve convocado. Cada dia vira abono no ponto.", dias_serv)
+    w2 = _tre_widget_datas("dia_folga", "🏖️ Folgas já usufruídas",
+                           "Datas em que o servidor já folgou por esse serviço. Cada data conta como justificada no ponto.", folgas)
+    v = lambda k: html.escape(str(r[k] or "")) if r else ""
+    direito = "" if (not r or r["folgas_direito"] is None) else str(r["folgas_direito"])
+    return f"""
+        <label>Servidor
+            <select name="professor_id" required>{opts}</select>
+        </label>
+        <div style="display:flex;flex-wrap:wrap;gap:14px;">
+            <label style="flex:2 1 260px;">Eleição / convocação
+                <input type="text" name="eleicao" required value="{v("eleicao")}" placeholder="Ex.: Eleições 2026 — 1º turno">
+            </label>
+            <label style="flex:1 1 220px;">Função
+                <input type="text" name="funcao" list="tre-funcoes" value="{v("funcao")}" placeholder="Ex.: Mesário(a)">
+                <datalist id="tre-funcoes">{funcoes}</datalist>
+            </label>
+        </div>
+        {w1}
+        <label style="margin-top:12px;">Folgas a que tem direito (deixe em branco para calcular: 2 por dia de serviço)
+            <input type="number" name="folgas_direito" min="0" max="60" value="{direito}" style="max-width:160px;" placeholder="automático">
+        </label>
+        {w2}
+        <label style="margin-top:12px;">Observação (opcional)
+            <textarea name="observacao" rows="3" placeholder="Ex.: nº da declaração do TRE, zona/seção, combinação das datas de folga">{v("observacao")}</textarea>
+        </label>
+        <label>Declaração / comprovante do TRE (PDF ou imagem) — opcional
+            <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png">
+            <small style="color:var(--text-muted);">📷 Imagens são reduzidas automaticamente para até 300 KB.{" Já existe um documento anexado; enviar outro substitui o link." if (r and r["arquivo_drive_link"]) else ""}</small>
+        </label>"""
+
+
+@app.get("/administrativo/tre", response_class=HTMLResponse)
+def tre_listar(request: Request, servidor: Optional[str] = None, eleicao: Optional[str] = None, saldo: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not _tre_pode(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    rows = conn.execute("""SELECT t.*, p.nome AS prof_nome, p.matricula AS prof_matricula
+                           FROM tre_registros t JOIN professores p ON p.id = t.professor_id
+                           ORDER BY p.nome, t.criado_em DESC""").fetchall()
+    conn.close()
+    eleicoes = sorted({r["eleicao"] for r in rows})
+    qn = _conf_norm(servidor or "")
+    linhas = ""
+    n = tot_direito = tot_usado = 0
+    for r in rows:
+        if qn and qn not in _conf_norm(r["prof_nome"]):
+            continue
+        if eleicao and r["eleicao"] != eleicao:
+            continue
+        dias_s = _tre_datas(r["dias_servico_json"])
+        folgas = _tre_datas(r["folgas_usufruidas_json"])
+        direito = _tre_direito(r)
+        sal = direito - len(folgas)
+        if saldo == "aberto" and sal <= 0:
+            continue
+        n += 1; tot_direito += direito; tot_usado += len(folgas)
+        cor = "var(--green)" if sal == 0 else ("var(--orange)" if sal > 0 else "var(--red)")
+        txt_sal = "quitado" if sal == 0 else (f"{sal} a usufruir" if sal > 0 else f"{-sal} a mais que o direito")
+        fmt_l = lambda L: ", ".join(_fmt_data_br(d)[:5] for d in L) or "—"
+        doc = f'<a href="{html.escape(r["arquivo_drive_link"])}" target="_blank">📎 Ver</a>' if r["arquivo_drive_link"] else (
+            '<span style="color:var(--orange);">⚠ falha no envio</span>' if r["status_upload"] == "erro" else '<span style="color:var(--text-muted);">sem documento</span>')
+        add_folga = (f'<form method="post" action="/administrativo/tre/{r["id"]}/folga" style="display:flex;gap:4px;margin-top:6px;">'
+                     '<input type="date" name="data" required style="margin:0;font-size:11px;padding:2px 4px;">'
+                     '<button class="btn" style="padding:2px 8px;font-size:11px;" title="Registrar folga usufruída">➕ folga</button></form>') if sal > 0 else ""
+        linhas += f"""<tr>
+            <td style="padding:8px;"><strong>{html.escape(r["prof_nome"])}</strong><br><small style="color:var(--text-muted);">{html.escape(r["funcao"] or "")}</small></td>
+            <td style="padding:8px;">{html.escape(r["eleicao"])}</td>
+            <td style="padding:8px;font-size:12px;">{fmt_l(dias_s)}<br><small style="color:var(--text-muted);">{len(dias_s)} dia(s) abonado(s)</small></td>
+            <td style="padding:8px;text-align:center;">{direito}</td>
+            <td style="padding:8px;font-size:12px;">{fmt_l(folgas)}<br><small style="color:var(--text-muted);">{len(folgas)} usufruída(s)</small>{add_folga}</td>
+            <td style="padding:8px;text-align:center;font-weight:700;color:{cor};">{txt_sal}</td>
+            <td style="padding:8px;">{doc}</td>
+            <td style="padding:8px;white-space:nowrap;">
+                <a href="/administrativo/tre/{r["id"]}/editar" class="btn" style="padding:3px 8px;font-size:11px;">✏️</a>
+                <form method="post" action="/administrativo/tre/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm('Excluir este registro do TRE? Não dá pra desfazer.');">
+                    <button class="btn" style="padding:3px 8px;font-size:11px;color:var(--red);border-color:var(--red);">🗑️</button></form></td>
+        </tr>"""
+    if not linhas:
+        linhas = '<tr><td colspan="8" style="padding:16px;text-align:center;color:var(--text-muted);">Nenhum registro encontrado.</td></tr>'
+    opts_el = '<option value="">Todas as eleições</option>' + "".join(
+        f'<option value="{html.escape(e)}"{" selected" if e == eleicao else ""}>{html.escape(e)}</option>' for e in eleicoes)
+    content = f"""
+        <div class="page-header"><h1>🗳️ Folgas e Abonos do TRE</h1>
+        <p class="subtitle">Servidores convocados pela Justiça Eleitoral: dias de serviço (abono), direito a folgas, folgas usufruídas e saldo.</p></div>
+        <div class="page-actions" style="margin-bottom:12px;"><a href="/administrativo/tre/novo" class="btn btn-primary">+ Novo registro</a></div>
+        <form method="get" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--bg-subtle);padding:10px 14px;border-radius:8px;margin-bottom:14px;">
+            <label style="margin:0;flex:1 1 200px;">Servidor<input type="text" name="servidor" value="{html.escape(servidor or "")}" placeholder="parte do nome"></label>
+            <label style="margin:0;flex:1 1 220px;">Eleição<select name="eleicao" onchange="this.form.submit()">{opts_el}</select></label>
+            <label style="margin:0;flex:1 1 180px;">Mostrar<select name="saldo" onchange="this.form.submit()">
+                <option value="">Todos</option><option value="aberto"{" selected" if saldo=="aberto" else ""}>Só com folga a usufruir</option></select></label>
+            <button class="btn">Filtrar</button></form>
+        <p style="font-size:13px;color:var(--text-muted);">{n} registro(s) · {tot_direito} folga(s) de direito · {tot_usado} usufruída(s) · <strong>{tot_direito - tot_usado}</strong> a usufruir.</p>
+        <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:8px;text-align:left;">Servidor</th><th style="padding:8px;text-align:left;">Eleição</th>
+                <th style="padding:8px;text-align:left;">Dias de serviço (abono)</th><th style="padding:8px;">Folgas de direito</th>
+                <th style="padding:8px;text-align:left;">Folgas usufruídas</th><th style="padding:8px;">Saldo</th><th style="padding:8px;text-align:left;">Documento</th><th style="padding:8px;"></th></tr></thead>
+            <tbody>{linhas}</tbody></table></div>"""
+    return HTMLResponse(render_page("Folgas e Abonos do TRE", content, active="administrativo-tre"))
+
+
+@app.get("/administrativo/tre/novo", response_class=HTMLResponse)
+def tre_form_novo(request: Request):
+    prof = get_current_professor(request)
+    if not _tre_pode(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    corpo = _tre_form_html(conn)
+    conn.close()
+    content = f"""
+        <div class="page-header"><h1>🗳️ Novo registro — Folgas e Abonos do TRE</h1></div>
+        <form action="/administrativo/tre/novo" method="post" enctype="multipart/form-data">
+            {corpo}
+            <div class="page-actions"><button type="submit" class="btn btn-primary">Salvar</button>
+            <a href="/administrativo/tre" class="btn">Cancelar</a></div></form>"""
+    return HTMLResponse(render_page("Novo registro TRE", content, active="administrativo-tre"))
+
+
+@app.post("/administrativo/tre/novo", response_class=HTMLResponse)
+async def tre_criar(request: Request, professor_id: int = Form(...), eleicao: str = Form(...), funcao: str = Form(""),
+                    folgas_direito: str = Form(""), observacao: str = Form(""),
+                    dia_servico: List[str] = Form([]), dia_folga: List[str] = Form([]),
+                    arquivo: Optional[UploadFile] = File(None)):
+    prof = get_current_professor(request)
+    if not _tre_pode(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    srv = conn.execute("SELECT nome FROM professores WHERE id=?", (professor_id,)).fetchone()
+    if not srv:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Servidor não encontrado.</p><a href="/administrativo/tre/novo" class="btn">Voltar</a>', active="administrativo-tre"))
+    dias_s = _tre_datas_form(dia_servico)
+    nome, did, link, st, aviso = await _tre_processar_arquivo(arquivo, f"{srv['nome']} - TRE - {eleicao.strip()}")
+    direito = int(folgas_direito) if folgas_direito.strip().isdigit() else None
+    conn.execute("""INSERT INTO tre_registros (professor_id, eleicao, funcao, dias_servico_json, folgas_direito,
+                    folgas_usufruidas_json, observacao, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, criado_por_professor_id)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 (professor_id, eleicao.strip(), funcao.strip() or None, json.dumps(dias_s), direito,
+                  json.dumps(_tre_datas_form(dia_folga)), observacao.strip() or None, nome, did, link, st or "sem_documento", prof["id"]))
+    conn.commit()
+    conn.close()
+    if aviso:
+        return HTMLResponse(render_page("Registro salvo", f'<div class="page-header"><h1>✅ Registro salvo</h1></div><div class="tip" style="border-color:var(--orange);">⚠️ {html.escape(aviso)}</div><div class="page-actions" style="margin-top:14px;"><a href="/administrativo/tre" class="btn btn-primary">Ver registros</a></div>', active="administrativo-tre"))
+    return RedirectResponse("/administrativo/tre", status_code=303)
+
+
+@app.get("/administrativo/tre/{tre_id}/editar", response_class=HTMLResponse)
+def tre_form_editar(request: Request, tre_id: int):
+    prof = get_current_professor(request)
+    if not _tre_pode(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT * FROM tre_registros WHERE id=?", (tre_id,)).fetchone()
+    if not r:
+        conn.close()
+        return HTMLResponse(render_page("Erro", '<div class="empty">Registro não encontrado.</div>', active="administrativo-tre"))
+    corpo = _tre_form_html(conn, r)
+    conn.close()
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar registro — Folgas e Abonos do TRE</h1></div>
+        <form action="/administrativo/tre/{tre_id}/editar" method="post" enctype="multipart/form-data">
+            {corpo}
+            <div class="page-actions"><button type="submit" class="btn btn-primary">Salvar alterações</button>
+            <a href="/administrativo/tre" class="btn">Cancelar</a></div></form>"""
+    return HTMLResponse(render_page("Editar registro TRE", content, active="administrativo-tre"))
+
+
+@app.post("/administrativo/tre/{tre_id}/editar", response_class=HTMLResponse)
+async def tre_salvar_edicao(request: Request, tre_id: int, professor_id: int = Form(...), eleicao: str = Form(...),
+                            funcao: str = Form(""), folgas_direito: str = Form(""), observacao: str = Form(""),
+                            dia_servico: List[str] = Form([]), dia_folga: List[str] = Form([]),
+                            arquivo: Optional[UploadFile] = File(None)):
+    prof = get_current_professor(request)
+    if not _tre_pode(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT * FROM tre_registros WHERE id=?", (tre_id,)).fetchone()
+    srv = conn.execute("SELECT nome FROM professores WHERE id=?", (professor_id,)).fetchone()
+    if not r or not srv:
+        conn.close()
+        return RedirectResponse("/administrativo/tre", status_code=303)
+    nome, did, link, st, aviso = await _tre_processar_arquivo(arquivo, f"{srv['nome']} - TRE - {eleicao.strip()}")
+    direito = int(folgas_direito) if folgas_direito.strip().isdigit() else None
+    conn.execute("""UPDATE tre_registros SET professor_id=?, eleicao=?, funcao=?, dias_servico_json=?, folgas_direito=?,
+                    folgas_usufruidas_json=?, observacao=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                 (professor_id, eleicao.strip(), funcao.strip() or None, json.dumps(_tre_datas_form(dia_servico)), direito,
+                  json.dumps(_tre_datas_form(dia_folga)), observacao.strip() or None, tre_id))
+    if st:
+        conn.execute("UPDATE tre_registros SET arquivo_nome=?, arquivo_drive_id=?, arquivo_drive_link=?, status_upload=? WHERE id=?",
+                     (nome, did, link, st, tre_id))
+    conn.commit()
+    conn.close()
+    if aviso:
+        return HTMLResponse(render_page("Registro salvo", f'<div class="page-header"><h1>✅ Registro salvo</h1></div><div class="tip" style="border-color:var(--orange);">⚠️ {html.escape(aviso)}</div><div class="page-actions" style="margin-top:14px;"><a href="/administrativo/tre" class="btn btn-primary">Ver registros</a></div>', active="administrativo-tre"))
+    return RedirectResponse("/administrativo/tre", status_code=303)
+
+
+@app.post("/administrativo/tre/{tre_id}/folga")
+def tre_registrar_folga(request: Request, tre_id: int, data: str = Form(...)):
+    """Atalho da listagem: acrescenta uma folga usufruída ao registro."""
+    prof = get_current_professor(request)
+    if not _tre_pode(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT folgas_usufruidas_json FROM tre_registros WHERE id=?", (tre_id,)).fetchone()
+    if r:
+        lista = sorted(set(_tre_datas(r["folgas_usufruidas_json"]) + _tre_datas_form([data])))
+        conn.execute("UPDATE tre_registros SET folgas_usufruidas_json=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(lista), tre_id))
+        conn.commit()
+    conn.close()
+    return RedirectResponse("/administrativo/tre", status_code=303)
+
+
+@app.post("/administrativo/tre/{tre_id}/excluir")
+def tre_excluir(request: Request, tre_id: int):
+    prof = get_current_professor(request)
+    if not _tre_pode(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    conn.execute("DELETE FROM tre_registros WHERE id=?", (tre_id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/administrativo/tre", status_code=303)
+
+
 # ============ CONFERÊNCIA COM O PONTO ELETRÔNICO (20/10/2026, a pedido de Felipe) ============
 # Todo mês a prefeitura devolve planilhas do ponto eletrônico (faltas e descontos). Esta tela cruza
 # essas planilhas com as Justificativas que os profissionais cadastraram em "Justificativas para o
@@ -4149,6 +4501,19 @@ def _conf_afastamentos_do_mes(conn, mes, ano):
             "arquivo_nome": r["arquivo_nome"] or "", "status_upload": r["status_upload"],
             "criado_em": str(r["criado_em"] or "")[:16],
         })
+    # Folgas e abonos do TRE cadastrados contam como justificados (dia inteiro)
+    for t in conn.execute("SELECT * FROM tre_registros").fetchall():
+        for dias, tipo, rotulo in ((_tre_datas(t["dias_servico_json"]), "abono_integral", "Abono — serviço à Justiça Eleitoral (TRE)"),
+                                   (_tre_datas(t["folgas_usufruidas_json"]), "folga_tre", "Folga TRE")):
+            for d in dias:
+                if ini <= d <= fim:
+                    por_prof.setdefault(t["professor_id"], []).append({
+                        "id": None, "tipo": tipo, "tipo_label": rotulo, "ini": d, "fim": d, "horario": "—",
+                        "obs": ((t["eleicao"] or "") + (" — " + t["funcao"] if t["funcao"] else "") +
+                                (" · " + t["observacao"] if t["observacao"] else "")),
+                        "link": t["arquivo_drive_link"] or "", "arquivo_nome": t["arquivo_nome"] or "",
+                        "status_upload": t["status_upload"], "criado_em": str(t["criado_em"] or "")[:16],
+                        "url_cadastro": f"/administrativo/tre/{t['id']}/editar"})
     return por_prof
 
 
@@ -4286,7 +4651,7 @@ def _conf_html(res, token):
                         doc = "⚠️ falha no envio ao Drive"
                     else:
                         doc = '<span style="color:var(--text-muted);">sem documento anexado</span>'
-                    doc += f' · <a href="/administrativo/afastamentos/{a["id"]}/editar" target="_blank">ver cadastro</a>'
+                    doc += f' · <a href="{a.get("url_cadastro") or "/administrativo/afastamentos/" + str(a["id"]) + "/editar"}" target="_blank">ver cadastro</a>'
                 else:
                     just = obs = doc = '<span style="color:var(--text-muted);">—</span>'
                 out.append(f'<tr class="{zebra}" data-st="{i["status"]}"><td>{pessoa}</td><td>{detalhe}</td><td style="white-space:nowrap;">{i["dia"]}</td>'
@@ -7559,7 +7924,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
                 {secao_boletim}
                 {secao_configuracoes}
-                {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") + nav_item("/administrativo/conferencia-ponto", "administrativo-conferencia", "🔎", "Conferência com o Ponto") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
+                {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") + nav_item("/administrativo/conferencia-ponto", "administrativo-conferencia", "🔎", "Conferência com o Ponto") + nav_item("/administrativo/tre", "administrativo-tre", "🗳️", "Folgas e Abonos TRE") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {('<div class="sidebar-section">Atestados de Alunos</div>' + nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado") + nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")) if _pode_ver_atestados_alunos(professor) else ""}
                 {('<div class="sidebar-section">Ocorrências Disciplinares</div>' + nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência") + nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")) if _pode_ver_ocorrencias(professor) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
@@ -8196,6 +8561,7 @@ def home(request: Request):
         ("📋", "Minhas Justificativas", "/administrativo/afastamentos", True),
         ("📊", "Relatório", "/administrativo/relatorio", is_admin or is_gestor),
         ("🔎", "Conferência com o Ponto", "/administrativo/conferencia-ponto", is_admin or is_gestor),
+        ("🗳️", "Folgas e Abonos TRE", "/administrativo/tre", is_admin or is_gestor),
     ])
     grupo_atestados_alunos = ("Atestados de Alunos", "#0d9488", [
         ("🩺", "Novo atestado", "/administrativo/atestados-alunos/novo", True),
@@ -8234,6 +8600,15 @@ def home(request: Request):
                 ("📚", "Disciplinas", "/disciplinas", is_admin),
                 ("🎯", "Habilidades", "/habilidades", is_admin),
                 ("👥", "Turmas", "/turmas", is_admin),
+            ]),
+            ("Notas e Boletim", "#db2777", [
+                ("📝", "Lançar / corrigir notas", "/boletim/lancamento-manual", True),
+                ("👥", "Mapa de notas", "/boletim/estudantes", True),
+                ("➕", "Soma dos trimestres", "/boletim/soma-trimestres", True),
+                ("🧾", "Gerar Boletim", "/boletim/boletim-individual", True),
+                ("📊", "Painel de lançamentos", "/boletim/painel-lancamentos", is_admin or is_gestor),
+                ("🔎", "Diagnóstico de notas", "/boletim/diagnostico-aluno", is_admin or is_gestor),
+                ("📥", "Importar notas (e-cidade)", "/boletim/importar-ecidade", is_admin or is_gestor),
             ]),
             grupo_administrativo,
             grupo_atestados_alunos,
