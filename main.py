@@ -5258,7 +5258,7 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
         responsavel_com_cargo += f' — {r["cargo_registrado_por"]}'
 
     linhas_tabela = f"""
-        <tr><td style="width:150px; color:#555; padding:3px 0; vertical-align:bottom;">Aluno</td><td style="padding-top:6px;"><div style="display:flex; align-items:flex-end; gap:18px; flex-wrap:wrap;"><span style="font-weight:700;">{r["aluno_nome"]}</span><span style="display:inline-block; min-width:240px; flex:1 1 240px; border-bottom:1px solid #333; height:26px; position:relative;"><span style="position:absolute; left:0; bottom:-13px; font-size:9px; color:#666;">Assinatura do aluno</span></span></div></td></tr>
+        <tr><td style="width:150px; color:#555; padding:3px 0;">Aluno</td><td style="font-weight:700;">{r["aluno_nome"]}</td></tr>
         <tr><td style="color:#555; padding:3px 0;">Turma</td><td>{r["turma_nome"]}</td></tr>
         <tr><td style="color:#555; padding:3px 0;">Data</td><td>{_fmt_data_br(r["data_ocorrencia"])}</td></tr>
         <tr><td style="color:#555; padding:3px 0;">Responsável pelo registro</td><td>{responsavel_com_cargo}</td></tr>
@@ -5316,6 +5316,7 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
 
     <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px; flex-wrap:wrap; gap:28px 16px;">
         {blocos_prof}
+        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">{r["aluno_nome"]}<div style="font-size:10px; color:#666; margin-top:2px;">Aluno(a)</div></div>
     </div>
 
     <div style="font-size:9px; color:#888; border-top:1px solid #ddd; padding-top:5px; margin-top:30px; text-align:center;">
