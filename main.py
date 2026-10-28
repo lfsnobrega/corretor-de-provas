@@ -2262,6 +2262,29 @@ def init_db():
         UNIQUE(aviso_id, professor_id)
     )""")
 
+    # Contingência do ponto: ocorrências indevidas registradas pelos profissionais — 28/10/2026.
+    conn.execute("""CREATE TABLE IF NOT EXISTS ponto_contingencia (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        professor_id INTEGER NOT NULL,
+        data_inicio TEXT NOT NULL,
+        data_fim TEXT NOT NULL,
+        turno TEXT,
+        problema TEXT NOT NULL,
+        desconto TEXT NOT NULL,
+        horas_desconto TEXT,
+        justificativa TEXT NOT NULL,
+        arquivo_nome TEXT,
+        arquivo_drive_id TEXT,
+        arquivo_drive_link TEXT,
+        status_upload TEXT NOT NULL DEFAULT 'sem_documento',
+        status TEXT NOT NULL DEFAULT 'pendente',
+        parecer_gestao TEXT,
+        criado_por_professor_id INTEGER,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP,
+        FOREIGN KEY (professor_id) REFERENCES professores(id)
+    )""")
+
     # Folgas e abonos do TRE (serviço à Justiça Eleitoral) — 27/10/2026.
     conn.execute("""CREATE TABLE IF NOT EXISTS tre_registros (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2956,6 +2979,13 @@ async def auth_middleware(request: Request, call_next):
     # afastamento e os atestados de alunos — nenhuma outra área do sistema (25/08/2026,
     # ampliado em 27/08/2026 pros atestados de alunos).
     if prof.get("papel") == "apoio" and not prof.get("is_admin") and not prof.get("is_gestor"):
+        if path.startswith("/administrativo/contingencia"):
+            request.state.professor = prof
+            token = _current_prof_ctx.set(prof)
+            try:
+                return await call_next(request)
+            finally:
+                _current_prof_ctx.reset(token)
         rotas_permitidas_apoio = {
             "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos", "/trocar-senha",
             "/administrativo/atestados-alunos/novo", "/administrativo/atestados-alunos",
@@ -2968,6 +2998,13 @@ async def auth_middleware(request: Request, call_next):
     # gerar documento tem um ID variável no meio (/orientacao/ocorrencias/{id}/documento),
     # por isso o cheque por prefixo/sufixo além do conjunto fixo.
     if prof.get("papel") == "orientacao" and not prof.get("is_admin") and not prof.get("is_gestor"):
+        if path.startswith("/administrativo/contingencia"):
+            request.state.professor = prof
+            token = _current_prof_ctx.set(prof)
+            try:
+                return await call_next(request)
+            finally:
+                _current_prof_ctx.reset(token)
         rotas_permitidas_orientacao = {
             "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos", "/trocar-senha",
             "/orientacao/ocorrencias/novo", "/orientacao/ocorrencias",
@@ -3869,6 +3906,456 @@ def dispensar_aviso(request: Request, aviso_id: int):
         conn.commit()
     conn.close()
     return RedirectResponse("/", status_code=303)
+
+
+# ============ CONTINGÊNCIA DO PONTO (28/10/2026, a pedido de Felipe) ============
+# Página em que os profissionais registram ocorrências INDEVIDAS do ponto eletrônico (falta lançada
+# sem motivo, batida não registrada, desconto errado etc.), com a justificativa e o tipo de desconto
+# que sofreram. A gestão enxerga todos, dá o parecer e baixa a planilha (Excel) e o relatório (impressão).
+
+CONT_PROBLEMAS = {
+    "falta_indevida": "Falta lançada indevidamente",
+    "ponto_nao_registrado": "Batida de ponto não registrada / esquecida",
+    "falha_equipamento": "Falha do relógio ou do sistema de ponto",
+    "horario_incorreto": "Horário ou escala lançado incorretamente",
+    "justificativa_nao_considerada": "Atestado ou justificativa não considerado",
+    "folga_abono_nao_considerado": "Folga ou abono não considerado",
+    "feriado_nao_considerado": "Feriado, recesso ou ponto facultativo não considerado",
+    "outro": "Outro problema",
+}
+CONT_DESCONTOS = {
+    "falta_integral": "Falta integral (dia inteiro)",
+    "desc_1_3": "Desconto de 1/3",
+    "desc_2_3": "Desconto de 2/3",
+    "horas": "Desconto de horas (atraso / saída antecipada)",
+    "dsr": "Desconto de DSR (descanso semanal remunerado)",
+    "outro": "Outro tipo de desconto",
+    "nenhum": "Ainda sem desconto (registro preventivo)",
+}
+CONT_STATUS = {
+    "pendente": ("🟡 Pendente", "#ca8a04"),
+    "em_analise": ("🔵 Em análise", "#2563eb"),
+    "resolvido": ("✅ Regularizado", "#16a34a"),
+    "nao_procede": ("⚪ Não procede", "#6b7280"),
+}
+CONT_TURNOS = ["Manhã", "Tarde", "Noite", "Integral", "Dia todo / vários turnos"]
+
+
+def _cont_gestao(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor")))
+
+
+def _cont_dias(r) -> int:
+    try:
+        return (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
+    except (ValueError, TypeError):
+        return 1
+
+
+def _cont_periodo(r) -> str:
+    ini = _fmt_data_br(r["data_inicio"])
+    return ini if r["data_fim"] == r["data_inicio"] else f'{ini} a {_fmt_data_br(r["data_fim"])}'
+
+
+def _cont_consultar(conn, prof, mes=None, ano=None, servidor=None, status=None, problema=None, desconto=None):
+    """Registros visíveis ao usuário (gestão vê todos; os demais só os seus), com os filtros."""
+    sql = """SELECT c.*, p.nome AS prof_nome, p.matricula AS prof_matricula, p.cargo AS prof_cargo
+             FROM ponto_contingencia c JOIN professores p ON p.id = c.professor_id WHERE 1=1"""
+    params = []
+    if not _cont_gestao(prof):
+        sql += " AND c.professor_id = ?"; params.append(prof["id"])
+    if mes and ano:
+        sql += " AND strftime('%Y-%m', c.data_inicio) = ?"; params.append(f"{ano:04d}-{mes:02d}")
+    elif ano:
+        sql += " AND strftime('%Y', c.data_inicio) = ?"; params.append(f"{ano:04d}")
+    if status in CONT_STATUS:
+        sql += " AND c.status = ?"; params.append(status)
+    if problema in CONT_PROBLEMAS:
+        sql += " AND c.problema = ?"; params.append(problema)
+    if desconto in CONT_DESCONTOS:
+        sql += " AND c.desconto = ?"; params.append(desconto)
+    sql += " ORDER BY p.nome, c.data_inicio"
+    rows = conn.execute(sql, params).fetchall()
+    qn = _conf_norm(servidor or "")
+    if qn:
+        rows = [r for r in rows if qn in _conf_norm(r["prof_nome"])]
+    return rows
+
+
+def _cont_filtros_parse(mes, ano, hoje=None):
+    hoje = hoje or date.today()
+    ano_i = int(ano) if (ano or "").strip().isdigit() else hoje.year
+    if mes is None or mes == "":
+        mes_i = hoje.month
+    else:
+        mes_i = int(mes) if str(mes).strip().isdigit() else hoje.month
+    return (mes_i if 1 <= mes_i <= 12 else 0), ano_i
+
+
+MESES_NOMES_PT = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+
+
+def _cont_form_html(conn, prof, r=None) -> str:
+    gestao = _cont_gestao(prof)
+    opt = lambda d, atual: "".join(f'<option value="{k}"{" selected" if k == atual else ""}>{html.escape(v)}</option>' for k, v in d.items())
+    v = lambda k: html.escape(str(r[k] or "")) if r else ""
+    bloco_srv = ""
+    if gestao:
+        profs = conn.execute("SELECT id, nome FROM professores ORDER BY nome").fetchall()
+        sel = r["professor_id"] if r else prof["id"]
+        bloco_srv = ('<label>Servidor<select name="professor_id" required>' + "".join(
+            f'<option value="{p["id"]}"{" selected" if p["id"] == sel else ""}>{html.escape(p["nome"])}</option>' for p in profs) + '</select></label>')
+    turnos = '<option value="">— não se aplica —</option>' + "".join(
+        f'<option value="{t}"{" selected" if r and r["turno"] == t else ""}>{t}</option>' for t in CONT_TURNOS)
+    bloco_gestao = ""
+    if gestao and r:
+        bloco_gestao = f"""
+        <fieldset style="margin-top:14px;"><legend>Parecer da gestão</legend>
+            <label>Situação<select name="status">{"".join(f'<option value="{k}"{" selected" if k == r["status"] else ""}>{html.escape(t[0])}</option>' for k, t in CONT_STATUS.items())}</select></label>
+            <label>Parecer / providência tomada<textarea name="parecer_gestao" rows="3" placeholder="Ex.: Corrigido no ponto em 05/11 pela Secretaria de Educação">{v("parecer_gestao")}</textarea></label>
+        </fieldset>"""
+    return f"""
+        {bloco_srv}
+        <div style="display:flex;flex-wrap:wrap;gap:14px;">
+            <label style="flex:1 1 180px;">Data da ocorrência (início)<input type="date" name="data_inicio" required value="{v("data_inicio")}"></label>
+            <label style="flex:1 1 180px;">Data final (se foram vários dias)<input type="date" name="data_fim" value="{v("data_fim") if r and r["data_fim"] != r["data_inicio"] else ""}"></label>
+            <label style="flex:1 1 180px;">Turno<select name="turno">{turnos}</select></label>
+        </div>
+        <label>O que ocorreu de indevido no ponto
+            <select name="problema" required>{opt(CONT_PROBLEMAS, r["problema"] if r else None)}</select></label>
+        <div style="display:flex;flex-wrap:wrap;gap:14px;">
+            <label style="flex:2 1 280px;">Tipo de desconto aplicado
+                <select name="desconto" required>{opt(CONT_DESCONTOS, r["desconto"] if r else None)}</select></label>
+            <label style="flex:1 1 180px;">Horas descontadas (se for o caso)
+                <input type="text" name="horas_desconto" value="{v("horas_desconto")}" placeholder="Ex.: 2h30"></label>
+        </div>
+        <label>Justificativa
+            <textarea name="justificativa" rows="5" required placeholder="Explique o que aconteceu: onde estava, quem pode confirmar, por que o registro do ponto está errado...">{v("justificativa")}</textarea></label>
+        <label>Documento de apoio (print do ponto, declaração, atestado etc.) — opcional
+            <input type="file" name="arquivo" accept=".pdf,.jpg,.jpeg,.png">
+            <small style="color:var(--text-muted);">📷 Imagens são reduzidas automaticamente para até 300 KB.{" Já existe documento; enviar outro substitui o link." if (r and r["arquivo_drive_link"]) else ""}</small></label>
+        {bloco_gestao}"""
+
+
+@app.get("/administrativo/contingencia", response_class=HTMLResponse)
+def cont_listar(request: Request, mes: Optional[str] = None, ano: Optional[str] = None, servidor: Optional[str] = None,
+                status: Optional[str] = None, problema: Optional[str] = None, desconto: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    gestao = _cont_gestao(prof)
+    mes_i, ano_i = _cont_filtros_parse(mes, ano)
+    conn = get_db()
+    rows = _cont_consultar(conn, prof, mes_i or None, ano_i, servidor, status, problema, desconto)
+    conn.close()
+    cont = {k: 0 for k in CONT_STATUS}
+    linhas = ""
+    for r in rows:
+        cont[r["status"]] = cont.get(r["status"], 0) + 1
+        txt, cor = CONT_STATUS.get(r["status"], (r["status"], "#6b7280"))
+        pode = gestao or r["status"] == "pendente"
+        acoes = ""
+        if pode:
+            acoes = (f'<a href="/administrativo/contingencia/{r["id"]}/editar" class="btn" style="padding:3px 8px;font-size:11px;">✏️</a> '
+                     f'<form method="post" action="/administrativo/contingencia/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir este registro? Não dá pra desfazer.\');">'
+                     '<button class="btn" style="padding:3px 8px;font-size:11px;color:var(--red);border-color:var(--red);">🗑️</button></form>')
+        doc = f'<a href="{html.escape(r["arquivo_drive_link"])}" target="_blank">📎 Ver</a>' if r["arquivo_drive_link"] else '<span style="color:var(--text-muted);">—</span>'
+        desc_txt = html.escape(CONT_DESCONTOS.get(r["desconto"], r["desconto"])) + (f'<br><small>{html.escape(r["horas_desconto"])}</small>' if r["horas_desconto"] else "")
+        parecer = f'<br><small style="color:var(--text-muted);">Gestão: {html.escape(r["parecer_gestao"])}</small>' if r["parecer_gestao"] else ""
+        col_srv = f'<td style="padding:8px;"><strong>{html.escape(r["prof_nome"])}</strong><br><small style="color:var(--text-muted);">Mat. {html.escape(str(r["prof_matricula"] or "—"))}</small></td>' if gestao else ""
+        linhas += f"""<tr>{col_srv}
+            <td style="padding:8px;white-space:nowrap;">{_cont_periodo(r)}<br><small style="color:var(--text-muted);">{_cont_dias(r)} dia(s){" · " + html.escape(r["turno"]) if r["turno"] else ""}</small></td>
+            <td style="padding:8px;">{html.escape(CONT_PROBLEMAS.get(r["problema"], r["problema"]))}</td>
+            <td style="padding:8px;">{desc_txt}</td>
+            <td style="padding:8px;max-width:340px;font-size:12px;">{html.escape(r["justificativa"])}{parecer}</td>
+            <td style="padding:8px;"><span style="color:{cor};font-weight:600;">{txt}</span></td>
+            <td style="padding:8px;">{doc}</td><td style="padding:8px;white-space:nowrap;">{acoes}</td></tr>"""
+    if not linhas:
+        linhas = f'<tr><td colspan="{8 if gestao else 7}" style="padding:16px;text-align:center;color:var(--text-muted);">Nenhum registro encontrado com esses filtros.</td></tr>'
+    opts_mes = '<option value="0">Ano todo</option>' + "".join(f'<option value="{i}"{" selected" if i == mes_i else ""}>{MESES_NOMES_PT[i]}</option>' for i in range(1, 13))
+    opts_st = '<option value="">Todas as situações</option>' + "".join(f'<option value="{k}"{" selected" if k == status else ""}>{html.escape(t[0])}</option>' for k, t in CONT_STATUS.items())
+    opts_pr = '<option value="">Todos os problemas</option>' + "".join(f'<option value="{k}"{" selected" if k == problema else ""}>{html.escape(v)}</option>' for k, v in CONT_PROBLEMAS.items())
+    opts_de = '<option value="">Todos os descontos</option>' + "".join(f'<option value="{k}"{" selected" if k == desconto else ""}>{html.escape(v)}</option>' for k, v in CONT_DESCONTOS.items())
+    qs = urllib.parse.urlencode({"mes": mes_i, "ano": ano_i, "servidor": servidor or "", "status": status or "", "problema": problema or "", "desconto": desconto or ""})
+    campo_srv = f'<label style="margin:0;flex:1 1 180px;">Servidor<input type="text" name="servidor" value="{html.escape(servidor or "")}" placeholder="parte do nome"></label>' if gestao else ""
+    th_srv = '<th style="padding:8px;text-align:left;">Servidor</th>' if gestao else ""
+    resumo = " · ".join(f'{CONT_STATUS[k][0]}: <strong>{v}</strong>' for k, v in cont.items() if v) or "sem registros"
+    content = f"""
+        <div class="page-header"><h1>🛟 Contingência do Ponto</h1>
+        <p class="subtitle">Registre aqui o que ocorreu de indevido no ponto eletrônico — a justificativa e o desconto sofrido. {"Você enxerga os registros de todos os servidores." if gestao else "Você vê apenas os seus registros."}</p></div>
+        <div class="page-actions" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;">
+            <a href="/administrativo/contingencia/novo" class="btn btn-primary">+ Novo registro</a>
+            <a href="/administrativo/contingencia/excel?{qs}" class="btn">📥 Baixar planilha (Excel)</a>
+            <a href="/administrativo/contingencia/relatorio?{qs}" class="btn" target="_blank">🖨️ Relatório para impressão</a></div>
+        <form method="get" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--bg-subtle);padding:10px 14px;border-radius:8px;margin-bottom:12px;">
+            <label style="margin:0;flex:1 1 130px;">Mês<select name="mes">{opts_mes}</select></label>
+            <label style="margin:0;flex:0 1 100px;">Ano<input type="number" name="ano" value="{ano_i}" min="2024" max="2035"></label>
+            {campo_srv}
+            <label style="margin:0;flex:1 1 170px;">Situação<select name="status">{opts_st}</select></label>
+            <label style="margin:0;flex:1 1 220px;">Problema<select name="problema">{opts_pr}</select></label>
+            <label style="margin:0;flex:1 1 220px;">Desconto<select name="desconto">{opts_de}</select></label>
+            <button class="btn">Filtrar</button></form>
+        <p style="font-size:13px;color:var(--text-muted);">{len(rows)} registro(s) · {resumo}</p>
+        <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">{th_srv}<th style="padding:8px;text-align:left;">Período</th><th style="padding:8px;text-align:left;">O que ocorreu</th>
+                <th style="padding:8px;text-align:left;">Desconto</th><th style="padding:8px;text-align:left;">Justificativa</th><th style="padding:8px;text-align:left;">Situação</th>
+                <th style="padding:8px;">Doc.</th><th style="padding:8px;"></th></tr></thead>
+            <tbody>{linhas}</tbody></table></div>"""
+    return HTMLResponse(render_page("Contingência do Ponto", content, active="administrativo-contingencia"))
+
+
+@app.get("/administrativo/contingencia/novo", response_class=HTMLResponse)
+def cont_form_novo(request: Request):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    corpo = _cont_form_html(conn, prof)
+    conn.close()
+    content = f"""
+        <div class="page-header"><h1>🛟 Novo registro — Contingência do Ponto</h1>
+        <p class="subtitle">Descreva a ocorrência indevida no ponto. A gestão vai analisar e dar o retorno aqui mesmo.</p></div>
+        <form action="/administrativo/contingencia/novo" method="post" enctype="multipart/form-data">
+            {corpo}
+            <div class="page-actions"><button type="submit" class="btn btn-primary">Enviar registro</button>
+            <a href="/administrativo/contingencia" class="btn">Cancelar</a></div></form>"""
+    return HTMLResponse(render_page("Novo registro de contingência", content, active="administrativo-contingencia"))
+
+
+def _cont_validar(data_inicio, data_fim, problema, desconto):
+    try:
+        di = date.fromisoformat(data_inicio)
+        df = date.fromisoformat(data_fim) if (data_fim or "").strip() else di
+    except ValueError:
+        return None, None, "Data inválida."
+    if df < di:
+        return None, None, "A data final não pode ser anterior à data inicial."
+    if problema not in CONT_PROBLEMAS or desconto not in CONT_DESCONTOS:
+        return None, None, "Escolha o problema e o tipo de desconto."
+    return di.isoformat(), df.isoformat(), ""
+
+
+def _cont_erro(msg, voltar):
+    return HTMLResponse(render_page("Erro", f'<div class="page-header"><h1>Não foi possível salvar</h1></div><p>{html.escape(msg)}</p><a href="{voltar}" class="btn">Voltar</a>', active="administrativo-contingencia"))
+
+
+@app.post("/administrativo/contingencia/novo", response_class=HTMLResponse)
+async def cont_criar(request: Request, data_inicio: str = Form(...), data_fim: str = Form(""), turno: str = Form(""),
+                     problema: str = Form(...), desconto: str = Form(...), horas_desconto: str = Form(""),
+                     justificativa: str = Form(...), professor_id: str = Form(""), arquivo: Optional[UploadFile] = File(None)):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    di, df, erro = _cont_validar(data_inicio, data_fim, problema, desconto)
+    if erro:
+        return _cont_erro(erro, "/administrativo/contingencia/novo")
+    alvo = int(professor_id) if (_cont_gestao(prof) and professor_id.strip().isdigit()) else prof["id"]
+    conn = get_db()
+    srv = conn.execute("SELECT nome FROM professores WHERE id=?", (alvo,)).fetchone()
+    if not srv:
+        conn.close()
+        return _cont_erro("Servidor não encontrado.", "/administrativo/contingencia/novo")
+    nome, did, link, st, aviso = await _tre_processar_arquivo(arquivo, f"{srv['nome']} - Contingência do ponto - {di}")
+    conn.execute("""INSERT INTO ponto_contingencia (professor_id, data_inicio, data_fim, turno, problema, desconto, horas_desconto,
+                    justificativa, arquivo_nome, arquivo_drive_id, arquivo_drive_link, status_upload, criado_por_professor_id)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 (alvo, di, df, turno.strip() or None, problema, desconto, horas_desconto.strip() or None,
+                  justificativa.strip(), nome, did, link, st or "sem_documento", prof["id"]))
+    conn.commit()
+    conn.close()
+    if aviso:
+        return HTMLResponse(render_page("Registro enviado", f'<div class="page-header"><h1>✅ Registro enviado</h1></div><div class="tip" style="border-color:var(--orange);">⚠️ {html.escape(aviso)}</div><div class="page-actions" style="margin-top:14px;"><a href="/administrativo/contingencia" class="btn btn-primary">Ver registros</a></div>', active="administrativo-contingencia"))
+    return RedirectResponse("/administrativo/contingencia", status_code=303)
+
+
+def _cont_pode_mexer(prof, r) -> bool:
+    return bool(r and (_cont_gestao(prof) or (r["professor_id"] == prof["id"] and r["status"] == "pendente")))
+
+
+@app.get("/administrativo/contingencia/{cid}/editar", response_class=HTMLResponse)
+def cont_form_editar(request: Request, cid: int):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT * FROM ponto_contingencia WHERE id=?", (cid,)).fetchone()
+    if not _cont_pode_mexer(prof, r):
+        conn.close()
+        return RedirectResponse("/administrativo/contingencia", status_code=303)
+    corpo = _cont_form_html(conn, prof, r)
+    conn.close()
+    content = f"""
+        <div class="page-header"><h1>✏️ Editar registro — Contingência do Ponto</h1></div>
+        <form action="/administrativo/contingencia/{cid}/editar" method="post" enctype="multipart/form-data">
+            {corpo}
+            <div class="page-actions"><button type="submit" class="btn btn-primary">Salvar alterações</button>
+            <a href="/administrativo/contingencia" class="btn">Cancelar</a></div></form>"""
+    return HTMLResponse(render_page("Editar contingência", content, active="administrativo-contingencia"))
+
+
+@app.post("/administrativo/contingencia/{cid}/editar", response_class=HTMLResponse)
+async def cont_salvar_edicao(request: Request, cid: int, data_inicio: str = Form(...), data_fim: str = Form(""),
+                             turno: str = Form(""), problema: str = Form(...), desconto: str = Form(...),
+                             horas_desconto: str = Form(""), justificativa: str = Form(...), professor_id: str = Form(""),
+                             status: str = Form(""), parecer_gestao: str = Form(""), arquivo: Optional[UploadFile] = File(None)):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT * FROM ponto_contingencia WHERE id=?", (cid,)).fetchone()
+    if not _cont_pode_mexer(prof, r):
+        conn.close()
+        return RedirectResponse("/administrativo/contingencia", status_code=303)
+    di, df, erro = _cont_validar(data_inicio, data_fim, problema, desconto)
+    if erro:
+        conn.close()
+        return _cont_erro(erro, f"/administrativo/contingencia/{cid}/editar")
+    alvo = int(professor_id) if (_cont_gestao(prof) and professor_id.strip().isdigit()) else r["professor_id"]
+    srv = conn.execute("SELECT nome FROM professores WHERE id=?", (alvo,)).fetchone()
+    nome, did, link, st, aviso = await _tre_processar_arquivo(arquivo, f"{srv['nome'] if srv else 'Servidor'} - Contingência do ponto - {di}")
+    conn.execute("""UPDATE ponto_contingencia SET professor_id=?, data_inicio=?, data_fim=?, turno=?, problema=?, desconto=?,
+                    horas_desconto=?, justificativa=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                 (alvo, di, df, turno.strip() or None, problema, desconto, horas_desconto.strip() or None, justificativa.strip(), cid))
+    if _cont_gestao(prof):
+        conn.execute("UPDATE ponto_contingencia SET status=?, parecer_gestao=? WHERE id=?",
+                     (status if status in CONT_STATUS else r["status"], parecer_gestao.strip() or None, cid))
+    if st:
+        conn.execute("UPDATE ponto_contingencia SET arquivo_nome=?, arquivo_drive_id=?, arquivo_drive_link=?, status_upload=? WHERE id=?",
+                     (nome, did, link, st, cid))
+    conn.commit()
+    conn.close()
+    if aviso:
+        return HTMLResponse(render_page("Registro salvo", f'<div class="page-header"><h1>✅ Registro salvo</h1></div><div class="tip" style="border-color:var(--orange);">⚠️ {html.escape(aviso)}</div><div class="page-actions" style="margin-top:14px;"><a href="/administrativo/contingencia" class="btn btn-primary">Ver registros</a></div>', active="administrativo-contingencia"))
+    return RedirectResponse("/administrativo/contingencia", status_code=303)
+
+
+@app.post("/administrativo/contingencia/{cid}/excluir")
+def cont_excluir(request: Request, cid: int):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT * FROM ponto_contingencia WHERE id=?", (cid,)).fetchone()
+    if _cont_pode_mexer(prof, r):
+        conn.execute("DELETE FROM ponto_contingencia WHERE id=?", (cid,))
+        conn.commit()
+    conn.close()
+    return RedirectResponse("/administrativo/contingencia", status_code=303)
+
+
+@app.get("/administrativo/contingencia/excel")
+def cont_excel(request: Request, mes: Optional[str] = None, ano: Optional[str] = None, servidor: Optional[str] = None,
+               status: Optional[str] = None, problema: Optional[str] = None, desconto: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    mes_i, ano_i = _cont_filtros_parse(mes, ano)
+    conn = get_db()
+    rows = _cont_consultar(conn, prof, mes_i or None, ano_i, servidor, status, problema, desconto)
+    conn.close()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Contingência do ponto"
+    cab = ["Servidor", "Matrícula", "Cargo", "Data inicial", "Data final", "Dias", "Turno", "O que ocorreu", "Tipo de desconto",
+           "Horas descontadas", "Justificativa", "Situação", "Parecer da gestão", "Link do documento", "Registrado em"]
+    ws.append(cab)
+    fill = PatternFill(start_color="4B5563", end_color="4B5563", fill_type="solid")
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF"); c.fill = fill; c.alignment = Alignment(horizontal="center", wrap_text=True, vertical="center")
+    cores = {"pendente": "FEF9C3", "em_analise": "DBEAFE", "resolvido": "DCFCE7", "nao_procede": "E5E7EB"}
+    for r in rows:
+        ws.append([r["prof_nome"], r["prof_matricula"] or "", r["prof_cargo"] or "", _fmt_data_br(r["data_inicio"]), _fmt_data_br(r["data_fim"]),
+                   _cont_dias(r), r["turno"] or "", CONT_PROBLEMAS.get(r["problema"], r["problema"]),
+                   CONT_DESCONTOS.get(r["desconto"], r["desconto"]), r["horas_desconto"] or "", r["justificativa"],
+                   CONT_STATUS.get(r["status"], (r["status"],))[0], r["parecer_gestao"] or "", r["arquivo_drive_link"] or "",
+                   str(r["criado_em"] or "")[:16]])
+        ws.cell(ws.max_row, 12).fill = PatternFill(start_color=cores.get(r["status"], "FFFFFF"), end_color=cores.get(r["status"], "FFFFFF"), fill_type="solid")
+        if r["arquivo_drive_link"]:
+            c = ws.cell(ws.max_row, 14); c.hyperlink = r["arquivo_drive_link"]; c.font = Font(color="0563C1", underline="single")
+    for n, larg in enumerate([32, 11, 22, 12, 12, 6, 12, 36, 34, 12, 60, 16, 40, 40, 16], start=1):
+        ws.column_dimensions[get_column_letter(n)].width = larg
+    for row in ws.iter_rows(min_row=2):
+        for c in row:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.freeze_panes = "B2"
+    # aba de resumo
+    rs = wb.create_sheet("Resumo")
+    periodo = f"{MESES_NOMES_PT[mes_i]}/{ano_i}" if mes_i else str(ano_i)
+    rs.append([f"Contingência do ponto — {periodo}"]); rs["A1"].font = Font(bold=True, size=14)
+    rs.append([f"Total de registros: {len(rows)}"]); rs.append([])
+    for titulo, d, chave in (("Por situação", {k: v[0] for k, v in CONT_STATUS.items()}, "status"),
+                             ("Por tipo de desconto", CONT_DESCONTOS, "desconto"), ("Por problema", CONT_PROBLEMAS, "problema")):
+        rs.append([titulo]); rs.cell(rs.max_row, 1).font = Font(bold=True)
+        for k, nome in d.items():
+            n = sum(1 for r in rows if r[chave] == k)
+            if n:
+                rs.append([nome, n])
+        rs.append([])
+    rs.append(["Dias de desconto por tipo (soma dos dias dos registros)"]); rs.cell(rs.max_row, 1).font = Font(bold=True)
+    for k, nome in CONT_DESCONTOS.items():
+        n = sum(_cont_dias(r) for r in rows if r["desconto"] == k)
+        if n:
+            rs.append([nome, n])
+    rs.column_dimensions["A"].width = 60
+    buf = BytesIO(); wb.save(buf)
+    nome_arq = f"contingencia_ponto_{ano_i}{'_%02d' % mes_i if mes_i else ''}.xlsx"
+    return StreamingResponse(BytesIO(buf.getvalue()), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f"attachment; filename={nome_arq}"})
+
+
+@app.get("/administrativo/contingencia/relatorio", response_class=HTMLResponse)
+def cont_relatorio(request: Request, mes: Optional[str] = None, ano: Optional[str] = None, servidor: Optional[str] = None,
+                   status: Optional[str] = None, problema: Optional[str] = None, desconto: Optional[str] = None):
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    mes_i, ano_i = _cont_filtros_parse(mes, ano)
+    conn = get_db()
+    rows = _cont_consultar(conn, prof, mes_i or None, ano_i, servidor, status, problema, desconto)
+    conn.close()
+    periodo = f"{MESES_NOMES_PT[mes_i]}/{ano_i}" if mes_i else str(ano_i)
+    esc = html.escape
+    por_desc = {}
+    for r in rows:
+        por_desc.setdefault(r["desconto"], [0, 0])
+        por_desc[r["desconto"]][0] += 1
+        por_desc[r["desconto"]][1] += _cont_dias(r)
+    resumo = "".join(f'<tr><td>{esc(CONT_DESCONTOS.get(k, k))}</td><td class="c">{v[0]}</td><td class="c">{v[1]}</td></tr>' for k, v in por_desc.items()) or '<tr><td colspan="3">—</td></tr>'
+    por_st = " · ".join(f'{esc(CONT_STATUS[k][0])}: <b>{sum(1 for r in rows if r["status"] == k)}</b>' for k in CONT_STATUS if any(r["status"] == k for r in rows)) or "—"
+    blocos = ""
+    for r in rows:
+        blocos += f"""<div class="reg">
+            <div class="reg-t"><b>{esc(r["prof_nome"])}</b> <span>Mat. {esc(str(r["prof_matricula"] or "—"))}{(" · " + esc(r["prof_cargo"])) if r["prof_cargo"] else ""}</span>
+              <span class="st">{esc(CONT_STATUS.get(r["status"], (r["status"],))[0])}</span></div>
+            <table class="kv">
+              <tr><td>Período</td><td>{_cont_periodo(r)} ({_cont_dias(r)} dia(s){(" · " + esc(r["turno"])) if r["turno"] else ""})</td></tr>
+              <tr><td>O que ocorreu</td><td>{esc(CONT_PROBLEMAS.get(r["problema"], r["problema"]))}</td></tr>
+              <tr><td>Desconto aplicado</td><td>{esc(CONT_DESCONTOS.get(r["desconto"], r["desconto"]))}{(" — " + esc(r["horas_desconto"])) if r["horas_desconto"] else ""}</td></tr>
+              <tr><td>Justificativa</td><td style="white-space:pre-wrap;">{esc(r["justificativa"])}</td></tr>
+              {('<tr><td>Parecer da gestão</td><td style="white-space:pre-wrap;">' + esc(r["parecer_gestao"]) + '</td></tr>') if r["parecer_gestao"] else ""}
+              {('<tr><td>Documento</td><td>' + esc(r["arquivo_drive_link"]) + '</td></tr>') if r["arquivo_drive_link"] else ""}
+            </table></div>"""
+    if not blocos:
+        blocos = "<p>Nenhum registro neste filtro.</p>"
+    return HTMLResponse(f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>Contingência do ponto — {periodo}</title>
+<style>
+  @page {{ size: A4 portrait; margin: 14mm; }}
+  body {{ font-family: Arial, Helvetica, sans-serif; color:#000; font-size:11.5px; margin:0; }}
+  .cab {{ display:flex; align-items:center; gap:12px; border-bottom:2px solid #000; padding-bottom:6px; margin-bottom:10px; }}
+  .cab img {{ height:46px; }} .cab h1 {{ font-size:16px; margin:0; }}
+  table {{ border-collapse:collapse; }} .res {{ width:60%; margin:6px 0 14px 0; }} .res th, .res td {{ border:1px solid #888; padding:3px 7px; }} .res th {{ background:#eee; }}
+  .c {{ text-align:center; }}
+  .reg {{ border:1px solid #888; border-radius:3px; margin-bottom:9px; page-break-inside:avoid; }}
+  .reg-t {{ background:#eee; padding:4px 8px; border-bottom:1px solid #888; display:flex; gap:10px; align-items:baseline; }}
+  .reg-t span {{ font-size:10.5px; color:#333; }} .reg-t .st {{ margin-left:auto; font-weight:bold; }}
+  .kv {{ width:100%; }} .kv td {{ padding:3px 8px; vertical-align:top; border-top:1px solid #ddd; }} .kv td:first-child {{ width:130px; color:#444; }}
+  .no-print {{ background:#f3f4f6; padding:8px; margin-bottom:10px; }} @media print {{ .no-print {{ display:none; }} }}
+</style></head><body>
+<div class="no-print"><button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button> <a href="/administrativo/contingencia">← Voltar</a></div>
+<div class="cab"><img src="/static/imagens/logo_walmir.png" alt=""><div><h1>Relatório de Contingência do Ponto</h1>E.M. Walmir de Freitas Monteiro · {periodo} · {len(rows)} registro(s)</div></div>
+<div>Situação: {por_st}</div>
+<table class="res"><thead><tr><th>Tipo de desconto</th><th>Registros</th><th>Dias</th></tr></thead><tbody>{resumo}</tbody></table>
+{blocos}</body></html>""")
 
 
 # ============ FOLGAS E ABONOS DO TRE (27/10/2026, a pedido de Felipe) ============
@@ -7868,6 +8355,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 <div class="sidebar-section">Justificativas para o Ponto</div>
                 {nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa")}
                 {nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas")}
+                {nav_item("/administrativo/contingencia", "administrativo-contingencia", "🛟", "Contingência do Ponto")}
                 <div class="sidebar-section">Atestados de Alunos</div>
                 {nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado")}
                 {nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")}
@@ -7878,6 +8366,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 <div class="sidebar-section">Justificativas para o Ponto</div>
                 {nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa")}
                 {nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas")}
+                {nav_item("/administrativo/contingencia", "administrativo-contingencia", "🛟", "Contingência do Ponto")}
                 <div class="sidebar-section">Ocorrências Disciplinares</div>
                 {nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência")}
                 {nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")}
@@ -7924,7 +8413,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {('<div class="sidebar-section">Análise Simulado</div>' + nav_item("/analises-pedagogicas", "analises-pedagogicas", "📈", "Análise Pedagógica") + nav_item("/simulados/relatorio-notas", "simulados-relatorio-notas", "📄", "Relatório de Notas")) if professor else ""}
                 {secao_boletim}
                 {secao_configuracoes}
-                {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") + nav_item("/administrativo/conferencia-ponto", "administrativo-conferencia", "🔎", "Conferência com o Ponto") + nav_item("/administrativo/tre", "administrativo-tre", "🗳️", "Folgas e Abonos TRE") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
+                {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + nav_item("/administrativo/contingencia", "administrativo-contingencia", "🛟", "Contingência do Ponto") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") + nav_item("/administrativo/conferencia-ponto", "administrativo-conferencia", "🔎", "Conferência com o Ponto") + nav_item("/administrativo/tre", "administrativo-tre", "🗳️", "Folgas e Abonos TRE") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {('<div class="sidebar-section">Atestados de Alunos</div>' + nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado") + nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")) if _pode_ver_atestados_alunos(professor) else ""}
                 {('<div class="sidebar-section">Ocorrências Disciplinares</div>' + nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência") + nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")) if _pode_ver_ocorrencias(professor) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
@@ -8559,6 +9048,7 @@ def home(request: Request):
     grupo_administrativo = ("Justificativas para o Ponto", "#0891b2", [
         ("📄", "Nova Justificativa", "/administrativo/afastamentos/novo", True),
         ("📋", "Minhas Justificativas", "/administrativo/afastamentos", True),
+        ("🛟", "Contingência do Ponto", "/administrativo/contingencia", True),
         ("📊", "Relatório", "/administrativo/relatorio", is_admin or is_gestor),
         ("🔎", "Conferência com o Ponto", "/administrativo/conferencia-ponto", is_admin or is_gestor),
         ("🗳️", "Folgas e Abonos TRE", "/administrativo/tre", is_admin or is_gestor),
