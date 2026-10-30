@@ -21294,9 +21294,17 @@ def _corrigir_turma_calcular(conn, aplicacao_id):
         ORDER BY t.nome, a.nome""", (apl["turma_id"], aplicacao_id, aplicacao_id)).fetchall()
     itens = []
     for f in fant:
-        dest = conn.execute(
-            "SELECT id, titulo FROM aplicacoes WHERE turma_id = ? AND prova_id = ? AND id != ? ORDER BY id DESC LIMIT 1",
-            (f["turma_id"], apl["prova_id"], aplicacao_id)).fetchone()
+        dest = None
+        # Simulado: a aplicação de cada turma é identificada pela etiqueta [SIM-N] no título
+        _m = re.search(r"\[SIM-\d+\]", apl["titulo"] or "")
+        if _m:
+            dest = conn.execute(
+                "SELECT id, titulo FROM aplicacoes WHERE turma_id = ? AND titulo LIKE ? AND id != ? ORDER BY id DESC LIMIT 1",
+                (f["turma_id"], "%" + _m.group(0) + "%", aplicacao_id)).fetchone()
+        if not dest:
+            dest = conn.execute(
+                "SELECT id, titulo FROM aplicacoes WHERE turma_id = ? AND prova_id = ? AND id != ? ORDER BY id DESC LIMIT 1",
+                (f["turma_id"], apl["prova_id"], aplicacao_id)).fetchone()
         if not dest and apl["titulo"]:
             dest = conn.execute(
                 "SELECT id, titulo FROM aplicacoes WHERE turma_id = ? AND titulo = ? AND id != ? ORDER BY id DESC LIMIT 1",
