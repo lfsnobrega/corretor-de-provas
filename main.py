@@ -17513,6 +17513,8 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
     modo_label = "Online" if apl["modo"] == "online" else "Impressa"
 
     acoes_btn = '<div class="page-actions" style="display:flex; gap:8px; flex-wrap:wrap;">'
+    if fantasmas:
+        acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/corrigir-turma" class="btn" style="border-color:var(--orange); color:var(--orange);">🔧 Corrigir cartões de outra turma ({len(fantasmas)})</a>'
     if apl["modo"] == "online":
         acoes_btn += f'<a href="/aplicacoes/{aplicacao_id}/cartoes" class="btn btn-primary" target="_blank">Folha com QR Codes</a>'
     else:
@@ -21262,12 +21264,148 @@ async def confirmar_escaneamento(aplicacao_id: int, request: Request, aluno_id: 
             <p style="margin:8px 0 0;"><strong>Nota:</strong> <span style="font-size:24px; font-weight:600;">{score}/{total}</span> ({(score/total*100 if total > 0 else 0):.0f}%)</p>
         </div>
         <div class="page-actions">
-            <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn btn-primary">📷 Escanear próximo cartão</a>
+            <a href="/escanear" class="btn btn-primary">📷 Escanear próximo cartão</a>
             <a href="/aplicacoes/{aplicacao_id}/aluno/{aluno_id}" class="btn">Ver detalhe da prova deste aluno</a>
             <a href="/aplicacoes/{aplicacao_id}" class="btn">← Voltar para a aplicação</a>
         </div>
     """
     return render_page("Cartão registrado", content, active="aplicacoes")
+
+
+# ==========================================
+#  REPARO: CARTÕES GRAVADOS NA APLICAÇÃO DA TURMA ERRADA
+# ==========================================
+
+def _corrigir_turma_calcular(conn, aplicacao_id):
+    """Para cada aluno de OUTRA turma que tem entrega/resposta nesta aplicação,
+    procura a aplicação da turma atual dele com a mesma prova (ou mesmo título)."""
+    apl = conn.execute("""
+        SELECT a.*, p.titulo AS prova_titulo, t.nome AS turma_nome
+        FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
+        WHERE a.id = ?""", (aplicacao_id,)).fetchone()
+    if not apl:
+        return None, []
+    fant = conn.execute("""
+        SELECT a.id, a.nome, a.numero, a.turma_id, t.nome AS turma_nome FROM alunos a
+        JOIN turmas t ON t.id = a.turma_id
+        WHERE a.turma_id != ?
+          AND (a.id IN (SELECT aluno_id FROM entregas WHERE aplicacao_id = ?)
+            OR a.id IN (SELECT aluno_id FROM respostas WHERE aplicacao_id = ?))
+        ORDER BY t.nome, a.nome""", (apl["turma_id"], aplicacao_id, aplicacao_id)).fetchall()
+    itens = []
+    for f in fant:
+        dest = conn.execute(
+            "SELECT id, titulo FROM aplicacoes WHERE turma_id = ? AND prova_id = ? AND id != ? ORDER BY id DESC LIMIT 1",
+            (f["turma_id"], apl["prova_id"], aplicacao_id)).fetchone()
+        if not dest and apl["titulo"]:
+            dest = conn.execute(
+                "SELECT id, titulo FROM aplicacoes WHERE turma_id = ? AND titulo = ? AND id != ? ORDER BY id DESC LIMIT 1",
+                (f["turma_id"], apl["titulo"], aplicacao_id)).fetchone()
+        conflito = False
+        if dest:
+            conflito = conn.execute("SELECT 1 FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
+                                    (dest["id"], f["id"])).fetchone() is not None
+        n_resp = conn.execute("SELECT COUNT(*) FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?",
+                              (aplicacao_id, f["id"])).fetchone()[0]
+        itens.append({"aluno": f, "dest": dest, "conflito": conflito, "n_resp": n_resp})
+    return apl, itens
+
+
+@app.get("/aplicacoes/{aplicacao_id}/corrigir-turma", response_class=HTMLResponse)
+def corrigir_turma_tela(aplicacao_id: int, request: Request):
+    prof = get_current_professor(request)
+    if not prof or not (prof["is_admin"] or prof["is_gestor"]):
+        return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
+    conn = get_db()
+    try:
+        apl, itens = _corrigir_turma_calcular(conn, aplicacao_id)
+    finally:
+        conn.close()
+    if not apl:
+        return RedirectResponse("/aplicacoes", status_code=303)
+    linhas = ""
+    for i, it in enumerate(itens):
+        a = it["aluno"]
+        if it["dest"] and not it["conflito"]:
+            dest_txt = f'Mover para a aplicação <strong>#{it["dest"]["id"]}</strong> da turma {a["turma_nome"]}'
+            ctrl = f'<input type="checkbox" name="mover" value="{a["id"]}" checked>'
+        elif it["dest"]:
+            dest_txt = f'<span style="color:var(--orange);">Aluno já tem cartão na aplicação #{it["dest"]["id"]} — não mexo (resolva manualmente)</span>'
+            ctrl = "—"
+        else:
+            dest_txt = '<span style="color:var(--red);">A turma dele não tem aplicação desta prova — crie a aplicação primeiro</span>'
+            ctrl = "—"
+        linhas += (f'<tr><td style="padding:6px 8px;text-align:center;">{ctrl}</td>'
+                   f'<td style="padding:6px 8px;">{a["nome"]}</td>'
+                   f'<td style="padding:6px 8px;">{a["turma_nome"]}</td>'
+                   f'<td style="padding:6px 8px;text-align:center;">{it["n_resp"]}</td>'
+                   f'<td style="padding:6px 8px;">{dest_txt}</td></tr>')
+    if not itens:
+        corpo = '<div class="empty">Nenhum aluno de outra turma nesta aplicação. Está tudo certo.</div>'
+    else:
+        corpo = f"""
+        <form method="post" action="/aplicacoes/{aplicacao_id}/corrigir-turma">
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-subtle);">
+                    <th style="padding:6px;">Mover?</th><th style="padding:6px;text-align:left;">Aluno</th>
+                    <th style="padding:6px;text-align:left;">Turma atual</th><th style="padding:6px;">Respostas</th>
+                    <th style="padding:6px;text-align:left;">O que será feito</th></tr></thead>
+                <tbody>{linhas}</tbody>
+            </table>
+            <div class="page-actions" style="margin-top:16px;">
+                <button type="submit" class="btn btn-primary" onclick="return confirm('Mover os cartões marcados para a aplicação da turma de cada aluno?');">✓ Mover os marcados</button>
+                <a href="/aplicacoes/{aplicacao_id}" class="btn">← Cancelar</a>
+            </div>
+        </form>"""
+    content = f"""
+        <div class="page-header"><h1>🔧 Corrigir cartões de outra turma</h1>
+        <p class="subtitle">{apl["prova_titulo"]} · aplicação da turma <strong>{apl["turma_nome"]}</strong></p></div>
+        <div class="tip" style="font-size:13px;">Os alunos abaixo não são da turma {apl["turma_nome"]}, mas têm cartão gravado nesta aplicação.
+        Ao mover, as respostas e a entrega passam para a aplicação da turma atual do aluno. Nada é apagado.
+        (Se algum aluno foi transferido de verdade e você quer manter o histórico aqui, desmarque-o.)</div>
+        {corpo}
+    """
+    return HTMLResponse(render_page("Corrigir turma", content, active="aplicacoes"))
+
+
+@app.post("/aplicacoes/{aplicacao_id}/corrigir-turma", response_class=HTMLResponse)
+async def corrigir_turma_salvar(aplicacao_id: int, request: Request):
+    prof = get_current_professor(request)
+    if not prof or not (prof["is_admin"] or prof["is_gestor"]):
+        return RedirectResponse(f"/aplicacoes/{aplicacao_id}", status_code=303)
+    form = await request.form()
+    marcados = set()
+    for v in form.getlist("mover"):
+        try:
+            marcados.add(int(v))
+        except ValueError:
+            pass
+    conn = get_db()
+    movidos = 0
+    try:
+        apl, itens = _corrigir_turma_calcular(conn, aplicacao_id)
+        if not apl:
+            return RedirectResponse("/aplicacoes", status_code=303)
+        for it in itens:
+            a = it["aluno"]
+            if a["id"] not in marcados or not it["dest"] or it["conflito"]:
+                continue
+            d = it["dest"]["id"]
+            conn.execute("UPDATE respostas SET aplicacao_id = ? WHERE aplicacao_id = ? AND aluno_id = ?",
+                         (d, aplicacao_id, a["id"]))
+            conn.execute("UPDATE entregas SET aplicacao_id = ? WHERE aplicacao_id = ? AND aluno_id = ?",
+                         (d, aplicacao_id, a["id"]))
+            movidos += 1
+        conn.commit()
+    finally:
+        conn.close()
+    content = f"""
+        <div class="page-header"><h1>✅ {movidos} aluno(s) corrigido(s)</h1></div>
+        <div class="page-actions">
+            <a href="/aplicacoes/{aplicacao_id}" class="btn btn-primary">Ver aplicação</a>
+            <a href="/escanear" class="btn">📷 Digitalizar</a>
+        </div>"""
+    return HTMLResponse(render_page("Corrigido", content, active="aplicacoes"))
 
 
 # ==========================================
@@ -22536,8 +22674,8 @@ async def confirmar_lote(aplicacao_id: int, request: Request):
             </table>
         </div>
         <div class="page-actions">
-            <a href="/aplicacoes/{aplicacao_id}" class="btn btn-primary">Ver aplicação</a>
-            <a href="/aplicacoes/{aplicacao_id}/escanear" class="btn">📷 Escanear mais</a>
+            <a href="/aplicacoes/{aplicacao_id}" class="btn">Ver aplicação</a>
+            <a href="/escanear" class="btn btn-primary">📷 Escanear mais</a>
         </div>
     """
     return render_page("Lote salvo", content, active="aplicacoes")
@@ -26894,6 +27032,13 @@ async def confirmar_escaneamento_simulado(sim_id: int, app_id: int, request: Req
         aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
         if not sim or not aluno:
             return RedirectResponse(f"/simulados/{sim_id}/aplicacoes", status_code=303)
+        apl_chk = conn.execute("SELECT turma_id FROM aplicacoes WHERE id = ?", (app_id,)).fetchone()
+        if not apl_chk or apl_chk["turma_id"] != aluno["turma_id"]:
+            return HTMLResponse(render_page("Aluno de outra turma",
+                '<div class="page-header"><h1>⚠️ Aluno de outra turma</h1></div>'
+                '<div class="empty">Este aluno não pertence à turma desta aplicação. Nada foi gravado.</div>'
+                '<div class="page-actions"><a href="/escanear" class="btn btn-primary">📷 Voltar à digitalização</a></div>',
+                active="simulados"))
 
         # Questões em ordem corrida
         questoes_ordem = conn.execute("""
@@ -26927,7 +27072,7 @@ async def confirmar_escaneamento_simulado(sim_id: int, app_id: int, request: Req
                 Respostas de <strong>{aluno['nome']}</strong> confirmadas e salvas com sucesso.
             </div>
             <div style="display:flex;gap:10px;margin-top:20px;">
-                <a href="/simulados/{sim_id}/aplicacoes/{app_id}/escanear" class="btn btn-primary">📷 Próximo cartão</a>
+                <a href="/escanear" class="btn btn-primary">📷 Próximo cartão</a>
                 <a href="/simulados/{sim_id}/aplicacoes" class="btn">← Voltar às aplicações</a>
             </div>
         """
@@ -27447,6 +27592,11 @@ async def escanear_universal_post(foto: UploadFile = File(...)):
             aluno = conn.execute("SELECT * FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
             if not aluno:
                 return _render_erro(f"Aluno {aluno_id} não encontrado.")
+            if aluno["turma_id"] != apl["turma_id"]:
+                return _render_erro(
+                    f"O cartão de <strong>{aluno['nome']}</strong> foi gerado para a aplicação da turma "
+                    f"<strong>{apl['turma_nome']}</strong>, mas o aluno hoje está em outra turma. "
+                    "Nada foi gravado. Gere o cartão novamente na aplicação da turma atual do aluno.")
             ja_entregue = conn.execute(
                 "SELECT finalizada_em FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?",
                 (aplicacao_id, aluno_id)
@@ -27741,6 +27891,12 @@ async def escanear_universal_lote(fotos: List[UploadFile] = File(...)):
                     cards_html_parts.append(_render_card_erro(idx, filename, "Aplicação ou aluno não encontrado."))
                     n_erro += 1; idx += 1
                     continue
+                if aluno["turma_id"] != apl["turma_id"]:
+                    cards_html_parts.append(_render_card_erro(
+                        idx, filename,
+                        f"O aluno {aluno['nome']} não pertence à turma {apl['turma_nome']} desta aplicação. Cartão NÃO será salvo."))
+                    n_erro += 1; idx += 1
+                    continue
 
                 questoes_info = _coletar_info_questoes_cartao(conn, apl["prova_id"])
                 n_q = conn.execute("SELECT COUNT(*) FROM prova_questoes WHERE prova_id = ?", (apl["prova_id"],)).fetchone()[0]
@@ -27930,6 +28086,9 @@ async def confirmar_lote_universal(request: Request):
         if not aluno:
             continue
 
+        apl_chk = conn.execute("SELECT turma_id FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
+        if not apl_chk or apl_chk["turma_id"] != aluno["turma_id"]:
+            continue  # aluno de outra turma: nunca grava na aplicação errada
         if tipo == "prova":
             apl = conn.execute("SELECT prova_id FROM aplicacoes WHERE id = ?", (aplicacao_id,)).fetchone()
             if not apl:
