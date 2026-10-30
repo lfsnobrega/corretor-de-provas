@@ -21329,7 +21329,11 @@ def _corrigir_turma_calcular(conn, aplicacao_id):
             sugerida = cands[0]["id"]
         for c in cands:
             c = dict(c)
-        itens.append({"aluno": f, "cands": [dict(c) for c in cands], "sugerida": sugerida,
+        _cd = [dict(c) for c in cands]
+        for _c in _cd:
+            _c["ja_tem"] = conn.execute(
+                "SELECT 1 FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (_c["id"], f["id"])).fetchone() is not None
+        itens.append({"aluno": f, "cands": _cd, "sugerida": sugerida,
                       "n_resp": conn.execute("SELECT COUNT(*) FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?",
                                              (aplicacao_id, f["id"])).fetchone()[0]})
     return apl, itens
@@ -21354,8 +21358,11 @@ def corrigir_turma_tela(aplicacao_id: int, request: Request):
             ops = '<option value="">— não mover —</option>'
             for c in it["cands"]:
                 sel = " selected" if c["id"] == it["sugerida"] else ""
-                ops += f'<option value="{c["id"]}"{sel}>#{c["id"]} · {c["titulo"] or "sem título"}</option>'
-            ctrl = f'<select name="dest_{a["id"]}" style="max-width:420px;">{ops}</select>'
+                _tem = " (JÁ TEM CARTÃO)" if c.get("ja_tem") else ""
+                ops += f'<option value="{c["id"]}"{sel}>#{c["id"]} · {c["titulo"] or "sem título"}{_tem}</option>'
+            ctrl = (f'<select name="dest_{a["id"]}" style="max-width:420px;">{ops}</select>'
+                    f'<label style="display:block; font-size:12px; margin-top:4px; color:var(--orange);">'
+                    f'<input type="checkbox" name="subst_{a["id"]}" value="1"> Substituir o cartão que já existe no destino (apaga o antigo e coloca este)</label>')
         else:
             ctrl = '<span style="color:var(--red);">A turma dele não tem aplicação correspondente — crie primeiro</span>'
         linhas += (f'<tr><td style="padding:6px 8px;">{a["nome"]}</td>'
@@ -21398,6 +21405,7 @@ async def corrigir_turma_salvar(aplicacao_id: int, request: Request):
     form = await request.form()
     conn = get_db()
     movidos = 0
+    substituidos = 0
     pulados = []
     try:
         apl, itens = _corrigir_turma_calcular(conn, aplicacao_id)
@@ -21412,8 +21420,15 @@ async def corrigir_turma_salvar(aplicacao_id: int, request: Request):
             if d not in {c["id"] for c in it["cands"]}:
                 continue
             if conn.execute("SELECT 1 FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (d, a["id"])).fetchone():
-                pulados.append(a["nome"])
-                continue
+                if form.get(f"subst_{a['id']}") != "1":
+                    pulados.append(a["nome"])
+                    continue
+                conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (d, a["id"]))
+                conn.execute("DELETE FROM entregas WHERE aplicacao_id = ? AND aluno_id = ?", (d, a["id"]))
+                substituidos += 1
+            else:
+                # sem entrega mas com respostas soltas no destino: limpa para não dar conflito
+                conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (d, a["id"]))
             conn.execute("UPDATE respostas SET aplicacao_id = ? WHERE aplicacao_id = ? AND aluno_id = ?",
                          (d, aplicacao_id, a["id"]))
             conn.execute("UPDATE entregas SET aplicacao_id = ? WHERE aplicacao_id = ? AND aluno_id = ?",
@@ -21424,10 +21439,10 @@ async def corrigir_turma_salvar(aplicacao_id: int, request: Request):
         conn.close()
     aviso = ""
     if pulados:
-        aviso = ('<div class="tip" style="font-size:13px;">Não movidos (o aluno já tem cartão na aplicação escolhida): '
+        aviso = ('<div class="tip" style="font-size:13px;">Não movidos (o aluno já tem cartão na aplicação escolhida — marque "Substituir" para trocar): '
                  + ", ".join(pulados) + '</div>')
     content = f"""
-        <div class="page-header"><h1>✅ {movidos} aluno(s) corrigido(s)</h1></div>
+        <div class="page-header"><h1>✅ {movidos} aluno(s) corrigido(s){f" ({substituidos} com substituição do cartão antigo)" if substituidos else ""}</h1></div>
         {aviso}
         <div class="page-actions">
             <a href="/aplicacoes/{aplicacao_id}" class="btn btn-primary">Ver aplicação</a>
