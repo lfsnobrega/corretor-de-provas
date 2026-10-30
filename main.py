@@ -11803,7 +11803,17 @@ def ver_prova(prova_id: int):
     questoes = conn.execute("SELECT q.*, d.nome AS disciplina_nome FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id JOIN disciplinas d ON d.id = q.disciplina_id WHERE pq.prova_id = ? ORDER BY pq.ordem", (prova_id,)).fetchall()
     n_aplicacoes = conn.execute("SELECT COUNT(*) AS c FROM aplicacoes WHERE prova_id = ?", (prova_id,)).fetchone()["c"]
     _ctx_tc_v = _ctx_textos_compartilhados(conn, [qq["id"] for qq in questoes])
-    questoes_html = "".join(render_questao_card(conn, q, numero=idx, ctx_texto=_ctx_tc_v) for idx, q in enumerate(questoes, start=1))
+    _prof_lapis = _current_prof_ctx.get()
+    _partes_q = []
+    for idx, q in enumerate(questoes, start=1):
+        _card = render_questao_card(conn, q, numero=idx, ctx_texto=_ctx_tc_v)
+        if _pode_editar_questao(_prof_lapis, q["criada_por_professor_id"] if "criada_por_professor_id" in q.keys() else None):
+            _card = (f'<div style="position:relative;">'
+                     f'<a href="/questoes/{q["id"]}/editar" class="btn" target="_blank" title="Editar esta questão (abre em nova aba)" '
+                     f'style="position:absolute; top:10px; right:10px; z-index:2; padding:4px 9px; font-size:14px;">✏️</a>'
+                     f'{_card}</div>')
+        _partes_q.append(_card)
+    questoes_html = "".join(_partes_q)
     conn.close()
     desc_html = f'<p class="subtitle">{prova["descricao"]}</p>' if prova["descricao"] else ""
     comparativo_btn = ""
