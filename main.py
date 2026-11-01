@@ -26,6 +26,7 @@ import hashlib
 import json
 import urllib.parse
 import unicodedata
+import horarios  # Módulo de Horários Escolares (arquivo separado, 01/11/2026)
 
 app = FastAPI()
 
@@ -8406,6 +8407,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 <div class="sidebar-section">Documento Norteador</div>
                 {nav_item("/norteador", "norteador", "🧭", "Meus Documentos Norteadores") if professor else ""}
                 {nav_item("/norteador/calendario", "norteador-calendario", "📅", "Calendário do Trimestre") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {horarios.itens_menu(professor, nav_item)}
                 <div class="sidebar-section">Análises pedagógicas</div>
                 {nav_item("/boletim/analise", "boletim-analise", "📝", "Análise COC")}
                 {(nav_item("/boletim/dashboard", "boletim-dashboard", "📊", "Dashboard Pedagógico") + nav_item("/boletim/comparativo", "boletim-comparativo", "🔄", "Comparativo") + nav_item("/boletim/estudantes", "boletim-estudantes", "👥", "Mapa de notas") + nav_item("/boletim/soma-trimestres", "boletim-soma-trimestres", "➕", "Soma dos trimestres") + nav_item("/boletim/relatorio-geral", "boletim-relatorio-geral", "📄", "Relatório Geral") + nav_item("/boletim/relatorio-turma", "boletim-relatorio-turma", "📄", "Relatório por Turma")) if professor else ""}
@@ -9086,6 +9088,7 @@ def home(request: Request):
                 ("🖼️", "Carômetro", "/carometro", True),
                 ("🧭", "Documento Norteador", "/norteador", True),
             ]),
+            horarios.grupo_atalhos(prof),
             ("Banco", "#16a34a", [
                 ("📚", "Disciplinas", "/disciplinas", is_admin),
                 ("🎯", "Habilidades", "/habilidades", is_admin),
@@ -9316,6 +9319,7 @@ def home(request: Request):
         </div>
         <div class="home-layout">
             <div class="home-layout-main">
+                {horarios.card_tela_inicial(prof)}
                 {avisos_home_html}
                 {mobile_launcher_html}
                 {aplicacoes_abertas_html}
@@ -28204,3 +28208,12 @@ async def confirmar_lote_universal(request: Request):
         <div style="margin-top:20px;"><a href="/escanear" class="btn btn-primary">📷 Escanear mais</a></div>
     """
     return HTMLResponse(render_page("Lote salvo", content, active="aplicacoes"))
+
+
+# ==========================================
+#  MÓDULO DE HORÁRIOS ESCOLARES (horarios.py) — 01/11/2026
+# ==========================================
+# O código do módulo fica no arquivo horarios.py (separado, a pedido de Felipe).
+# Esta linha cria as tabelas horario_* (se ainda não existirem) e liga as rotas
+# /horarios/... ao sistema, usando o mesmo banco, login e layout do main.py.
+horarios.registrar(app, get_db=get_db, render_page=render_page, get_current_professor=get_current_professor)
