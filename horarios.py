@@ -85,7 +85,15 @@ DISCIPLINAS = ["Português", "Matemática", "História", "Ciências", "Geografia
 
 TURNOS_MINIMOS = 5        # diretriz 4: só a matrícula = 5 turnos
 TURNOS_MAX_DUPLA = 8      # diretriz 5: com dupla regência, até 8 turnos
-TEMPOS_DUPLA_MAX = 12     # opções 0 a 12, como no Forms
+TEMPOS_DUPLA_MAX = 12     # até 12 aulas de dupla regência
+
+# Disponibilidade por BLOCO (01/11/2026): cada turno tem 3 blocos geminados; o professor marca
+# cada bloco como Matrícula (M) ou Dupla regência (D). Resolve quem entra mais tarde/sai mais cedo.
+CELULAS = [(d, k, b) for d, _ in DIAS for k, _ in TURNOS for b in (1, 2, 3)]   # 30 blocos na semana
+BLOCOS_MIN_MATRICULA = TURNOS_MINIMOS * 3     # diretriz 4 em blocos: 15
+BLOCOS_MAX_DUPLA = TURNOS_MAX_DUPLA * 3       # diretriz 5 em blocos: 24
+DUPLA_BLOCOS_MAX = TEMPOS_DUPLA_MAX // 2      # 1 bloco = 2 aulas … 6 blocos = 12 aulas
+MATRICULA_BLOCOS = 6                          # a matrícula = 6 blocos (12 aulas) por semana
 
 # Coleta criada automaticamente na primeira vez que o módulo roda (só se ainda não
 # existir nenhuma coleta). Datas combinadas com Felipe em 01/11/2026.
@@ -122,6 +130,7 @@ def _criar_tabelas():
             dupla_tempos INTEGER NOT NULL DEFAULT 0,
             {colunas_turno},
             observacoes TEXT,
+            blocos TEXT,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             atualizado_por INTEGER,
@@ -240,6 +249,9 @@ def _criar_tabelas():
         );
     """)
     # Colunas acrescentadas depois da primeira versão das tabelas (só adiciona se faltar).
+    colunas_disp = {r["name"] for r in conn.execute("PRAGMA table_info(horario_disponibilidade)").fetchall()}
+    if "blocos" not in colunas_disp:
+        conn.execute("ALTER TABLE horario_disponibilidade ADD COLUMN blocos TEXT")
     colunas_versoes = {r["name"] for r in conn.execute("PRAGMA table_info(horario_versoes)").fetchall()}
     if "sugestoes" not in colunas_versoes:
         conn.execute("ALTER TABLE horario_versoes ADD COLUMN sugestoes TEXT")
@@ -343,28 +355,58 @@ def _coleta_por_id(conn, coleta_id) -> Optional[dict]:
     return conn.execute("SELECT * FROM horario_coletas WHERE id = ?", (cid,)).fetchone()
 
 
+def _blocos_de(resp) -> dict:
+    """Disponibilidade por BLOCO: {(dia, turno, bloco): 0 vazio | 1 matrícula | 2 dupla regência}.
+    Respostas antigas (marcadas por turno) viram o turno inteiro de matrícula."""
+    if not resp:
+        return {c: 0 for c in CELULAS}
+    r = dict(resp)
+    cod = r.get("blocos") or ""
+    if len(cod) == len(CELULAS):
+        return {c: (int(ch) if ch in "012" else 0) for c, ch in zip(CELULAS, cod)}
+    return {(d, k, b): (1 if r.get(f"{d}_{k}") else 0) for (d, k, b) in CELULAS}
+
+
+def _codigo_blocos(estado: dict) -> str:
+    return "".join(str(int(estado.get(c, 0) or 0)) for c in CELULAS)
+
+
 def _turnos_marcados(resp) -> list:
-    return [c for c in CAMPOS_TURNO if resp and resp[c]]
+    e = _blocos_de(resp)
+    return [f"{d}_{k}" for k, _ in TURNOS for d, _ in DIAS if any(e[(d, k, b)] for b in (1, 2, 3))]
 
 
 def _dias_do_turno(resp, turno: str) -> list:
-    return [nome for d, nome in DIAS if resp[f"{d}_{turno}"]]
+    """Dias do turno com algum bloco marcado; quando é parcial, diz quais blocos (ex.: 'Quinta (1º, 2º)')."""
+    e = _blocos_de(resp)
+    saida = []
+    for d, nome in DIAS:
+        bs = [b for b in (1, 2, 3) if e[(d, turno, b)]]
+        if bs:
+            saida.append(nome if len(bs) == 3 else f'{nome} ({", ".join(f"{b}º" for b in bs)})')
+    return saida
+
+
+def _contar_blocos(resp) -> tuple:
+    e = _blocos_de(resp)
+    return sum(1 for v in e.values() if v == 1), sum(1 for v in e.values() if v == 2)
 
 
 def _avaliar_diretrizes(dados: dict) -> list:
-    """Confere as diretrizes da escola (texto do Forms de 2026) e devolve a lista de
-    avisos. Não bloqueia sozinho: quem decide se bloqueia é quem chama."""
-    marcados = [c for c in CAMPOS_TURNO if dados.get(c)]
-    n = len(marcados)
+    """Confere as diretrizes da escola (texto do Forms), agora contadas em BLOCOS
+    (1 turno = 3 blocos), e devolve a lista de avisos. Não bloqueia sozinho."""
+    e = _blocos_de(dados)
+    marcados = [c for c, v in e.items() if v]
+    n_mat = sum(1 for v in e.values() if v == 1)
     avisos = []
-    if n and not any(c.startswith(("seg_", "sex_")) for c in marcados):
-        avisos.append("Nenhum turno na segunda ou na sexta-feira (diretriz 1: é obrigatório ter ao menos um).")
-    if n and not any(c.startswith(("ter_", "qua_", "qui_")) for c in marcados):
-        avisos.append("Nenhum turno na terça, quarta ou quinta-feira (diretriz 2: o planejamento é cumprido nesses dias).")
-    if n and n < TURNOS_MINIMOS:
-        avisos.append(f"Apenas {n} turno(s) marcado(s) — a diretriz 4 pede {TURNOS_MINIMOS} turnos para a matrícula.")
-    if dados.get("dupla_interesse") and n > TURNOS_MAX_DUPLA:
-        avisos.append(f"{n} turnos marcados — com dupla regência, a diretriz 5 pede até {TURNOS_MAX_DUPLA}.")
+    if marcados and not any(c[0] in ("seg", "sex") for c in marcados):
+        avisos.append("Nenhum bloco na segunda ou na sexta-feira (diretriz 1: é obrigatório ter ao menos um).")
+    if marcados and not any(c[0] in ("ter", "qua", "qui") for c in marcados):
+        avisos.append("Nenhum bloco na terça, quarta ou quinta-feira (diretriz 2: o planejamento é cumprido nesses dias).")
+    if marcados and n_mat < BLOCOS_MIN_MATRICULA:
+        avisos.append(f"Apenas {n_mat} bloco(s) de matrícula — a diretriz 4 pede {BLOCOS_MIN_MATRICULA} blocos (5 turnos).")
+    if dados.get("dupla_interesse") and len(marcados) > BLOCOS_MAX_DUPLA:
+        avisos.append(f"{len(marcados)} blocos marcados — com dupla regência, a diretriz 5 pede até {BLOCOS_MAX_DUPLA} blocos (8 turnos).")
     return avisos
 
 
@@ -377,13 +419,23 @@ def _ler_formulario(form) -> dict:
         "_dupla_resposta": form.get("dupla_interesse") or "",
     }
     try:
-        dados["dupla_tempos"] = int(form.get("dupla_tempos") or 0)
+        dupla_blocos = int(form.get("dupla_blocos") or 0)
     except ValueError:
-        dados["dupla_tempos"] = -1
+        dupla_blocos = -1
     if not dados["dupla_interesse"]:
-        dados["dupla_tempos"] = 0
-    for c in CAMPOS_TURNO:
-        dados[c] = 1 if form.get(c) else 0
+        dupla_blocos = 0
+    dados["dupla_tempos"] = dupla_blocos * 2 if dupla_blocos > 0 else (0 if dupla_blocos == 0 else -1)
+    estado = {}
+    for (d, k, b) in CELULAS:
+        v = str(form.get(f"b_{d}_{k}{b}") or "0")
+        v = int(v) if v in ("0", "1", "2") else 0
+        if v == 2 and not dados["dupla_interesse"]:
+            v = 1          # sem dupla regência, bloco "dupla" vira matrícula (não perde a marcação)
+        estado[(d, k, b)] = v
+    dados["blocos"] = _codigo_blocos(estado)
+    for k, _ in TURNOS:
+        for d, _ in DIAS:
+            dados[f"{d}_{k}"] = 1 if any(estado[(d, k, b)] for b in (1, 2, 3)) else 0
     return dados
 
 
@@ -395,12 +447,17 @@ def _validar(dados: dict, exigir_justificativa: bool) -> list:
         erros.append("Escolha a situação funcional.")
     if dados["disciplina"] not in DISCIPLINAS:
         erros.append("Escolha a disciplina.")
+    n_mat, n_dup = _contar_blocos(dados)
+    pedidos = (dados.get("dupla_tempos") or 0) // 2
     if dados["_dupla_resposta"] not in ("sim", "nao"):
         erros.append("Responda se tem interesse em dupla regência.")
-    elif dados["dupla_interesse"] and not (1 <= dados["dupla_tempos"] <= TEMPOS_DUPLA_MAX):
-        erros.append("Você marcou interesse em dupla regência: escolha quantos tempos (de 1 a 12).")
-    if not any(dados.get(c) for c in CAMPOS_TURNO):
-        erros.append("Marque pelo menos um turno no quadro de disponibilidade.")
+    elif dados["dupla_interesse"] and not (1 <= pedidos <= DUPLA_BLOCOS_MAX):
+        erros.append("Você marcou interesse em dupla regência: escolha quantos blocos (de 1 bloco = 2 aulas até 6 blocos = 12 aulas).")
+    elif dados["dupla_interesse"] and exigir_justificativa and n_dup < pedidos:
+        erros.append(f"Você pediu {pedidos} bloco(s) de dupla regência: marque no quadro pelo menos {pedidos} bloco(s) como Dupla "
+                     f"(roxo) — hoje há {n_dup}.")
+    if not (n_mat + n_dup):
+        erros.append("Marque pelo menos um bloco no quadro de disponibilidade.")
     elif exigir_justificativa and _avaliar_diretrizes(dados) and not dados["observacoes"]:
         erros.append("Sua disponibilidade não segue todas as diretrizes (veja os avisos em laranja). "
                      "Para enviar assim, explique o motivo em Observações gerais.")
@@ -408,8 +465,16 @@ def _validar(dados: dict, exigir_justificativa: bool) -> list:
 
 
 def _salvar(conn, coleta_id: int, professor_id: int, dados: dict, atualizado_por: int):
-    colunas = ["situacao", "disciplina", "dupla_interesse", "dupla_tempos"] + CAMPOS_TURNO + ["observacoes"]
-    valores = [dados[c] for c in colunas]
+    """Grava (ou atualiza) a resposta. A disponibilidade por bloco fica na coluna 'blocos'; as
+    colunas por turno são recalculadas a partir dela (um turno conta se tiver algum bloco)."""
+    dados = dict(dados)
+    estado = _blocos_de(dados)
+    dados["blocos"] = _codigo_blocos(estado)
+    for k, _ in TURNOS:
+        for d, _ in DIAS:
+            dados[f"{d}_{k}"] = 1 if any(estado[(d, k, b)] for b in (1, 2, 3)) else 0
+    colunas = ["situacao", "disciplina", "dupla_interesse", "dupla_tempos"] + CAMPOS_TURNO + ["blocos", "observacoes"]
+    valores = [dados.get(c) for c in colunas]
     lista_cols = ", ".join(colunas)
     marcadores = ", ".join("?" for _ in colunas)
     atualiza = ", ".join(f"{c} = excluded.{c}" for c in colunas)
@@ -434,6 +499,18 @@ def _acesso_negado(request: Request, mensagem: str) -> HTMLResponse:
     return HTMLResponse(_ctx["render_page"]("Acesso restrito", conteudo), status_code=403)
 
 
+def _horas_padrao(ano: int) -> dict:
+    """Horário de início de cada bloco (da configuração do ano, ou o padrão da escola)."""
+    try:
+        conn = _db()
+        horas = {(r["turno"], r["bloco"]): (r["inicio"] or "") for r in
+                 conn.execute("SELECT turno, bloco, inicio FROM horario_blocos WHERE ano_letivo = ?", (ano,)).fetchall()}
+        conn.close()
+    except Exception:
+        horas = {}
+    return {chave: (horas.get(chave) or BLOCOS_PADRAO[chave]) for chave in BLOCOS_PADRAO}
+
+
 # ==========================================
 #  PEDAÇOS DE TELA REAPROVEITADOS
 # ==========================================
@@ -443,48 +520,96 @@ def _diretrizes_html(coleta) -> str:
     <div class="card" style="padding:14px 16px; margin-bottom:16px; border-left:4px solid var(--purple, #7c3aed);">
         <div style="font-weight:700; margin-bottom:6px;">📌 Diretrizes para a disponibilidade de horário {coleta["ano_letivo"]}</div>
         <ol style="margin:0; padding-left:20px; font-size:13px; line-height:1.6;">
-            <li>É obrigatório fornecer turnos disponíveis na <strong>segunda ou sexta-feira</strong>.</li>
+            <li>É obrigatório fornecer blocos disponíveis na <strong>segunda ou sexta-feira</strong>.</li>
             <li>O planejamento será cumprido obrigatoriamente <strong>terça, quarta ou quinta-feira</strong>.</li>
-            <li>Preferencialmente disponibilizar o <strong>turno inteiro</strong>. Qualquer especificidade, sinalizar nas observações gerais.</li>
-            <li>Todos os docentes deverão disponibilizar, em caso de somente a matrícula, <strong>5 turnos</strong> de trabalho.</li>
-            <li>Caso tenha interesse em dupla regência, disponibilizar <strong>até 8 turnos</strong> de trabalho.</li>
+            <li>Preferencialmente disponibilizar o <strong>turno inteiro</strong> (os 3 blocos). Se você entra mais tarde ou sai mais cedo, marque só os blocos possíveis e explique nas observações gerais.</li>
+            <li>Todos os docentes deverão disponibilizar, em caso de somente a matrícula, <strong>5 turnos (15 blocos)</strong> de trabalho.</li>
+            <li>Caso tenha interesse em dupla regência, disponibilizar <strong>até 8 turnos (24 blocos)</strong>, marcando em <span style="color:#7c3aed; font-weight:700;">roxo</span> onde deseja a dupla.</li>
             <li><strong>Atenção:</strong> no próximo ano haverá realocação de turmas, com maior número de estudantes no <strong>turno da tarde</strong> — ajustes na disponibilidade deverão ser realizados.</li>
         </ol>
     </div>"""
 
 
 def _mini_quadro(resp) -> str:
-    """Quadrinho 2×5 (manhã/tarde × dias) para listas e resumos."""
+    """Quadrinho 2×5 (manhã/tarde × dias) para listas: ✓ = turno inteiro, número = blocos (turno parcial);
+    verde = matrícula, roxo = tem dupla regência."""
+    e = _blocos_de(resp)
     cab = "".join(f'<th style="padding:1px 4px; font-weight:600; font-size:10px; color:var(--text-muted);">{nome[:3]}</th>' for _, nome in DIAS)
     linhas = ""
     for t, nome_t in TURNOS:
         celulas = ""
         for d, _ in DIAS:
-            on = bool(resp[f"{d}_{t}"])
-            cor = "background:#16a34a; color:white;" if on else "background:var(--bg-subtle, #f1f5f9); color:var(--text-muted);"
-            celulas += f'<td style="{cor} text-align:center; padding:1px 4px; font-size:10px; border-radius:3px;">{"✓" if on else "·"}</td>'
+            vs = [e[(d, t, b)] for b in (1, 2, 3)]
+            n = sum(1 for v in vs if v)
+            if not n:
+                cor, txt = "background:var(--bg-subtle, #f1f5f9); color:var(--text-muted);", "·"
+            else:
+                base = "#7c3aed" if 2 in vs else "#16a34a"
+                cor = f"background:{base}; color:white;" if n == 3 else f"background:{base}22; color:{base}; font-weight:700;"
+                txt = "✓" if n == 3 else str(n)
+            celulas += f'<td style="{cor} text-align:center; padding:1px 4px; font-size:10px; border-radius:3px;" title="{n} de 3 blocos">{txt}</td>'
         linhas += f'<tr><td style="font-size:10px; color:var(--text-muted); padding-right:4px;">{nome_t[0]}</td>{celulas}</tr>'
     return f'<table style="border-collapse:separate; border-spacing:2px;"><tr><td></td>{cab}</tr>{linhas}</table>'
 
 
-def _resumo_resposta_html(resp) -> str:
-    n = len(_turnos_marcados(resp))
-    dupla = f'Sim — {resp["dupla_tempos"]} tempo(s)' if resp["dupla_interesse"] else "Não"
+def _grade_blocos_html(estado: dict, horas: dict, editavel: bool = True, dupla: bool = False, compacta: bool = False,
+                       destaque: Optional[set] = None, prefixo: str = "b", rotulos: Optional[dict] = None,
+                       pendentes: Optional[set] = None) -> str:
+    """Quadro dia × bloco (manhã 1º-3º, tarde 1º-3º). Editável: cada clique alterna
+    vazio → Matrícula (verde) → Dupla regência (roxo, se houver dupla) → vazio.
+    destaque: blocos {(dia, turno, bloco)} com contorno laranja (o bloco da sugestão).
+    rotulos: texto dentro do bloco (ex.: a turma em que o professor tem aula na versão).
+    pendentes: blocos com aula fora da disponibilidade (contorno vermelho)."""
+    destaque, rotulos, pendentes = destaque or set(), rotulos or {}, pendentes or set()
+    cls_tab = "hd-grade" + (" hd-mini" if compacta else "")
+    cab = '<th></th><th></th>' + "".join(
+        f'<th>{(nome[:3] if compacta else f"<span class=hd-dl>{nome}</span><span class=hd-dc>{nome[:3]}</span>")}'
+        + (f'<div class="hd-atalhos"><button type="button" onclick="hdTurno(this)" data-dia="{d}" data-turno="m" title="Manhã inteira">☀️</button>'
+           f'<button type="button" onclick="hdTurno(this)" data-dia="{d}" data-turno="t" title="Tarde inteira">🌇</button></div>' if editavel and not compacta else "")
+        + '</th>' for d, nome in DIAS)
+    linhas = ""
+    for k, nome_k in TURNOS:
+        for b in (1, 2, 3):
+            rot = f'<td class="hd-turno" rowspan="3">{nome_k[0] if compacta else nome_k}</td>' if b == 1 else ""
+            hora = horas.get((k, b), "") if horas else ""
+            cel = ""
+            for d, nome_d in DIAS:
+                c = (d, k, b)
+                v = int(estado.get(c, 0) or 0)
+                txt_rot = rotulos.get(c, "")
+                marca = _e(txt_rot) if txt_rot else ["", "M", "D"][v]
+                extra = (" hd-destaque" if c in destaque else "") + (" hd-pend" if c in pendentes else "") + (" hd-temrot" if txt_rot else "")
+                titulo = f"{nome_d} — {nome_k}, {b}º bloco" + (f" ({hora})" if hora else "") + (f" · aula: {txt_rot}" if txt_rot else "")
+                attr_rot = f' data-rot="{_e(txt_rot)}"' if txt_rot else ""
+                if editavel:
+                    cel += (f'<td class="hd-bl v{v}{extra}" data-dia="{d}" data-turno="{k}"{attr_rot} onclick="hdCiclo(this)" title="{titulo}">'
+                            f'<input type="hidden" name="{prefixo}_{d}_{k}{b}" value="{v}"><span>{marca}</span></td>')
+                else:
+                    cel += f'<td class="hd-bl v{v} hd-ro{extra}" title="{titulo}"><span>{marca}</span></td>'
+            sep = ' class="hd-sep"' if (k == "t" and b == 1) else ""
+            linhas += f'<tr{sep}>{rot}<td class="hd-hora">{_e(hora) or str(b) + "º"}</td>{cel}</tr>'
+    return (f'<div class="hd-rolagem"><table class="{cls_tab}" data-dupla="{1 if dupla else 0}"><tr>{cab}</tr>{linhas}</table></div>')
+
+
+def _resumo_resposta_html(resp, horas: Optional[dict] = None) -> str:
+    n_mat, n_dup = _contar_blocos(resp)
+    dupla = f'Sim — {resp["dupla_tempos"] // 2} bloco(s) ({resp["dupla_tempos"]} aulas)' if resp["dupla_interesse"] else "Não"
     obs = _e(resp["observacoes"]) or '<span style="color:var(--text-muted);">—</span>'
     avisos = _avaliar_diretrizes(dict(resp))
     avisos_html = ""
     if avisos:
         avisos_html = '<div style="margin-top:10px; font-size:12px; color:#b45309;">' + "".join(f"⚠️ {_e(a)}<br>" for a in avisos) + "</div>"
     return f"""
+    {_CSS_FORM}
     <div style="display:flex; flex-wrap:wrap; gap:24px; align-items:flex-start;">
         <div style="font-size:13px; line-height:1.8;">
             <div><strong>Situação funcional:</strong> {_e(resp["situacao"])}</div>
             <div><strong>Disciplina:</strong> {_e(resp["disciplina"])}</div>
             <div><strong>Interesse em dupla regência:</strong> {dupla}</div>
-            <div><strong>Turnos disponíveis:</strong> {n}</div>
+            <div><strong>Blocos disponíveis:</strong> {n_mat} de matrícula{f" + {n_dup} de dupla regência" if n_dup else ""}</div>
             <div><strong>Última atualização:</strong> {_ts_br(resp["atualizado_em"])}</div>
         </div>
-        <div>{_mini_quadro(resp)}</div>
+        <div>{_grade_blocos_html(_blocos_de(resp), horas or BLOCOS_PADRAO, editavel=False, compacta=True)}</div>
     </div>
     <div style="margin-top:10px; font-size:13px;"><strong>Observações gerais:</strong> {obs}</div>
     {avisos_html}"""
@@ -492,18 +617,35 @@ def _resumo_resposta_html(resp) -> str:
 
 _CSS_FORM = """
 <style>
-.hd-quadro { border-collapse: separate; border-spacing: 6px; margin: 4px 0 8px; }
-.hd-quadro th { font-size: 12px; font-weight: 600; color: var(--text-muted); padding: 2px 4px; }
-.hd-quadro td.hd-rot { font-size: 13px; font-weight: 600; padding-right: 6px; white-space: nowrap; }
-.hd-cel label { display: block; margin: 0; cursor: pointer; position: relative; }
-.hd-cel input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-.hd-cel span { display: flex; align-items: center; justify-content: center; width: 64px; height: 44px;
-    border: 2px solid var(--border, #cbd5e1); border-radius: 8px; font-size: 18px; color: transparent;
-    user-select: none; transition: background .12s, border-color .12s; }
-.hd-cel label:hover span { border-color: #16a34a; }
-.hd-cel input:checked + span { background: #16a34a; border-color: #16a34a; color: white; }
-.hd-cel input:focus-visible + span { outline: 2px solid #2563eb; outline-offset: 3px; }
-@media (max-width: 560px) { .hd-cel span { width: 46px; height: 40px; } .hd-quadro { border-spacing: 4px; } }
+.hd-grade { border-collapse: separate; border-spacing: 4px; margin: 4px 0 8px; }
+.hd-grade th { font-size: 12px; font-weight: 600; color: var(--text-muted); padding: 2px 4px; text-align: center; }
+.hd-grade td.hd-turno { font-size: 12px; font-weight: 700; padding-right: 4px; writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; color: var(--text-muted); }
+.hd-grade td.hd-hora { font-size: 11px; color: var(--text-muted); padding-right: 4px; white-space: nowrap; text-align: right; }
+.hd-grade tr.hd-sep td { border-top: 6px solid transparent; }
+.hd-bl { width: 66px; height: 30px; border: 2px solid var(--border, #cbd5e1); border-radius: 7px; cursor: pointer; text-align: center;
+    font-weight: 800; font-size: 12px; color: transparent; user-select: none; transition: background .1s, border-color .1s; }
+.hd-bl:hover { border-color: #16a34a; }
+.hd-bl.v1 { background: #16a34a; border-color: #16a34a; color: white; }
+.hd-bl.v2 { background: #7c3aed; border-color: #7c3aed; color: white; }
+.hd-bl.hd-ro { cursor: default; }
+.hd-bl.hd-destaque { outline: 3px solid #f59e0b; outline-offset: 1px; }
+.hd-bl.hd-pend { box-shadow: inset 0 0 0 3px #ef4444; }
+.hd-bl.v0.hd-temrot { color: #b91c1c; background: #fef2f2; }
+.hd-mini .hd-bl { width: 24px; height: 18px; font-size: 9px; border-width: 1px; border-radius: 4px; }
+.hd-mini { border-spacing: 2px; } .hd-mini th { font-size: 10px; } .hd-mini td.hd-hora { font-size: 9px; } .hd-mini td.hd-turno { font-size: 10px; }
+.hd-atalhos { display: flex; gap: 2px; justify-content: center; margin-top: 2px; }
+.hd-atalhos button { border: 1px solid var(--border, #cbd5e1); background: transparent; border-radius: 4px; font-size: 11px; padding: 0 3px; cursor: pointer; }
+.hd-legenda { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; margin: 2px 0 6px; }
+.hd-legenda i { display: inline-block; width: 14px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+.hd-rolagem { max-width: 100%; overflow-x: auto; }
+.hd-dc { display: none; }
+@media (max-width: 560px) {
+  .hd-grade:not(.hd-mini) { border-spacing: 3px; }
+  .hd-grade:not(.hd-mini) .hd-bl { width: 44px; height: 32px; }
+  .hd-grade:not(.hd-mini) td.hd-turno { font-size: 10px; padding-right: 0; }
+  .hd-grade:not(.hd-mini) td.hd-hora { font-size: 10px; padding-right: 2px; }
+  .hd-dl { display: none; } .hd-dc { display: inline; }
+}
 .hd-avisos { font-size: 13px; color: #b45309; background: #fffbeb; border: 1px solid #fcd34d;
     border-radius: 6px; padding: 8px 12px; margin: 8px 0; display: none; }
 .hd-erros { background: var(--red-bg, #fef2f2); color: var(--red, #b91c1c); border: 1px solid var(--red, #b91c1c);
@@ -513,6 +655,27 @@ _CSS_FORM = """
 .hd-radio { display: inline-flex; align-items: center; gap: 6px; margin-right: 18px; font-weight: 400; cursor: pointer; }
 .hd-radio input { width: auto; margin: 0; }
 </style>
+<script>
+function hdValor(td) { return parseInt(td.querySelector('input').value || '0', 10); }
+function hdSet(td, v) {
+  td.querySelector('input').value = v;
+  td.classList.remove('v0', 'v1', 'v2'); td.classList.add('v' + v);
+  td.querySelector('span').textContent = td.dataset.rot || ['', 'M', 'D'][v];
+}
+function hdAvisa(el) { el.dispatchEvent(new Event('change', {bubbles: true})); }
+function hdCiclo(td) {
+  var tab = td.closest('table'), dupla = tab.getAttribute('data-dupla') === '1', v = hdValor(td);
+  v = (v === 0) ? 1 : ((v === 1 && dupla) ? 2 : 0);
+  hdSet(td, v); hdAvisa(tab);
+}
+function hdTurno(btn) {
+  var tab = btn.closest('table');
+  var tds = tab.querySelectorAll('td.hd-bl[data-dia="' + btn.dataset.dia + '"][data-turno="' + btn.dataset.turno + '"]');
+  var todos = Array.prototype.every.call(tds, function (t) { return hdValor(t) > 0; });
+  tds.forEach(function (t) { hdSet(t, todos ? 0 : 1); });
+  hdAvisa(tab);
+}
+</script>
 """
 
 _JS_FORM = """
@@ -521,39 +684,46 @@ _JS_FORM = """
   var form = document.getElementById('hd-form');
   if (!form) return;
   var MIN = %(min)d, MAX_DUPLA = %(max_dupla)d;
-  var caixas = form.querySelectorAll('.hd-cel input');
+  var tab = form.querySelector('table.hd-grade');
   var contador = document.getElementById('hd-contador');
   var avisos = document.getElementById('hd-avisos');
   var obsMarca = document.getElementById('hd-obs-marca');
-  var tempos = form.querySelector('select[name=dupla_tempos]');
+  var qtd = form.querySelector('select[name=dupla_blocos]');
+  var legDupla = document.getElementById('hd-leg-dupla');
   function duplaSim() { var r = form.querySelector('input[name=dupla_interesse]:checked'); return r && r.value === 'sim'; }
   function atualizar() {
-    var marc = [];
-    caixas.forEach(function (c) { if (c.checked) marc.push(c.name); });
-    var n = marc.length;
-    contador.textContent = n + (n === 1 ? ' turno marcado' : ' turnos marcados');
-    var lista = [];
-    if (n) {
-      if (!marc.some(function (x) { return x.indexOf('seg_') === 0 || x.indexOf('sex_') === 0; }))
-        lista.push('Nenhum turno na segunda ou na sexta-feira (diretriz 1).');
-      if (!marc.some(function (x) { return /^(ter|qua|qui)_/.test(x); }))
-        lista.push('Nenhum turno na terça, quarta ou quinta-feira (diretriz 2 — planejamento).');
-      if (n < MIN) lista.push('Apenas ' + n + ' turno(s) — a diretriz 4 pede ' + MIN + ' para a matrícula.');
-      if (duplaSim() && n > MAX_DUPLA) lista.push(n + ' turnos — com dupla regência, a diretriz 5 pede até ' + MAX_DUPLA + '.');
+    var dupla = duplaSim();
+    tab.setAttribute('data-dupla', dupla ? '1' : '0');
+    if (legDupla) legDupla.style.display = dupla ? '' : 'none';
+    var cel = tab.querySelectorAll('td.hd-bl'), mat = 0, dup = 0, seq = false, tqq = false;
+    cel.forEach(function (td) {
+      var v = parseInt(td.querySelector('input').value || '0', 10);
+      if (v === 2 && !dupla) { hdSet(td, 1); v = 1; }
+      if (v === 1) mat++; if (v === 2) dup++;
+      if (v > 0) { var d = td.dataset.dia; if (d === 'seg' || d === 'sex') seq = true; else tqq = true; }
+    });
+    var pedidos = dupla && qtd ? parseInt(qtd.value || '0', 10) : 0;
+    contador.innerHTML = 'Matrícula: <strong>' + mat + '</strong> bloco(s)' + (dupla ? ' · Dupla regência: <strong>' + dup + '</strong> bloco(s) marcados (pedidos: ' + pedidos + ')' : '');
+    var lista = [], tot = mat + dup;
+    if (tot) {
+      if (!seq) lista.push('Nenhum bloco na segunda ou na sexta-feira (diretriz 1).');
+      if (!tqq) lista.push('Nenhum bloco na terça, quarta ou quinta-feira (diretriz 2 — planejamento).');
+      if (mat < MIN) lista.push('Apenas ' + mat + ' bloco(s) de matrícula — a diretriz 4 pede ' + MIN + ' (5 turnos).');
+      if (dupla && tot > MAX_DUPLA) lista.push(tot + ' blocos — com dupla regência, a diretriz 5 pede até ' + MAX_DUPLA + ' (8 turnos).');
     }
-    if (lista.length) {
+    var erroDupla = (dupla && pedidos > 0 && dup < pedidos) ?
+      '<div style="color:#b91c1c; font-weight:600; margin-top:6px;">❗ Você pediu ' + pedidos + ' bloco(s) de dupla: marque pelo menos ' + pedidos +
+      ' bloco(s) em roxo (clique duas vezes no bloco).</div>' : '';
+    if (lista.length || erroDupla) {
       avisos.innerHTML = lista.map(function (a) { return '⚠️ ' + a; }).join('<br>') +
-        '<br><strong>Você pode enviar mesmo assim, desde que explique o motivo em Observações gerais.</strong>';
+        (lista.length ? '<br><strong>Você pode enviar mesmo assim, desde que explique o motivo em Observações gerais.</strong>' : '') + erroDupla;
       avisos.style.display = 'block';
-      if (obsMarca) obsMarca.style.display = 'inline';
+      if (obsMarca) obsMarca.style.display = lista.length ? 'inline' : 'none';
     } else {
       avisos.style.display = 'none';
       if (obsMarca) obsMarca.style.display = 'none';
     }
-    if (tempos) {
-      if (duplaSim()) { tempos.disabled = false; }
-      else { tempos.value = '0'; tempos.disabled = true; }
-    }
+    if (qtd) { if (dupla) { qtd.disabled = false; } else { qtd.value = '0'; qtd.disabled = true; } }
   }
   form.addEventListener('change', atualizar);
   atualizar();
@@ -563,7 +733,7 @@ _JS_FORM = """
 
 
 def _form_html(action: str, coleta, dados: Optional[dict], erros: list, nome_alvo: str,
-               modo_gestao: bool, texto_botao: str) -> str:
+               modo_gestao: bool, texto_botao: str, horas: Optional[dict] = None) -> str:
     d = dados or {}
 
     def sel(valor, atual):
@@ -574,20 +744,12 @@ def _form_html(action: str, coleta, dados: Optional[dict], erros: list, nome_alv
     opts_disc = '<option value="">Escolha…</option>' + "".join(
         f'<option{sel(x, d.get("disciplina"))}>{x}</option>' for x in DISCIPLINAS)
     dupla_resp = d.get("_dupla_resposta") or ("sim" if d.get("dupla_interesse") else ("nao" if dados else ""))
-    tempos_atual = int(d.get("dupla_tempos") or 0)
-    opts_tempos = "".join(
-        f'<option value="{i}"{" selected" if i == tempos_atual else ""}>{i}</option>' for i in range(0, TEMPOS_DUPLA_MAX + 1))
-
-    cab = "".join(f"<th>{nome}</th>" for _, nome in DIAS)
-    linhas = ""
-    for t, nome_t in TURNOS:
-        celulas = ""
-        for dd, nome_d in DIAS:
-            campo = f"{dd}_{t}"
-            marcado = " checked" if d.get(campo) else ""
-            celulas += (f'<td class="hd-cel"><label title="{nome_d} — {nome_t}">'
-                        f'<input type="checkbox" name="{campo}" value="1"{marcado}><span>✓</span></label></td>')
-        linhas += f'<tr><td class="hd-rot">{nome_t}</td>{celulas}</tr>'
+    blocos_atual = max(0, int(d.get("dupla_tempos") or 0) // 2)
+    opts_dupla = '<option value="0">0</option>' + "".join(
+        f'<option value="{i}"{" selected" if i == blocos_atual else ""}>{i} bloco{"s" if i > 1 else ""} — {2 * i} aulas</option>'
+        for i in range(1, DUPLA_BLOCOS_MAX + 1))
+    grade = _grade_blocos_html(_blocos_de(d) if dados else {}, horas or (_horas_padrao(coleta["ano_letivo"]) if coleta else BLOCOS_PADRAO),
+                               editavel=True, dupla=(dupla_resp == "sim"))
 
     erros_html = ""
     if erros:
@@ -617,22 +779,28 @@ def _form_html(action: str, coleta, dados: Optional[dict], erros: list, nome_alv
             <label class="hd-radio"><input type="radio" name="dupla_interesse" value="sim" required{" checked" if dupla_resp == "sim" else ""}> Sim</label>
             <label class="hd-radio"><input type="radio" name="dupla_interesse" value="nao" required{" checked" if dupla_resp == "nao" else ""}> Não</label>
         </div>
-        <label class="hd-campo"><span>5. Quantos tempos de dupla regência? (sem interesse, fica 0)</span>
-            <select name="dupla_tempos" style="max-width:120px;">{opts_tempos}</select>
+        <label class="hd-campo"><span>5. Quantos blocos de dupla regência você deseja? (1 bloco = 2 aulas; sem interesse, fica 0)</span>
+            <select name="dupla_blocos" style="max-width:220px;">{opts_dupla}</select>
         </label>
-        <div class="hd-campo"><span>6. Marque no quadro os turnos em que você está disponível para a Escola *</span>
-            <table class="hd-quadro"><tr><th></th>{cab}</tr>{linhas}</table>
-            <div id="hd-contador" style="font-size:13px; font-weight:600;"></div>
+        <div class="hd-campo"><span>6. Marque no quadro os blocos de aula em que você está disponível para a Escola *</span>
+            <div class="hd-legenda">
+                <span><i style="background:#16a34a;"></i><strong>M</strong> = matrícula (1 clique)</span>
+                <span id="hd-leg-dupla"><i style="background:#7c3aed;"></i><strong>D</strong> = dupla regência (2 cliques)</span>
+                <span><i style="border:2px solid #cbd5e1;"></i>vazio = indisponível</span>
+                <span>☀️ 🌇 = marcar o turno inteiro do dia</span>
+            </div>
+            {grade}
+            <div id="hd-contador" style="font-size:13px;"></div>
             <div id="hd-avisos" class="hd-avisos"></div>
         </div>
         <label class="hd-campo"><span>7. Observações gerais <span id="hd-obs-marca" style="display:none; color:#b45309;">(obrigatório explicar o motivo)</span></span>
-            <textarea name="observacoes" rows="4" placeholder="Ex.: disponível na quinta só até as 16h; preferência por 6º e 9º anos…">{_e(d.get("observacoes"))}</textarea>
+            <textarea name="observacoes" rows="4" placeholder="Ex.: na quinta só posso a partir do 2º bloco; preferência por 6º e 9º anos…">{_e(d.get("observacoes"))}</textarea>
         </label>
         <div class="page-actions" style="margin-top:6px;">
             <button type="submit" class="btn btn-primary">{texto_botao}</button>
         </div>
     </form>
-    {_JS_FORM % {"min": TURNOS_MINIMOS, "max_dupla": TURNOS_MAX_DUPLA}}
+    {_JS_FORM % {"min": BLOCOS_MIN_MATRICULA, "max_dupla": BLOCOS_MAX_DUPLA}}
     """
 
 
@@ -895,11 +1063,12 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
     # Respondidos
     linhas_resp = ""
     for r in dp["respostas"]:
-        n = len(_turnos_marcados(r))
+        n_mat, n_dup = _contar_blocos(r)
+        n = f'{n_mat}' + (f' <span style="color:#7c3aed;">+{n_dup}D</span>' if n_dup else "")
         avisos = _avaliar_diretrizes(dict(r))
         alerta = (f'<span title="{_e(" ".join(avisos))}" style="color:#b45309; font-weight:600; cursor:help;">⚠️ {len(avisos)}</span>'
                   if avisos else '<span style="color:#16a34a;">✓</span>')
-        dupla = f'Sim ({r["dupla_tempos"]})' if r["dupla_interesse"] else "Não"
+        dupla = f'Sim ({r["dupla_tempos"] // 2} bl.)' if r["dupla_interesse"] else "Não"
         por_gestao = ""
         if r["atualizado_por"] and r["atualizado_por"] != r["professor_id"]:
             por_gestao = f'<div style="font-size:10px; color:var(--text-muted);">por {_e(r["atualizado_por_nome"] or "gestão")}</div>'
@@ -940,7 +1109,7 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
                 <thead><tr style="background:var(--bg-subtle);">
                     <th style="padding:8px; text-align:left;">Professor</th><th style="padding:8px; text-align:left;">Situação</th>
                     <th style="padding:8px; text-align:left;">Disciplina</th><th style="padding:8px;">Dupla</th>
-                    <th style="padding:8px; text-align:left;">Turnos</th><th style="padding:8px;">Total</th>
+                    <th style="padding:8px; text-align:left;">Disponibilidade</th><th style="padding:8px;" title="Blocos de matrícula (+ blocos de dupla regência)">Blocos</th>
                     <th style="padding:8px;">Diretrizes</th><th style="padding:8px; text-align:left;">Observações</th>
                     <th style="padding:8px; text-align:left;">Atualizado</th><th style="padding:8px;"></th>
                 </tr></thead>
@@ -1200,19 +1369,22 @@ def exportar_disponibilidade(request: Request, coleta_id: str = ""):
     ws.title = "Respostas"
     # Mesmas colunas da planilha do Google Forms, mais algumas úteis.
     cab = ["Última atualização", "Nome", "E-mail", "Situação funcional", "Disciplina",
-           "Possui interesse em dupla regência?", "Quantos tempos?",
+           "Possui interesse em dupla regência?", "Quantos blocos de dupla? (aulas)",
            "Disponibilidade [Manhã]", "Disponibilidade [Tarde]", "Total de turnos",
+           "Blocos de matrícula", "Blocos de dupla regência",
            "Fora das diretrizes", "Observações gerais", "Preenchido por"]
     ws.append(cab)
     for r in dp["respostas"]:
         por = "" if (not r["atualizado_por"] or r["atualizado_por"] == r["professor_id"]) else (r["atualizado_por_nome"] or "gestão")
         ws.append([
             _ts_br(r["atualizado_em"]), r["professor_nome"], r["professor_email"], r["situacao"], r["disciplina"],
-            "Sim" if r["dupla_interesse"] else "Não", r["dupla_tempos"],
+            "Sim" if r["dupla_interesse"] else "Não",
+            (f'{r["dupla_tempos"] // 2} ({r["dupla_tempos"]} aulas)' if r["dupla_interesse"] else 0),
             ", ".join(_dias_do_turno(r, "m")), ", ".join(_dias_do_turno(r, "t")), len(_turnos_marcados(r)),
+            *_contar_blocos(r),
             " | ".join(_avaliar_diretrizes(dict(r))), r["observacoes"] or "", por,
         ])
-    larguras = [18, 34, 30, 18, 18, 14, 10, 34, 34, 10, 50, 60, 22]
+    larguras = [18, 34, 30, 18, 18, 14, 14, 34, 34, 10, 12, 12, 50, 60, 22]
     for i, w in enumerate(larguras, start=1):
         ws.column_dimensions[ws.cell(1, i).column_letter].width = w
     for c in ws[1]:
@@ -1226,6 +1398,25 @@ def exportar_disponibilidade(request: Request, coleta_id: str = ""):
         ws2.append([nome_t] + [dp["contagem"][f"{d}_{t}"] for d, _ in DIAS])
     for c in ws2[1]:
         c.font, c.fill = negrito, fundo
+
+    # Disponibilidade por bloco: uma linha por professor, uma coluna por bloco (M = matrícula, D = dupla)
+    ws4 = wb.create_sheet("Por bloco")
+    ws4.append(["Nome"] + [f"{nome[:3]} {nome_k[0]}{b}º" for d, nome in DIAS for k, nome_k in TURNOS for b in (1, 2, 3)])
+    verde, roxo = PatternFill("solid", fgColor="BBF7D0"), PatternFill("solid", fgColor="DDD6FE")
+    for r in dp["respostas"]:
+        e = _blocos_de(r)
+        ws4.append([r["professor_nome"]] + [["", "M", "D"][e[c]] for c in CELULAS])
+        for j, c in enumerate(CELULAS, start=2):
+            if e[c]:
+                ws4.cell(ws4.max_row, j).fill = verde if e[c] == 1 else roxo
+                ws4.cell(ws4.max_row, j).alignment = Alignment(horizontal="center")
+    ws4.column_dimensions["A"].width = 34
+    for j in range(2, len(CELULAS) + 2):
+        ws4.column_dimensions[ws4.cell(1, j).column_letter].width = 7
+    for c in ws4[1]:
+        c.font, c.fill = negrito, fundo
+        c.alignment = Alignment(wrap_text=True, horizontal="center")
+    ws4.freeze_panes = "B2"
 
     ws3 = wb.create_sheet("Pendentes")
     ws3.append(["Nome", "E-mail"])
@@ -1998,9 +2189,17 @@ def _analisar_viabilidade(conn, ano: int) -> dict:
     plan = _parametro(conn, ano, "planejamento_no_horario") == "1"
     blocos_plan = BLOCOS_PLANEJAMENTO if plan else 0
 
+    blocos_disp = {pid: _blocos_de(r) for pid, r in disp.items()}
+
     def dias_disp(pid, turno):
-        r = disp.get(pid)
-        return [d for d, _ in DIAS if r and r[f"{d}_{turno}"]] if r else []
+        """Dias do turno com pelo menos um bloco disponível."""
+        e = blocos_disp.get(pid)
+        return [d for d, _ in DIAS if any(e[(d, turno, b)] for b in (1, 2, 3))] if e else []
+
+    def cap_turno(pid, turno):
+        """Quantos blocos disponíveis o professor tem no turno (matrícula + dupla)."""
+        e = blocos_disp.get(pid)
+        return sum(1 for d, _ in DIAS for b in (1, 2, 3) if e[(d, turno, b)]) if e else 0
 
     gerais = []
     soma_blocos = sum(_blocos_comp(c) for c in comps)
@@ -2037,12 +2236,12 @@ def _analisar_viabilidade(conn, ano: int) -> dict:
         if total_ed and not prof_ed:
             problemas.append(("erro", "Falta definir o professor de Educação Digital deste turno."))
         elif prof_ed:
-            dias = dias_disp(prof_ed, k)
+            cap_ed = cap_turno(prof_ed, k)
             if prof_ed not in disp:
                 problemas.append(("erro", f"{nomes.get(prof_ed, '?')} (Educação Digital) não respondeu a coleta de disponibilidade."))
-            elif len(dias) * BLOCOS_POR_TURNO < melhor["maior"]:
-                problemas.append(("erro", f"{nomes.get(prof_ed, '?')} (Educação Digital) tem {_pl(len(dias), 'turno disponível', 'turnos disponíveis')} aqui "
-                                          f"(cabem {len(dias) * BLOCOS_POR_TURNO} blocos), mas o par mais cheio precisa de {melhor['maior']}."))
+            elif cap_ed < melhor["maior"]:
+                problemas.append(("erro", f"{nomes.get(prof_ed, '?')} (Educação Digital) tem {_pl(cap_ed, 'bloco disponível', 'blocos disponíveis')} aqui, "
+                                          f"mas o par mais cheio precisa de {melhor['maior']}."))
         ed_turnos.append({"turno": k, "carga_ano": carga_ano, "opcoes": opcoes, "melhor": melhor,
                           "prof": prof_ed, "prof_nome": nomes.get(prof_ed, ""), "problemas": problemas})
 
@@ -2066,19 +2265,19 @@ def _analisar_viabilidade(conn, ano: int) -> dict:
     for pid, dados in carga.items():
         r = disp.get(pid)
         dm, dt = dias_disp(pid, "m"), dias_disp(pid, "t")
-        cap_m, cap_t = len(dm) * BLOCOS_POR_TURNO, len(dt) * BLOCOS_POR_TURNO
+        cap_m, cap_t = cap_turno(pid, "m"), cap_turno(pid, "t")
         problemas = []
         if not r:
             problemas.append(("erro", "Não respondeu a coleta de disponibilidade."))
         else:
             if dados["m"] > cap_m:
-                problemas.append(("erro", f"Manhã: {_pl(dados['m'], 'bloco', 'blocos')} de aula, mas só {_pl(len(dm), 'turno disponível', 'turnos disponíveis')} (cabem {cap_m})."))
+                problemas.append(("erro", f"Manhã: {_pl(dados['m'], 'bloco', 'blocos')} de aula, mas só {_pl(cap_m, 'bloco disponível', 'blocos disponíveis')}."))
             if dados["t"] > cap_t:
-                problemas.append(("erro", f"Tarde: {_pl(dados['t'], 'bloco', 'blocos')} de aula, mas só {_pl(len(dt), 'turno disponível', 'turnos disponíveis')} (cabem {cap_t})."))
+                problemas.append(("erro", f"Tarde: {_pl(dados['t'], 'bloco', 'blocos')} de aula, mas só {_pl(cap_t, 'bloco disponível', 'blocos disponíveis')}."))
             total, cap = dados["m"] + dados["t"], cap_m + cap_t
             if plan and total <= cap and total + blocos_plan > cap:
                 problemas.append(("erro", f"Sem espaço para os 4 tempos de planejamento: {total} blocos de aula para {cap} disponíveis."))
-            if plan and not any(r[f"{d}_{t}"] for d in DIAS_PLANEJAMENTO for t in ("m", "t")):
+            if plan and not any(blocos_disp[pid][(d, t, b)] for d in DIAS_PLANEJAMENTO for t in ("m", "t") for b in (1, 2, 3)):
                 problemas.append(("erro", "Nenhum turno na terça, quarta ou quinta para o planejamento."))
             for turma_nome, comp_nome, b, turno in dados["aulas"]:
                 dias = dm if turno == "m" else dt
@@ -2089,7 +2288,7 @@ def _analisar_viabilidade(conn, ano: int) -> dict:
             if not problemas and sobra == 0:
                 problemas.append(("aviso", "Disponibilidade exata: nenhum bloco de folga — o gerador terá pouca margem com este professor."))
         profs_linhas.append({"id": pid, "nome": nomes.get(pid, f"#{pid}"), "area": r["disciplina"] if r else "",
-                             "m": dados["m"], "t": dados["t"], "dm": len(dm), "dt": len(dt), "aulas": dados["aulas"],
+                             "m": dados["m"], "t": dados["t"], "dm": cap_m, "dt": cap_t, "aulas": dados["aulas"],
                              "ed": dados["ed"], "problemas": problemas})
     profs_linhas.sort(key=lambda p: (0 if any(x[0] == "erro" for x in p["problemas"]) else (1 if p["problemas"] else 2), p["nome"].lower()))
 
@@ -2185,11 +2384,11 @@ def config_viabilidade(request: Request, ano: str = ""):
         if p["ed"]["m"] or p["ed"]["t"]:
             resumo_aulas = (resumo_aulas + ", " if resumo_aulas else "") + "Educação Digital " + " e ".join(NOME_TURNO[k].lower() for k in ("m", "t") if p["ed"][k])
 
-        def cel(blocos, dias):
-            if not blocos and not dias:
+        def cel(blocos, cap):
+            if not blocos and not cap:
                 return '<span style="color:var(--text-muted);">—</span>'
-            cor = "color:var(--red,#b91c1c); font-weight:700;" if blocos > dias * BLOCOS_POR_TURNO else ""
-            return f'<span style="{cor}">{blocos}</span> <span style="color:var(--text-muted); font-size:11px;">/ {dias * BLOCOS_POR_TURNO}</span>'
+            cor = "color:var(--red,#b91c1c); font-weight:700;" if blocos > cap else ""
+            return f'<span style="{cor}">{blocos}</span> <span style="color:var(--text-muted); font-size:11px;">/ {cap}</span>'
         linhas_p += f"""<tr style="border-top:1px solid var(--border); vertical-align:top;">
             <td style="padding:6px 8px; text-align:center; font-size:16px;">{status}</td>
             <td style="padding:6px 8px;"><strong>{_e(p["nome"])}</strong><div style="font-size:11px; color:var(--text-muted);">{_e(p["area"])}</div></td>
@@ -2201,7 +2400,7 @@ def config_viabilidade(request: Request, ano: str = ""):
     card_prof = f"""
         <div class="card" style="padding:14px 16px; margin-bottom:16px;">
             <h2 style="margin:0 0 4px; font-size:15px;">👩‍🏫 Professores — aulas × disponibilidade ({len(an["professores"])}, {n_prof_erro} com impedimento)</h2>
-            <p style="margin:0 0 8px; font-size:12px; color:var(--text-muted);">Em cada turno: <strong>blocos de aula</strong> / blocos que cabem nos turnos disponíveis (3 por turno).
+            <p style="margin:0 0 8px; font-size:12px; color:var(--text-muted);">Em cada turno: <strong>blocos de aula</strong> / blocos disponíveis marcados na coleta (matrícula + dupla regência).
             {"Os 4 tempos de planejamento (2 blocos) precisam caber na sobra, em terça, quarta ou quinta." if an["planejamento_no_horario"] else "Planejamento fora do horário (opção na aba Tempos): não entra na conta."}</p>
             <div style="overflow-x:auto;">
             <table style="width:100%; border-collapse:collapse; font-size:13px;">
@@ -2246,6 +2445,7 @@ PESOS_PADRAO = {
     "turno_usado": 4,               # cada turno em que o professor vem à escola (incentiva turnos cheios)
     "dia_usado": 6,                 # cada DIA em que o professor vem: quem trabalha nos dois turnos
                                     # fica o dia inteiro (manhã e tarde no mesmo dia) — Felipe, 01/11/2026
+    "dupla_extra": 30,              # aula num bloco marcado como "Dupla" além do que cabe na dupla regência
 }
 # Componente em dias consecutivos é normal na escola: não entra como multa (Felipe, 01/11/2026).
 
@@ -2264,20 +2464,26 @@ def _dados_geracao(conn, ano: int) -> dict:
     turmas = {t["id"]: {"nome": t["nome"], "ano": t["ano_escolaridade"], "turno": t["turno"]} for t in _turmas(conn, ano)}
     atrib = _atribuicoes(conn, ano)
     disp_rows = _disponibilidades(conn, ano)
-    disp = {pid: {(d, k) for d in DIAS_SEMANA for k in ("m", "t") if r[f"{d}_{k}"]} for pid, r in disp_rows.items()}
+    # disp[pid] = {(dia, turno, bloco): 1 matrícula | 2 dupla regência} — só os blocos disponíveis
+    disp = {pid: {c: v for c, v in _blocos_de(r).items() if v} for pid, r in disp_rows.items()}
+    dupla = {pid: (int(r["dupla_tempos"] or 0) // 2 if r["dupla_interesse"] else 0) for pid, r in disp_rows.items()}
     nomes = {r["id"]: r["nome"] for r in conn.execute("SELECT id, nome FROM professores").fetchall()}
     return {"ano": ano, "comps": comps, "turmas": turmas, "atrib": atrib, "ed": _ed_professores(conn, ano),
-            "disp": disp, "nomes": nomes}
+            "disp": disp, "dupla": dupla, "nomes": nomes}
 
 
 def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = False, pesos: Optional[dict] = None,
                       sementes: int = 0, progresso=None, tempo_sugestoes: int = 45,
-                      turnos: tuple = ("m", "t"), fixas: Optional[list] = None) -> dict:
+                      turnos: tuple = ("m", "t"), fixas: Optional[list] = None, controle: Optional[dict] = None,
+                      paciencia: Optional[int] = None) -> dict:
     """Monta e resolve o modelo. Devolve um dicionário com status, aulas, indicadores e — no
     modo flexível — as pendências (aulas fora da disponibilidade) e as sugestões para cada uma.
     `progresso`, se informado, é chamado durante a busca com os números ao vivo.
     `turnos`: quais turnos gerar agora. `fixas`: aulas de uma versão já pronta do OUTRO turno,
-    que entram travadas (não mudam) — servem para conectar os dias do professor ("dia inteiro")."""
+    que entram travadas (não mudam) — servem para conectar os dias do professor ("dia inteiro").
+    `controle`: dicionário compartilhado com a tela — controle["parar"] = True interrompe a busca
+    (o botão Parar) e devolve o melhor horário encontrado até ali.
+    `paciencia`: segundos sem melhora para encerrar sozinho (economiza processamento)."""
     from ortools.sat.python import cp_model
     p = dict(PESOS_PADRAO, **(pesos or {}))
     comps, atrib, disp, ed = dados["comps"], dados["atrib"], dados["disp"], dados["ed"]
@@ -2290,9 +2496,12 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
     m = cp_model.CpModel()
     avisar = progresso or (lambda info: None)
 
-    def disponivel(pid, d, k):
-        # Professor sem resposta na coleta: tratado como disponível (a viabilidade já avisa).
-        return pid not in disp or (DIAS_SEMANA[d], k) in disp[pid]
+    def disponivel(pid, d, k, b):
+        # b = 0..2 (1º a 3º bloco). Professor sem resposta: tratado como disponível (a viabilidade já avisa).
+        return pid not in disp or (DIAS_SEMANA[d], k, b + 1) in disp[pid]
+
+    def eh_dupla(pid, d, k, b):
+        return pid in disp and disp[pid].get((DIAS_SEMANA[d], k, b + 1)) == 2
 
     x = {}
     for tid, t in turmas.items():
@@ -2342,8 +2551,8 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                     ocup.setdefault((pid, k, d, b), []).append(x[tid, cid, d, b])
                 if tid in tids_fixas:
                     continue                        # turno já pronto: não reavalia disponibilidade
-                if not disponivel(pid, d, k):
-                    for b in B:
+                for b in B:
+                    if not disponivel(pid, d, k, b):
                         if flexivel:
                             grupos_fora.setdefault((pid, d, k), []).append((x[tid, cid, d, b], tid, cid, b + 1))
                         else:
@@ -2369,16 +2578,17 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
         pid_ed = ed.get(k)
         if pid_ed:
             for d in D:
-                if not disponivel(pid_ed, d, k):
-                    for b in B:
-                        for tid in tids_k:
-                            if (tid, d, b) in ed_occ:
-                                if flexivel:
-                                    v = m.NewBoolVar(f"edfora_{tid}_{d}_{b}")
-                                    m.Add(ed_occ[tid, d, b] <= v)
-                                    grupos_fora.setdefault((pid_ed, d, k), []).append((v, tid, None, b + 1))
-                                else:
-                                    m.Add(ed_occ[tid, d, b] == 0)
+                for b in B:
+                    if disponivel(pid_ed, d, k, b):
+                        continue
+                    for tid in tids_k:
+                        if (tid, d, b) in ed_occ:
+                            if flexivel:
+                                v = m.NewBoolVar(f"edfora_{tid}_{d}_{b}")
+                                m.Add(ed_occ[tid, d, b] <= v)
+                                grupos_fora.setdefault((pid_ed, d, k), []).append((v, tid, None, b + 1))
+                            else:
+                                m.Add(ed_occ[tid, d, b] == 0)
         z = [m.NewBoolVar(f"par_{k}_{j}") for j in range(len(PARES_ED))]
         m.AddExactlyOne(z)
         escolha_par[k] = z
@@ -2411,7 +2621,27 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
         for u in usados:
             m.Add(u <= dia)
         n_dias.append(dia)
-    qualidade = p["janela"] * sum(n_janelas) + p["turno_usado"] * sum(n_turnos) + p["dia_usado"] * sum(n_dias)
+    # Dupla regência: os blocos marcados como "Dupla" (roxo) recebem no máximo as aulas que
+    # passam da matrícula (6 blocos) e no máximo o que o professor pediu. Passar disso é
+    # permitido (para não travar o horário), mas com multa alta.
+    n_dupla_extra = []
+    carga_prof = {}
+    for pid, aulas_p in por_prof.items():
+        carga_prof[pid] = sum(comps[cid]["blocos"] for _t, cid in aulas_p)
+    ed_carga = {}
+    for (pid, k, d, b), vs in ocup.items():
+        if not eh_dupla(pid, d, k, b):
+            continue
+        ed_carga.setdefault(pid, []).extend(vs)
+    for pid, vs in ed_carga.items():
+        permitido = min(dados.get("dupla", {}).get(pid, 0), max(0, carga_prof.get(pid, 0) - MATRICULA_BLOCOS))
+        if len(vs) <= permitido:
+            continue
+        extra = m.NewIntVar(0, len(vs), f"dupla_extra_{pid}")
+        m.Add(extra >= sum(vs) - permitido)
+        n_dupla_extra.append(extra)
+    qualidade = (p["janela"] * sum(n_janelas) + p["turno_usado"] * sum(n_turnos) + p["dia_usado"] * sum(n_dias)
+                 + p["dupla_extra"] * sum(n_dupla_extra))
 
     def novo_solver(segundos):
         sv = cp_model.CpSolver()
@@ -2440,18 +2670,50 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                     ativos.setdefault(chave, []).append((tid, cid, b))
         return ativos
 
-    class _AoVivo(cp_model.CpSolverSolutionCallback):
-        def __init__(self, etapa):
-            super().__init__()
-            self.etapa = etapa
+    controle = controle if controle is not None else {}
+    if paciencia is None:
+        paciencia = max(10, min(30, int(limite_segundos) // 4))
+    OK = (cp_model.OPTIMAL, cp_model.FEASIBLE)
 
-        def on_solution_callback(self):
-            try:
-                ativos = grupos_ativos(self.Value)
-                avisar({"etapa": self.etapa, "pendencias": sum(len(v) for v in ativos.values()),
-                        "pendencias_lista": _descrever_pendencias(ativos, dados), "sugestoes": len(ativos)})
-            except Exception:
-                pass
+    def resolver(modelo, sv, etapa=None):
+        """Roda a busca com: números ao vivo, o botão Parar e a parada automática quando o
+        horário deixa de melhorar por `paciencia` segundos (economiza processamento)."""
+        estado = {"melhora": _time.time(), "obj": None}
+
+        class _AoVivo(cp_model.CpSolverSolutionCallback):
+            def on_solution_callback(self):
+                obj = self.ObjectiveValue()
+                if estado["obj"] is None or obj < estado["obj"] - 1e-6:
+                    estado["obj"], estado["melhora"] = obj, _time.time()
+                if etapa and grupos_fora:
+                    try:
+                        ativos_ = grupos_ativos(self.Value)
+                        avisar({"etapa": etapa, "pendencias": sum(len(v) for v in ativos_.values()),
+                                "pendencias_lista": _descrever_pendencias(ativos_, dados), "sugestoes": len(ativos_)})
+                    except Exception:
+                        pass
+
+        if controle.get("parar"):
+            return cp_model.UNKNOWN
+        controle["solver"] = sv
+        fim = _threading.Event()
+
+        def vigia():
+            while not fim.wait(0.5):
+                if controle.get("parar"):
+                    sv.stop_search()
+                    return
+                if paciencia and estado["obj"] is not None and _time.time() - estado["melhora"] > paciencia:
+                    controle["parou_sozinho"] = True
+                    sv.stop_search()
+                    return
+
+        _threading.Thread(target=vigia, daemon=True).start()
+        try:
+            return sv.Solve(modelo, _AoVivo())
+        finally:
+            fim.set()
+            controle["solver"] = None
 
     tempo_total = 0.0
     if todas_fora:
@@ -2459,27 +2721,33 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
         # disponibilidade; 2ª) com esse número travado, o horário de melhor qualidade.
         m.Minimize(soma_fora)
         sv1 = novo_solver(limite_segundos * 0.4)
-        st1 = sv1.Solve(m, _AoVivo("Reduzindo as pendências…"))
+        st1 = resolver(m, sv1, "Reduzindo as pendências…")
         tempo_total += sv1.WallTime()
-        mq = m.clone()
-        dica = {}
-        if st1 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            minimo = int(round(sv1.ObjectiveValue()))
-            mq.Add(soma_fora <= minimo)
-            dica = {v.Index(): sv1.Value(v) for v in x.values()}
-            for v in x.values():
-                mq.AddHint(v, dica[v.Index()])
-        mq.Minimize(qualidade)
-        solver = novo_solver(limite_segundos - tempo_total)
-        status = solver.Solve(mq, _AoVivo("Melhorando a qualidade do horário…"))
+        if controle.get("parar") and st1 in OK:
+            solver, status = sv1, st1             # parou: fica com o melhor encontrado até aqui
+        else:
+            mq = m.clone()
+            if st1 in OK:
+                minimo = int(round(sv1.ObjectiveValue()))
+                mq.Add(soma_fora <= minimo)
+                for v in x.values():
+                    mq.AddHint(v, sv1.Value(v))
+            mq.Minimize(qualidade)
+            controle.pop("parou_sozinho", None)    # vale o que acontecer nesta etapa final
+            solver = novo_solver(max(1.0, limite_segundos - tempo_total))
+            status = resolver(mq, solver, "Melhorando a qualidade do horário…")
+            tempo_total += solver.WallTime()
+            if status not in OK and st1 in OK:
+                solver, status = sv1, st1
     else:
         m.Minimize(qualidade)
         solver = novo_solver(limite_segundos)
-        status = solver.Solve(m)
-    tempo_total += solver.WallTime()
+        status = resolver(m, solver)
+        tempo_total += solver.WallTime()
     nome_status = {cp_model.OPTIMAL: "otimo", cp_model.FEASIBLE: "viavel", cp_model.INFEASIBLE: "impossivel",
                    cp_model.MODEL_INVALID: "invalido"}.get(status, "sem_solucao")
-    saida = {"status": nome_status, "tempo": round(tempo_total, 1), "flexivel": flexivel}
+    saida = {"status": nome_status, "tempo": round(tempo_total, 1), "flexivel": flexivel,
+             "interrompida": bool(controle.get("parar")), "parou_sozinho": bool(controle.get("parou_sozinho"))}
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return saida
 
@@ -2493,7 +2761,8 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
         j = next(i for i, v in enumerate(z) if solver.Value(v))
         pares[k] = [list(PARES_ED[j][0]), list(PARES_ED[j][1])]
     ativos = grupos_ativos(solver.Value)
-    fora_lista = [{"professor_id": pid, "dia": d, "turno": k} for (pid, d, k) in ativos]
+    fora_lista = [{"professor_id": pid, "dia": d, "turno": k, "blocos": sorted({b for _, _, b in itens})}
+                  for (pid, d, k), itens in ativos.items()]
 
     # ----- sugestões para cada pendência (estilo Urânia) -----
     # Para cada pendência, pergunta: "se este professor NÃO puder mesmo neste turno, existe
@@ -2517,7 +2786,7 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
             ja_testadas = []
             for _tentativa in range(3):            # até 3 alternativas por pendência
                 restante = prazo - _time.time()
-                if restante < 1.0:
+                if restante < 1.0 or controle.get("parar"):
                     break
                 mt = m.clone()
                 for v, *_ in grupos_fora[chave]:
@@ -2531,7 +2800,9 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                 for v in x.values():
                     mt.AddHint(v, dica[v.Index()])
                 svt = novo_solver(min(3.0, max(1.0, restante / max(1, len(chaves) - i + 1))))
+                controle["solver"] = svt
                 stt = svt.Solve(mt)
+                controle["solver"] = None
                 if stt not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     break
                 novos = grupos_ativos(svt.Value)
@@ -2544,13 +2815,14 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                 item[destino].append({"professor_id": pa, "professor_nome": dados["nomes"].get(pa, "?"), "dia": da, "turno": ka,
                                       "blocos": sorted({b for _, _, b in novos[alternativa]})})
                 ja_testadas.append(alternativa)
-            item["analisada"] = True
+            item["analisada"] = not controle.get("parar")
             sugestoes.append(item)
 
     saida.update({
         "aulas": aulas, "pares_ed": pares, "fora": fora_lista, "sugestoes": sugestoes,
         "indicadores": {"janelas": int(sum(solver.Value(v) for v in n_janelas)),
                         "turnos_usados": int(sum(solver.Value(v) for v in n_turnos)),
+                        "dupla_fora": int(sum(solver.Value(v) for v in n_dupla_extra)),
                         **_indicador_dia_inteiro(aulas + fixas),
                         "fora_disponibilidade": len(fora_lista),
                         "pendencias": sum(len(v) for v in ativos.values()),
@@ -2657,28 +2929,37 @@ def _executar_geracao(versao_id: int, ano: int, limite: int, turno: str = "mt", 
     turno: 'm', 't' ou 'mt'. base_id: versão já pronta do OUTRO turno, que entra travada para
     conectar os dias dos professores que trabalham nos dois turnos ("dia inteiro")."""
     turnos = tuple(turno)
+    controle = _GERACOES.setdefault(versao_id, {"inicio": _time.time(), "limite": limite, "etapa": "Aguardando a geração anterior terminar…"})
     with _TRAVA_GERACAO:
         conn = _db()
         try:
+            if controle.get("parar"):
+                conn.execute("UPDATE horario_versoes SET status = 'erro', mensagem = ? WHERE id = ?",
+                             ("Cancelada antes de começar.", versao_id))
+                conn.commit()
+                return
             dados = _dados_geracao(conn, ano)
             outro = "t" if turno == "m" else ("m" if turno == "t" else None)
             fixas = _aulas_da_versao(conn, base_id, outro) if (base_id and outro) else []
-            _GERACOES[versao_id] = {"inicio": _time.time(), "limite": limite, "etapa": "Procurando um horário que respeite toda a disponibilidade…"}
-            r = _resolver_horario(dados, limite_segundos=limite, flexivel=False, turnos=turnos, fixas=fixas)
-            if r["status"] not in ("otimo", "viavel"):
-                _GERACOES[versao_id] = {"inicio": _time.time(), "limite": limite, "flexivel": True,
-                                        "etapa": "Não existe horário dentro da disponibilidade informada. Procurando o horário com o menor número de aulas fora dela…"}
+            controle.update({"inicio": _time.time(), "limite": limite, "etapa": "Procurando um horário que respeite toda a disponibilidade…"})
+            r = _resolver_horario(dados, limite_segundos=limite, flexivel=False, turnos=turnos, fixas=fixas, controle=controle)
+            if r["status"] not in ("otimo", "viavel") and not controle.get("parar"):
+                controle.update({"inicio": _time.time(), "limite": limite, "flexivel": True,
+                                 "etapa": "Não existe horário dentro da disponibilidade informada. Procurando o horário com o menor número de aulas fora dela…"})
 
-                def ao_vivo(info, _vid=versao_id):
-                    estado = _GERACOES.get(_vid)
-                    if estado is not None:
-                        estado.update(info)
+                def ao_vivo(info):
+                    if controle.get("parar"):
+                        info = {k: v for k, v in info.items() if k != "etapa"}
+                    controle.update(info)
                 r = _resolver_horario(dados, limite_segundos=limite, flexivel=True, progresso=ao_vivo,
-                                      tempo_sugestoes=max(15, min(60, limite // 2)), turnos=turnos, fixas=fixas)
+                                      tempo_sugestoes=max(15, min(60, limite // 2)), turnos=turnos, fixas=fixas, controle=controle)
             if r["status"] not in ("otimo", "viavel"):
+                msg = ("Interrompida antes de o gerador encontrar um horário completo. Ajuste a disponibilidade, se quiser, e gere de novo."
+                       if controle.get("parar") else
+                       "Nenhum horário encontrado, nem com a disponibilidade flexível. Confira a viabilidade "
+                       "(matriz, turmas, Educação Digital) ou tente com mais tempo.")
                 conn.execute("UPDATE horario_versoes SET status = 'erro', resultado = ?, mensagem = ? WHERE id = ?",
-                             (r["status"], "Nenhum horário encontrado, nem com a disponibilidade flexível. Confira a viabilidade "
-                                           "(matriz, turmas, Educação Digital) ou tente com mais tempo.", versao_id))
+                             (r["status"], msg, versao_id))
                 conn.commit()
                 return
             turmas = dados["turmas"]
@@ -2696,7 +2977,16 @@ def _executar_geracao(versao_id: int, ano: int, limite: int, turno: str = "mt", 
             com_aula = {pid for (tid, _c), pid in dados["atrib"].items() if tid in tids_turno} | \
                        {pid for k, pid in dados["ed"].items() if pid and k in turnos}
             r["indicadores"]["sem_resposta"] = sorted((dados["nomes"].get(p, "?") for p in com_aula if p not in dados["disp"]), key=str.lower)
-            conn.execute("UPDATE horario_versoes SET turno = ?, base_versao_id = ? WHERE id = ?", (turno, base_id, versao_id))
+            if r.get("interrompida"):
+                mensagem = "Interrompida por você: este é o melhor horário encontrado até a parada."
+                if r.get("fora"):
+                    mensagem += " As sugestões podem estar incompletas."
+            elif r.get("parou_sozinho"):
+                mensagem = "Concluída antes do tempo limite: o horário parou de melhorar, então o gerador encerrou para economizar processamento."
+            else:
+                mensagem = ""
+            conn.execute("UPDATE horario_versoes SET turno = ?, base_versao_id = ?, mensagem = ? WHERE id = ?",
+                         (turno, base_id, mensagem, versao_id))
             conn.execute("""UPDATE horario_versoes SET status = 'pronta', modo = ?, resultado = ?, tempo = ?, indicadores = ?,
                             pares_ed = ?, fora = ?, ed_anos = ?, sugestoes = ? WHERE id = ?""",
                          ("flexivel" if r["flexivel"] else "estrito", r["status"], r["tempo"], _json.dumps(r["indicadores"]),
@@ -2875,6 +3165,72 @@ async def geracao_gerar(request: Request, ano: str = ""):
     return RedirectResponse(f"/horarios/geracao/versao/{versao_id}", status_code=303)
 
 
+def _pedir_parada(versao_id: int) -> bool:
+    """Pede para a geração em andamento parar (o gerador salva o melhor horário até ali)."""
+    est = _GERACOES.get(versao_id)
+    if not est:
+        return False
+    est["parar"] = True
+    est["etapa"] = "Parando… salvando o melhor horário encontrado até agora."
+    sv = est.get("solver")
+    if sv is not None:
+        try:
+            sv.stop_search()
+        except Exception:
+            pass
+    return True
+
+
+@router.post("/horarios/geracao/versao/{versao_id}/parar")
+def geracao_parar(request: Request, versao_id: int):
+    from fastapi.responses import JSONResponse
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return JSONResponse({"ok": False, "mensagem": "Acesso restrito à gestão."}, status_code=403)
+    if _pedir_parada(versao_id):
+        return JSONResponse({"ok": True, "mensagem": "Parando… o melhor horário encontrado até agora será salvo."})
+    return JSONResponse({"ok": False, "mensagem": "Esta geração já terminou."})
+
+
+@router.post("/horarios/geracao/versao/{versao_id}/gerar-de-novo")
+def geracao_gerar_de_novo(request: Request, versao_id: int):
+    """Gera outra versão com as mesmas escolhas (turno, versão conectada, tempo), lendo a
+    disponibilidade como está agora. Se esta versão ainda está gerando, para ela antes."""
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return negado
+    conn = _db()
+    v = conn.execute("SELECT * FROM horario_versoes WHERE id = ?", (versao_id,)).fetchone()
+    if not v or v["modo"] == "importado":
+        conn.close()
+        return RedirectResponse("/horarios/geracao", status_code=303)
+    ano_i = v["ano_letivo"]
+    if _pre_requisitos_geracao(conn, ano_i):
+        conn.close()
+        return RedirectResponse(f"/horarios/geracao?ano={ano_i}", status_code=303)
+    outras = [vid for vid, est in list(_GERACOES.items()) if vid != versao_id and not est.get("parar")]
+    if outras:
+        conn.close()
+        return RedirectResponse(f"/horarios/geracao?ano={ano_i}&msg=ocupado", status_code=303)
+    if v["status"] == "gerando":
+        _pedir_parada(versao_id)
+    turno = (v["turno"] or "mt") if v["turno"] in ("m", "t", "mt") else "mt"
+    base_id = None
+    if v["base_versao_id"]:
+        base = conn.execute("SELECT id FROM horario_versoes WHERE id = ? AND status = 'pronta'", (v["base_versao_id"],)).fetchone()
+        base_id = base["id"] if base else None
+    limite = max(10, min(int(v["limite_segundos"] or 120), 600))
+    cur = conn.execute("""INSERT INTO horario_versoes (ano_letivo, criada_por, status, limite_segundos, turno, base_versao_id)
+                          VALUES (?, ?, 'gerando', ?, ?, ?)""", (ano_i, prof["id"], limite, turno, base_id))
+    novo_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    _GERACOES[novo_id] = {"inicio": _time.time(), "limite": limite,
+                          "etapa": "Aguardando a geração anterior parar…" if _TRAVA_GERACAO.locked() else "Preparando os dados…"}
+    _threading.Thread(target=_executar_geracao, args=(novo_id, ano_i, limite, turno, base_id), daemon=True).start()
+    return RedirectResponse(f"/horarios/geracao/versao/{novo_id}", status_code=303)
+
+
 @router.post("/horarios/geracao/versao/{versao_id}/excluir")
 def geracao_excluir(request: Request, versao_id: int):
     prof, negado = _exige_gestao(request)
@@ -2917,7 +3273,7 @@ def _html_sugestoes(sugestoes: list, horas: dict, ao_vivo: bool = False) -> str:
     partes = []
     for s in sugestoes:
         nome = _e(s["professor_nome"])
-        motivo = "não respondeu a coleta" if s.get("sem_resposta") else "está indisponível neste turno"
+        motivo = "não respondeu a coleta" if s.get("sem_resposta") else "marcou como indisponível"
         linhas = [f'<div class="hs-titulo">ANÁLISE DA PENDÊNCIA {s.get("n", "")}</div>',
                   f'<div class="hs-pend">{_e(", ".join(s.get("aulas", [])))} · {nome} — só coube em {_e(_quando(s["dia"], s["turno"], s.get("blocos", []), horas))}.</div>',
                   '<div class="hs-nivel">Ajudará muitíssimo na eliminação da pendência se....</div>',
@@ -2927,12 +3283,12 @@ def _html_sugestoes(sugestoes: list, horas: dict, ao_vivo: bool = False) -> str:
             linhas.append('<div class="hs-nivel">Ajudará muito na eliminação da pendência se....</div>')
             linhas += [_linha_clicavel(a.get("professor_id"), a["dia"], a["turno"],
                                        f'• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
-                                       f'(está indisponível neste turno)') for a in s["muito"]]
+                                       f'(marcou como indisponível)') for a in s["muito"]]
         if s.get("pouco"):
             linhas.append('<div class="hs-nivel">Ajudará um pouco na eliminação da pendência se....</div>')
             linhas += [_linha_clicavel(a.get("professor_id"), a["dia"], a["turno"],
                                        f'• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
-                                       f'(está indisponível neste turno)') for a in s["pouco"]]
+                                       f'(marcou como indisponível)') for a in s["pouco"]]
         if not ao_vivo:
             linhas.append('<div class="hs-nivel">Se nenhuma sugestão acima for viável, verifique se é possível....</div>')
             if any(a.startswith("Educação Digital") for a in s.get("aulas", [])):
@@ -2970,46 +3326,111 @@ dialog.hs-caixa::backdrop { background: rgba(15,23,42,.45); }
 .hs-pend { margin-bottom:6px; } .hs-nivel { margin-top:8px; font-weight:700; } .hs-item { padding-left:12px; } .hs-obs { margin-top:6px; color:#64748b; }
 .hs-clicavel { cursor:pointer; border-radius:4px; } .hs-clicavel:hover { background:#dcfce7; } .hs-editar { font-size:11px; opacity:.6; }
 .hs-clicavel.hs-feito { color:#15803d; } .hs-clicavel.hs-feito::after { content:"  ✓ disponibilidade alterada"; font-weight:700; }
-dialog.hs-disp { width:min(640px, 94vw); border:none; border-radius:10px; padding:0; box-shadow:0 20px 60px rgba(0,0,0,.4); }
-dialog.hs-disp::backdrop { background: rgba(15,23,42,.35); }
-.hs-sugerido span { outline:3px solid #f59e0b; outline-offset:2px; }
 </style>
 """
 
 
-def _caixa_sugestoes_html(titulo: str, conteudo_html: str, ano: int = 0, versao_id: int = 0) -> str:
+def _botao_gerar_de_novo(versao_id: int, gerando: bool = False, classe: str = "btn btn-primary", estilo: str = "") -> str:
+    """Botão que gera de novo com as mesmas escolhas (turno, versão conectada e tempo),
+    lendo a disponibilidade como está agora. Durante a geração, para a atual antes."""
+    texto = "⏹🔄 Parar e gerar de novo" if gerando else "🔄 Gerar horário de novo"
+    dica = ("Para esta geração e começa outra com a disponibilidade atual" if gerando
+            else "Gera outra versão com a disponibilidade atual (mesmo turno, mesma conexão e mesmo tempo)")
+    return (f'<form method="post" action="/horarios/geracao/versao/{versao_id}/gerar-de-novo" style="display:inline; margin:0;">'
+            f'<button type="submit" class="{classe}" style="{estilo}" title="{dica}">{texto}</button></form>')
+
+
+_CSS_PAINEL_DISP = """
+<style>
+dialog.hs-disp { width:min(1240px, 97vw); max-height:92vh; overflow:auto; border:none; border-radius:10px; padding:0; box-shadow:0 20px 60px rgba(0,0,0,.4); }
+dialog.hs-disp::backdrop { background: rgba(15,23,42,.35); }
+.hs-rodape { position:sticky; bottom:0; background:var(--bg, #fff); border-top:1px solid var(--border, #e2e8f0); padding:10px 18px;
+    display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.hs-rodape .hs-alterou { font-size:13px; color:#15803d; font-weight:600; display:none; }
+.hp-lista { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:10px; }
+.hp-prof { border:1px solid var(--border, #e2e8f0); border-radius:8px; padding:8px 10px; background:var(--bg, #fff); }
+.hp-prof.hp-foco { border:2px solid #f59e0b; box-shadow:0 0 0 3px #fde68a; grid-column:1 / -1; }
+.hp-prof.hp-tem-pend { border-color:#fca5a5; }
+.hp-prof.hp-salvo { background:#f0fdf4; }
+.hp-cab { font-size:13px; margin-bottom:2px; }
+.hp-info { font-size:11px; color:var(--text-muted); }
+.hp-obs { font-size:11px; color:#475569; background:#f8fafc; border-radius:4px; padding:2px 6px; margin-top:2px; }
+.hp-selo { font-size:11px; color:#b91c1c; font-weight:700; margin-left:4px; }
+.hp-mudou-aviso { display:none; font-size:11px; color:#b45309; font-weight:700; margin-left:6px; }
+.hp-prof.hp-mudou .hp-mudou-aviso { display:inline; }
+.hp-acoes { display:flex; gap:8px; align-items:center; margin-top:2px; }
+.hp-msg { font-size:12px; }
+.hp-filtros { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:6px 0 10px; font-size:13px; }
+.hp-filtros input[type=search] { max-width:260px; margin:0; }
+.hp-filtros label { display:inline-flex; gap:6px; align-items:center; margin:0; font-weight:400; }
+.hp-filtros input[type=checkbox] { width:auto; margin:0; }
+.hp-legenda { display:flex; gap:12px; flex-wrap:wrap; font-size:11px; color:var(--text-muted); margin-bottom:4px; }
+.hp-legenda i { display:inline-block; width:12px; height:10px; border-radius:2px; vertical-align:-1px; margin-right:3px; }
+.hp-dica { font-size:13px; margin-bottom:6px; }
+.hp-prof .hd-mini .hd-bl { width:40px; height:22px; font-size:10px; font-weight:700; }
+.hp-prof.hp-foco .hd-mini .hd-bl { width:56px; height:26px; font-size:11px; }
+</style>
+"""
+
+
+def _caixa_sugestoes_html(titulo: str, conteudo_html: str, ano: int = 0, versao_id: int = 0, gerando: bool = False) -> str:
+    rodape_caixa = (f'<div class="hs-rodape">{_botao_gerar_de_novo(versao_id, gerando)}'
+                    f'<span style="font-size:12px; color:var(--text-muted);">Clique numa linha com ✏️ para abrir o painel de disponibilidade dos professores.</span></div>'
+                    if versao_id else "")
     return f"""
+    {_CSS_PAINEL_DISP}
     <dialog id="hs-caixa" class="hs-caixa">
         <div class="hs-cab"><span>{_e(titulo)}</span><button type="button" onclick="document.getElementById('hs-caixa').close()">Fechar ✕</button></div>
         <div class="hs-corpo" id="hs-corpo">{conteudo_html}</div>
+        {rodape_caixa}
     </dialog>
     <dialog id="hs-disp" class="hs-disp">
-        <div class="hs-cab"><span>Disponibilidade do professor</span><button type="button" onclick="document.getElementById('hs-disp').close()">Fechar ✕</button></div>
-        <div id="hs-disp-corpo" style="padding:16px 18px;">Carregando…</div>
+        <div class="hs-cab"><span>Disponibilidade dos professores — {ano}</span><button type="button" onclick="document.getElementById('hs-disp').close()">Fechar ✕</button></div>
+        <div id="hs-disp-corpo" style="padding:12px 18px;">Carregando…</div>
+        <div class="hs-rodape">{_botao_gerar_de_novo(versao_id, gerando) if versao_id else ""}
+            <span class="hs-alterou" id="hs-alterou">✅ Disponibilidade alterada — gere de novo para o gerador usar o novo cenário.</span></div>
     </dialog>
     <script>
-    var hsLinhaAtual = null;
+    var hsLinhaAtual = null, hsFoco = null;
     function hsDisp(pid, dia, turno, linha) {{
-      hsLinhaAtual = linha || null;
+      hsLinhaAtual = linha || null; hsFoco = pid;
       var d = document.getElementById('hs-disp'), corpo = document.getElementById('hs-disp-corpo');
-      corpo.innerHTML = 'Carregando…';
+      corpo.innerHTML = 'Carregando o painel de todos os professores…';
       if (d.showModal) d.showModal(); else d.setAttribute('open', '');
-      fetch('/horarios/disponibilidade/quadro/' + pid + '?ano={ano}&versao={versao_id}&dia=' + dia + '&turno=' + turno, {{credentials: 'same-origin'}})
-        .then(function (r) {{ return r.text(); }}).then(function (h) {{ corpo.innerHTML = h; hsLigaForm(pid); }});
+      fetch('/horarios/disponibilidade/quadro-geral?ano={ano}&versao={versao_id}&foco=' + pid + '&dia=' + dia + '&turno=' + turno, {{credentials: 'same-origin'}})
+        .then(function (r) {{ return r.text(); }}).then(function (h) {{ corpo.innerHTML = h; hsLigaPainel(corpo); corpo.scrollTop = 0; }});
     }}
-    function hsLigaForm(pid) {{
-      var f = document.getElementById('hs-disp-form');
-      if (!f) return;
-      f.addEventListener('submit', function (ev) {{
-        ev.preventDefault();
-        var msg = document.getElementById('hs-disp-msg');
-        msg.textContent = 'Salvando…';
-        fetch(f.action, {{method: 'POST', body: new FormData(f), credentials: 'same-origin'}})
-          .then(function (r) {{ return r.json(); }}).then(function (j) {{
-            msg.innerHTML = j.ok ? '✅ ' + j.mensagem : '❌ ' + j.mensagem;
-            if (j.ok && hsLinhaAtual) hsLinhaAtual.classList.add('hs-feito');
-          }}).catch(function () {{ msg.textContent = '❌ Não consegui salvar. Tente de novo.'; }});
+    function hpSalvar(f) {{
+      var card = f.closest('.hp-prof'), msg = f.querySelector('.hp-msg');
+      msg.textContent = 'Salvando…';
+      return fetch(f.action, {{method: 'POST', body: new FormData(f), credentials: 'same-origin'}})
+        .then(function (r) {{ return r.json(); }}).then(function (j) {{
+          msg.innerHTML = j.ok ? '✅ ' + j.mensagem : '❌ ' + j.mensagem;
+          if (j.ok) {{
+            card.classList.remove('hp-mudou'); card.classList.add('hp-salvo');
+            document.getElementById('hs-alterou').style.display = 'inline';
+            if (hsLinhaAtual && String(card.dataset.pid) === String(hsFoco)) hsLinhaAtual.classList.add('hs-feito');
+          }}
+        }}).catch(function () {{ msg.textContent = '❌ Não consegui salvar. Tente de novo.'; }});
+    }}
+    function hsLigaPainel(corpo) {{
+      corpo.querySelectorAll('form.hp-form').forEach(function (f) {{
+        f.addEventListener('submit', function (ev) {{ ev.preventDefault(); hpSalvar(f); }});
+        f.addEventListener('change', function () {{ f.closest('.hp-prof').classList.add('hp-mudou'); }});
       }});
+    }}
+    function hpFiltra(el) {{
+      var corpo = el.closest('#hs-disp-corpo') || document;
+      var termo = (corpo.querySelector('.hp-busca') || {{value: ''}}).value.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().trim();
+      var soPend = (corpo.querySelector('.hp-so-pend') || {{}}).checked;
+      corpo.querySelectorAll('.hp-prof').forEach(function (c) {{
+        var ok = (!termo || c.dataset.nome.indexOf(termo) >= 0) && (!soPend || c.dataset.pend === '1' || c.classList.contains('hp-foco'));
+        c.style.display = ok ? '' : 'none';
+      }});
+    }}
+    function hpSalvarTodos(btn) {{
+      var corpo = btn.closest('#hs-disp-corpo');
+      corpo.querySelectorAll('.hp-prof.hp-mudou form.hp-form').forEach(function (f) {{ hpSalvar(f); }});
     }}
     </script>"""
 
@@ -3034,6 +3455,7 @@ def geracao_status(request: Request, versao_id: int):
         "status": v["status"], "etapa": info.get("etapa", ""),
         "decorrido": int(_time.time() - info.get("inicio", _time.time())), "limite": info.get("limite", v["limite_segundos"] or 0),
         "flexivel": bool(info.get("flexivel")), "pendencias": info.get("pendencias"), "sugestoes": info.get("sugestoes"),
+        "parando": bool(info.get("parar")),
         "html": _html_sugestoes(sugest, horas, ao_vivo=True) if sugest else "",
     })
 
@@ -3053,77 +3475,145 @@ def _coleta_para_ano(conn, ano: int):
     return c
 
 
-@router.get("/horarios/disponibilidade/quadro/{professor_id}", response_class=HTMLResponse)
-def quadro_disponibilidade(request: Request, professor_id: int, ano: str = "", versao: str = "", dia: str = "", turno: str = ""):
-    """Pedaço de tela (aberto dentro da janela): quadro manhã/tarde × dias do professor, com o turno
-    sugerido destacado, e as aulas dele na versão que está sendo analisada."""
+def _pendencias_da_versao(conn, versao_id) -> dict:
+    """{professor_id: {(dia, turno, bloco), ...}} das aulas fora da disponibilidade numa versão
+    (pronta: lista salva; gerando: a lista ao vivo)."""
+    if not str(versao_id).isdigit():
+        return {}
+    vid = int(versao_id)
+    lista = (_GERACOES.get(vid) or {}).get("pendencias_lista")
+    if lista is None:
+        v = conn.execute("SELECT fora FROM horario_versoes WHERE id = ?", (vid,)).fetchone()
+        lista = _json.loads(v["fora"] or "[]") if v else []
+    saida = {}
+    for f in lista:
+        for b in (f.get("blocos") or (1, 2, 3)):
+            saida.setdefault(f["professor_id"], set()).add((DIAS_SEMANA[f["dia"]], f["turno"], b))
+    return saida
+
+
+def _cartao_professor_html(alvo, resp, ano: int, horas: dict, rotulos: dict, pendentes: set,
+                           destaque: set, foco: bool) -> str:
+    """Um professor no painel de disponibilidade: quadro de blocos editável (com as turmas da
+    versão escritas dentro dos blocos) e botão de salvar."""
+    pid = alvo["id"]
+    dupla = bool(resp and resp["dupla_interesse"])
+    if resp:
+        n_mat, n_dup = _contar_blocos(resp)
+        marcou = f", marcou {n_dup}" if resp["blocos"] else " (resposta antiga, por turno)"
+        info = (f'{_e(resp["disciplina"])} · {n_mat} bl. matrícula' + (f' · <span style="color:#7c3aed;">dupla: pediu {resp["dupla_tempos"] // 2} bl.{marcou}</span>' if dupla else ""))
+        obs = (resp["observacoes"] or "").strip()
+        obs_html = (f'<div class="hp-obs" title="{_e(obs)}">📝 {_e(obs[:140])}{"…" if len(obs) > 140 else ""}</div>' if obs else "")
+    else:
+        info = '<span style="color:#b45309;">sem resposta na coleta — ao salvar, a gestão cadastra</span>'
+        obs_html = ""
+    n_pend = len(pendentes)
+    selo = f'<span class="hp-selo">⚠️ {n_pend} pendência{"s" if n_pend != 1 else ""}</span>' if n_pend else ""
+    grade = _grade_blocos_html(_blocos_de(resp) if resp else {}, horas, editavel=True, dupla=dupla, compacta=True,
+                               destaque=destaque, rotulos=rotulos, pendentes=pendentes)
+    classes = "hp-prof" + (" hp-foco" if foco else "") + (" hp-tem-pend" if n_pend else "")
+    return f"""
+    <div class="{classes}" id="hp-{pid}" data-nome="{_e(_norm(alvo["nome"]))}" data-pend="{1 if n_pend else 0}" data-pid="{pid}">
+      <form class="hp-form" method="post" action="/horarios/disponibilidade/quadro/{pid}?ano={ano}">
+        <div class="hp-cab"><strong>{_e(alvo["nome"])}</strong> {selo}<span class="hp-mudou-aviso">● não salvo</span>
+            <div class="hp-info">{info}</div>{obs_html}</div>
+        {grade}
+        <div class="hp-acoes"><button type="submit" class="btn btn-primary" style="padding:3px 10px; font-size:12px;">💾 Salvar</button>
+            <span class="hp-msg"></span></div>
+      </form>
+    </div>"""
+
+
+def _painel_disponibilidade_html(conn, ano: int, versao: str, foco: Optional[int], dia: str, turno: str,
+                                 so_foco: bool = False) -> str:
+    """Painel com a disponibilidade de TODOS os professores que têm aula no ano (o da sugestão
+    aparece primeiro, destacado). Mudar outro professor às vezes resolve a pendência."""
+    coleta = _coleta_do_ano(conn, ano)
+    resp_por = {}
+    if coleta:
+        resp_por = {r["professor_id"]: r for r in conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ?", (coleta["id"],)).fetchall()}
+    ids = set(_atribuicoes(conn, ano).values()) | {p for p in _ed_professores(conn, ano).values() if p}
+    if foco:
+        ids.add(foco)
+    if so_foco:
+        ids = {foco} if foco else set()
+    ids.discard(None)
+    if not ids:
+        return '<p>Nenhum professor com aula atribuída neste ano.</p>'
+    profs = conn.execute(f"SELECT id, nome FROM professores WHERE id IN ({','.join('?' * len(ids))})", list(ids)).fetchall()
+    horas = _horas_blocos(conn, ano)
+    # turmas de cada professor na versão (e na versão do outro turno conectada)
+    rotulos = {}
+    if str(versao).isdigit():
+        vv = conn.execute("SELECT base_versao_id FROM horario_versoes WHERE id = ?", (int(versao),)).fetchone()
+        vids = [int(versao)] + ([vv["base_versao_id"]] if vv and vv["base_versao_id"] else [])
+        for a in conn.execute(f"SELECT professor_id, turno, dia, bloco, turma_nome FROM horario_aulas WHERE versao_id IN ({','.join('?' * len(vids))})", vids).fetchall():
+            rotulos.setdefault(a["professor_id"], {})[(DIAS_SEMANA[a["dia"]], a["turno"], a["bloco"])] = a["turma_nome"] or ""
+    pend = _pendencias_da_versao(conn, versao)
+    sug = (DIAS_SEMANA[int(dia)], turno) if str(dia).isdigit() and int(dia) < len(DIAS_SEMANA) and turno in ("m", "t") else None
+    ordem = sorted(profs, key=lambda p: (0 if p["id"] == foco else (1 if pend.get(p["id"]) else 2), _norm(p["nome"])))
+    cartoes = ""
+    for p in ordem:
+        pid = p["id"]
+        destaque = set()
+        if pid == foco and sug:
+            destaque = {(sug[0], sug[1], b) for b in (1, 2, 3)}
+            blocos_sug = {c for c in pend.get(pid, set()) if c[0] == sug[0] and c[1] == sug[1]}
+            destaque = blocos_sug or destaque
+        cartoes += _cartao_professor_html(p, resp_por.get(pid), ano, horas, rotulos.get(pid, {}), pend.get(pid, set()), destaque, pid == foco)
+    n_pend_prof = sum(1 for p in profs if pend.get(p["id"]))
+    dica_foco = ""
+    if foco and sug:
+        nome_foco = next((p["nome"] for p in profs if p["id"] == foco), "")
+        dica_foco = (f'<div class="hp-dica">Sugestão: <strong>{_e(nome_foco)}</strong> — {_e(NOME_DIA[sug[0]])}-feira à {"manhã" if sug[1] == "m" else "tarde"} '
+                     f'(contorno <span style="color:#d97706; font-weight:700;">laranja</span>).</div>')
+    filtros = "" if so_foco else f"""
+        <div class="hp-filtros">
+            <input type="search" class="hp-busca" placeholder="🔎 Procurar professor…" oninput="hpFiltra(this)">
+            <label><input type="checkbox" class="hp-so-pend" onchange="hpFiltra(this)"> Só quem tem pendência ({n_pend_prof})</label>
+            <button type="button" class="btn" style="padding:3px 10px; font-size:12px;" onclick="hpSalvarTodos(this)">💾 Salvar todos os alterados</button>
+        </div>"""
+    return f"""
+        {dica_foco}
+        <div class="hp-legenda">
+            <span><i style="background:#16a34a;"></i>matrícula</span><span><i style="background:#7c3aed;"></i>dupla regência</span>
+            <span><i style="border:2px solid #cbd5e1;"></i>indisponível</span>
+            <span><i style="box-shadow:inset 0 0 0 3px #ef4444;"></i>aula fora da disponibilidade (pendência)</span>
+            <span>Número no bloco = turma em que ele(a) tem aula nesta versão. Clique no bloco para mudar.</span>
+        </div>
+        {filtros}
+        <div class="hp-lista">{cartoes}</div>
+        <p style="font-size:11px; color:var(--text-muted); margin:10px 0 0;">As mudanças valem para a coleta de {ano} (fica registrado que foi a gestão).
+        Depois de ajustar, clique em <strong>Gerar horário de novo</strong> para o gerador usar a nova disponibilidade.</p>"""
+
+
+@router.get("/horarios/disponibilidade/quadro-geral", response_class=HTMLResponse)
+def quadro_disponibilidade_geral(request: Request, ano: str = "", versao: str = "", foco: str = "", dia: str = "", turno: str = ""):
+    """Pedaço de tela (aberto na janela das sugestões): disponibilidade de todos os professores."""
     prof, negado = _exige_gestao(request)
     if negado:
         return HTMLResponse("<p>Acesso restrito à gestão.</p>", status_code=403)
     conn = _db()
     ano_i = _ano_config(conn, ano)
-    alvo = conn.execute("SELECT id, nome FROM professores WHERE id = ?", (professor_id,)).fetchone()
-    if not alvo:
+    html = _painel_disponibilidade_html(conn, ano_i, versao, int(foco) if str(foco).isdigit() else None, dia, turno)
+    conn.close()
+    return HTMLResponse(html)
+
+
+@router.get("/horarios/disponibilidade/quadro/{professor_id}", response_class=HTMLResponse)
+def quadro_disponibilidade(request: Request, professor_id: int, ano: str = "", versao: str = "", dia: str = "", turno: str = ""):
+    """Pedaço de tela com um professor só (o painel geral usa o mesmo cartão)."""
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return HTMLResponse("<p>Acesso restrito à gestão.</p>", status_code=403)
+    conn = _db()
+    ano_i = _ano_config(conn, ano)
+    if not conn.execute("SELECT 1 FROM professores WHERE id = ?", (professor_id,)).fetchone():
         conn.close()
         return HTMLResponse("<p>Professor não encontrado.</p>")
-    coleta = _coleta_do_ano(conn, ano_i)
-    resp = conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ? AND professor_id = ?",
-                        (coleta["id"], professor_id)).fetchone() if coleta else None
-    aulas = []
-    if str(versao).isdigit():
-        vv = conn.execute("SELECT base_versao_id FROM horario_versoes WHERE id = ?", (int(versao),)).fetchone()
-        ids = [int(versao)] + ([vv["base_versao_id"]] if vv and vv["base_versao_id"] else [])
-        aulas = conn.execute(f"SELECT * FROM horario_aulas WHERE professor_id = ? AND versao_id IN ({','.join('?' * len(ids))})",
-                             (professor_id, *ids)).fetchall()
+    html = _painel_disponibilidade_html(conn, ano_i, versao, professor_id, dia, turno, so_foco=True)
     conn.close()
-    sug = (int(dia), turno) if str(dia).isdigit() and turno in ("m", "t") else None
-    cab = "".join(f"<th>{nome}</th>" for _, nome in DIAS)
-    linhas = ""
-    for t, nome_t in TURNOS:
-        cel = ""
-        for i, (d, nome_d) in enumerate(DIAS):
-            campo = f"{d}_{t}"
-            marcado = " checked" if resp and resp[campo] else ""
-            destaque = " hs-sugerido" if sug == (i, t) else ""
-            cel += (f'<td class="hd-cel{destaque}"><label title="{nome_d} — {nome_t}"><input type="checkbox" name="{campo}" value="1"{marcado}>'
-                    f'<span>✓</span></label></td>')
-        linhas += f'<tr><td class="hd-rot">{nome_t}</td>{cel}</tr>'
-    info = ""
-    if resp:
-        info = (f'<div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">{_e(resp["situacao"])} · {_e(resp["disciplina"])}'
-                f'{" · dupla regência: " + str(resp["dupla_tempos"]) + " tempos" if resp["dupla_interesse"] else ""}</div>'
-                + (f'<div style="font-size:12px; background:#f8fafc; border:1px solid var(--border); border-radius:6px; padding:6px 8px; margin-bottom:8px;">'
-                   f'<strong>Observações:</strong> {_e(resp["observacoes"])}</div>' if resp["observacoes"] else ""))
-    else:
-        info = '<div class="hd-avisos" style="display:block;">Este professor não tem resposta na coleta deste ano. Ao salvar, a gestão cadastra a disponibilidade dele.</div>'
-    aulas_html = ""
-    if aulas:
-        por = {}
-        for a in aulas:
-            por.setdefault((a["turno"], a["dia"]), []).append(a["turma_nome"])
-        cab2 = "".join(f'<th style="font-size:11px; padding:2px 6px;">{nome[:3]}</th>' for _, nome in DIAS)
-        lin2 = ""
-        for t, nome_t in TURNOS:
-            tds = "".join(f'<td style="font-size:11px; text-align:center; padding:2px 6px; border:1px solid var(--border);">'
-                          f'{_e(" ".join(sorted(set(por.get((t, i), [])))) or "·")}</td>' for i in range(len(DIAS)))
-            lin2 += f'<tr><td style="font-size:11px; padding-right:6px;">{nome_t}</td>{tds}</tr>'
-        aulas_html = (f'<div style="font-size:12px; font-weight:600; margin:10px 0 4px;">Turmas dele(a) nesta versão</div>'
-                      f'<table style="border-collapse:collapse;"><tr><td></td>{cab2}</tr>{lin2}</table>')
-    dica = (f'<div style="font-size:12px; margin:4px 0 8px;">O turno sugerido está com contorno <span style="color:#d97706; font-weight:700;">laranja</span>: '
-            f'{_e(NOME_DIA[DIAS_SEMANA[sug[0]]])}-feira à {"manhã" if sug[1] == "m" else "tarde"}.</div>') if sug else ""
-    return HTMLResponse(f"""
-        <div style="font-size:16px; font-weight:700; margin-bottom:2px;">{_e(alvo["nome"])}</div>
-        {info}{dica}
-        <form id="hs-disp-form" method="post" action="/horarios/disponibilidade/quadro/{professor_id}?ano={ano_i}">
-            <table class="hd-quadro"><tr><th></th>{cab}</tr>{linhas}</table>
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:6px;">
-                <button type="submit" class="btn btn-primary">💾 Salvar disponibilidade</button>
-                <span id="hs-disp-msg" style="font-size:13px;"></span>
-            </div>
-        </form>
-        {aulas_html}
-        <p style="font-size:11px; color:var(--text-muted); margin:10px 0 0;">A mudança vale para a coleta de {ano_i} (fica registrado que foi a gestão).
-        Depois de ajustar, gere o horário de novo para o gerador usar a nova disponibilidade.</p>""")
+    return HTMLResponse(html)
 
 
 @router.post("/horarios/disponibilidade/quadro/{professor_id}")
@@ -3140,10 +3630,19 @@ async def quadro_disponibilidade_salvar(request: Request, professor_id: int, ano
         return JSONResponse({"ok": False, "mensagem": "Professor não encontrado."})
     coleta = _coleta_para_ano(conn, ano_i)
     resp = conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ? AND professor_id = ?", (coleta["id"], professor_id)).fetchone()
-    turnos_novos = {c: (1 if form.get(c) else 0) for c in CAMPOS_TURNO}
-    if not any(turnos_novos.values()):
+    if any(str(k).startswith("b_") for k in form.keys()):
+        estado = {}
+        for (d, k, b) in CELULAS:
+            v = str(form.get(f"b_{d}_{k}{b}") or "0")
+            estado[(d, k, b)] = int(v) if v in ("0", "1", "2") else 0
+    else:   # formato antigo (por turno): o turno marcado vira os 3 blocos de matrícula
+        estado = {(d, k, b): (1 if form.get(f"{d}_{k}") else 0) for (d, k, b) in CELULAS}
+    if not (resp and resp["dupla_interesse"]):
+        estado = {c: (1 if v == 2 else v) for c, v in estado.items()}
+    n = sum(1 for v in estado.values() if v)
+    if not n:
         conn.close()
-        return JSONResponse({"ok": False, "mensagem": "Marque pelo menos um turno."})
+        return JSONResponse({"ok": False, "mensagem": "Marque pelo menos um bloco."})
     if resp:
         dados = dict(resp)
     else:
@@ -3153,12 +3652,11 @@ async def quadro_disponibilidade_salvar(request: Request, professor_id: int, ano
                             (professor_id, ano_i)).fetchone()
         dados = {"situacao": "Matrícula", "disciplina": (area["area_coleta"] if area else "") or "", "dupla_interesse": 0, "dupla_tempos": 0,
                  "observacoes": "Disponibilidade cadastrada pela gestão no gerador de horário."}
-    dados.update(turnos_novos)
+    dados["blocos"] = _codigo_blocos(estado)
     _salvar(conn, coleta["id"], professor_id, dados, atualizado_por=prof["id"])
     conn.commit()
     conn.close()
-    n = sum(turnos_novos.values())
-    return JSONResponse({"ok": True, "mensagem": f"Disponibilidade salva ({n} turno{'s' if n != 1 else ''}). Gere o horário de novo para aplicar."})
+    return JSONResponse({"ok": True, "n": n, "mensagem": f"Salvo ({n} bloco{'s' if n != 1 else ''})."})
 
 
 # ---------- tela: ver uma versão ----------
@@ -3198,6 +3696,16 @@ def _horas_blocos(conn, ano: int) -> dict:
 def _curto(nome: str) -> str:
     partes = (nome or "").split()
     return f"{partes[0]} {partes[-1]}" if len(partes) > 2 else (nome or "")
+
+
+def _conjunto_fora(fora: list) -> set:
+    """{(professor, dia, turno, bloco)} das aulas fora da disponibilidade. Versões antigas
+    (sem a lista de blocos) marcam o turno inteiro."""
+    saida = set()
+    for f in fora:
+        for b in (f.get("blocos") or (1, 2, 3)):
+            saida.add((f["professor_id"], f["dia"], f["turno"], b))
+    return saida
 
 
 def _render_corpo_horario(aulas, ed_info: dict, ed_anos: dict, fora_set: set, horas: dict, turmas_db: dict,
@@ -3254,12 +3762,12 @@ def _render_corpo_horario(aulas, ed_info: dict, ed_anos: dict, fora_set: set, ho
                     if dict(a).get("_base"):
                         classe = ' class="hg-base" title="Turno já gerado (versão conectada)"'
                     else:
-                        classe = ' class="hg-fora"' if (pid, a["dia"], k) in fora_set else ""
+                        classe = ' class="hg-fora"' if (pid, a["dia"], k, a["bloco"]) in fora_set else ""
                     cel[(a["dia"], a["bloco"])] = f'<td{classe}><div class="hg-comp">{_e(a["turma_nome"])}</div><div class="hg-prof">{_e(a["componente_nome"])}</div></td>'
                 for (kk, d, b), turmas_ed in eds.items():
                     if kk != k:
                         continue
-                    classe = ' class="hg-fora"' if (pid, d, k) in fora_set else ""
+                    classe = ' class="hg-fora"' if (pid, d, k, b) in fora_set else ""
                     txt = "<br>".join(f"S{sem}: {_e(tn)}" for sem, tn in sorted(turmas_ed))
                     cel[(d, b)] = f'<td{classe}><div class="hg-comp">💻 {txt}</div></td>'
                 grades += f'<div style="font-size:11px; font-weight:700; margin:6px 0 2px;">{NOME_TURNO[k]}</div>' + grade(cel, k)
@@ -3291,7 +3799,7 @@ def _render_corpo_horario(aulas, ed_info: dict, ed_anos: dict, fora_set: set, ho
         for (k, nome), lista in sorted(por_turma.items(), key=lambda x: (0 if x[0][0] == "m" else 1, x[0][1])):
             cel = {}
             for a in lista:
-                classe = ' class="hg-fora"' if (a["professor_id"], a["dia"], k) in fora_set else ""
+                classe = ' class="hg-fora"' if (a["professor_id"], a["dia"], k, a["bloco"]) in fora_set else ""
                 ed_txt = '<div class="hg-ed">💻 + Educação Digital</div>' if tem_ed(a) else ""
                 cel[(a["dia"], a["bloco"])] = (f'<td{classe}><div class="hg-comp">{_e(a["componente_nome"])}</div>'
                                                f'<div class="hg-prof">{_e(_curto(a["professor_nome"]))}</div>{ed_txt}</td>')
@@ -3329,15 +3837,26 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
                 <div style="height:10px; background:var(--bg-subtle,#e2e8f0); border-radius:6px; overflow:hidden; max-width:520px; margin:0 auto;">
                     <div id="hs-barra" style="height:100%; width:0%; background:#16a34a; transition:width 1s;"></div></div>
                 <div id="hs-tempo" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
-                <button type="button" class="btn" style="margin-top:12px;" onclick="hsAbrir()">🔍 Ver pendências e sugestões</button>
+                <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:12px;">
+                    <button type="button" class="btn" onclick="hsAbrir()">🔍 Ver pendências e sugestões</button>
+                    <button type="button" class="btn" id="hs-parar" onclick="hsParar()" style="border-color:#b91c1c; color:#b91c1c;"
+                        title="Interrompe a busca e salva o melhor horário encontrado até agora">⏹ Parar</button>
+                </div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">O gerador para sozinho quando o horário deixa de melhorar (economiza processamento).</div>
             </div>
-            {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", '<p>Ainda não há pendências: o gerador está procurando um horário que respeite toda a disponibilidade.</p>', ano_i, versao_id)}
+            {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", '<p>Ainda não há pendências: o gerador está procurando um horário que respeite toda a disponibilidade.</p>', ano_i, versao_id, gerando=True)}
             <script>
             function hsAbrir() {{ var d = document.getElementById('hs-caixa'); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); }}
+            function hsParar() {{
+              var b = document.getElementById('hs-parar'); b.disabled = true; b.textContent = '⏳ Parando…';
+              fetch('/horarios/geracao/versao/{versao_id}/parar', {{method: 'POST', credentials: 'same-origin'}})
+                .then(function (r) {{ return r.json(); }}).then(function (j) {{ document.getElementById('hs-etapa').textContent = j.mensagem; }});
+            }}
             function hsPad(n) {{ return (n === null || n === undefined) ? '--' : String(n).padStart(2, '0'); }}
             function hsAtualiza() {{
               fetch('/horarios/geracao/versao/{versao_id}/status', {{credentials: 'same-origin'}}).then(function (r) {{ return r.json(); }}).then(function (j) {{
                 if (j.status !== 'gerando') {{ location.reload(); return; }}
+                if (j.parando) {{ var b = document.getElementById('hs-parar'); b.disabled = true; b.textContent = '⏳ Parando…'; document.getElementById('hs-roda').classList.add('parada'); }}
                 document.getElementById('hs-etapa').textContent = j.etapa || 'Gerando…';
                 document.getElementById('hs-pend').textContent = j.flexivel ? hsPad(j.pendencias) : '00';
                 document.getElementById('hs-sug').textContent = j.flexivel ? hsPad(j.sugestoes) : '00';
@@ -3353,8 +3872,10 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
 
     if v["status"] == "erro":
         conn.close()
-        conteudo = _cabecalho_config(f"❌ Versão #{versao_id}", "", "geracao", ano_i) + _msg_box(_e(v["mensagem"] or "Erro."), erro=True) + \
-            f'<a href="/horarios/geracao?ano={ano_i}" class="btn">← Voltar</a>'
+        interrompida = (v["mensagem"] or "").startswith(("Interrompida", "Cancelada"))
+        conteudo = _cabecalho_config(f"{'⏹' if interrompida else '❌'} Versão #{versao_id}", "", "geracao", ano_i) + \
+            _msg_box(_e(v["mensagem"] or "Erro."), erro=not interrompida) + \
+            f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{_botao_gerar_de_novo(versao_id)}<a href="/horarios/geracao?ano={ano_i}" class="btn">← Voltar</a></div>'
         return _pagina(request, "Versão do horário", conteudo, "horarios-geracao")
 
     aulas = conn.execute("SELECT * FROM horario_aulas WHERE versao_id = ? ORDER BY turma_nome, dia, bloco", (versao_id,)).fetchall()
@@ -3369,7 +3890,7 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
     ed_info = _json.loads(v["pares_ed"] or "{}")
     fora = _json.loads(v["fora"] or "[]")
     ed_anos = {int(k): set(vv) for k, vv in _json.loads(v["ed_anos"] or "{}").items()}
-    fora_set = {(f["professor_id"], f["dia"], f["turno"]) for f in fora}
+    fora_set = _conjunto_fora(fora)
     ano_da_turma = {}
     for a in aulas:
         t = turmas_db.get(a["turma_id"])
@@ -3414,15 +3935,36 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
                 </div>
                 <div style="font-size:13px; text-align:center;">
                     <strong>⚠️ Não existe horário dentro da disponibilidade informada.</strong> Este é o horário com o menor número de pendências
-                    (aulas em turnos que o professor marcou como indisponível) — elas aparecem com contorno vermelho.<br>
-                    <button type="button" class="btn btn-primary" style="margin-top:10px;" onclick="hsAbrir()">🔍 Ver pendências e sugestões</button>
-                    <span style="font-size:12px; color:var(--text-muted); display:block; margin-top:6px;">Combine com os professores, ajuste no
-                    <a href="/horarios/disponibilidade/painel">painel da coleta</a> e gere de novo.</span>
+                    (aulas em blocos que o professor marcou como indisponíveis) — elas aparecem com contorno vermelho.<br>
+                    {f'<div style="margin-top:6px; color:#b45309;">⏹ {_e(v["mensagem"])}</div>' if (v["mensagem"] or "").startswith("Interrompida") else ""}
+                    <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:10px;">
+                        <button type="button" class="btn btn-primary" onclick="hsAbrir()">🔍 Ver pendências e sugestões</button>
+                        {_botao_gerar_de_novo(versao_id, classe="btn")}
+                    </div>
+                    <span style="font-size:12px; color:var(--text-muted); display:block; margin-top:6px;">Clique numa sugestão para abrir o painel de
+                    disponibilidade de todos os professores, ajuste e clique em <strong>Gerar horário de novo</strong>.</span>
                 </div>
             </div>
             {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", _html_sugestoes(sugestoes, horas) if sugestoes else
                "".join(f'<div class="hs-item">• {_e(f["professor_nome"])} deixar disponível {_e(_quando(f["dia"], f["turno"], [], horas))}</div>' for f in fora), ano_i, versao_id)}
             <script>function hsAbrir() {{ var d = document.getElementById('hs-caixa'); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); }}</script>"""
+
+    else:
+        # 0 pendências e 0 sugestões: horário concluído (Felipe, 01/11/2026)
+        obs_fim = _e(v["mensagem"]) if v["mensagem"] else "Todas as aulas estão dentro da disponibilidade informada pelos professores."
+        bloco_fora = _CSS_SUGESTOES + f"""
+            <div class="card" style="padding:6px 16px 14px; margin-bottom:14px; border:2px solid #16a34a;">
+                <div class="hs-painel" style="padding:10px;">
+                    <div class="hs-cont"><b>Pendências</b><span>00</span></div>
+                    <div class="hs-roda parada"><i></i><i></i><i></i><i></i></div>
+                    <div class="hs-cont"><b>Sugestões</b><span>00</span></div>
+                </div>
+                <div style="text-align:center;">
+                    <div style="font-size:20px; font-weight:800; color:#15803d;">✅ Horário concluído!</div>
+                    <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">{obs_fim}</div>
+                    <div style="margin-top:10px;">{_botao_gerar_de_novo(versao_id, classe="btn")}</div>
+                </div>
+            </div>"""
 
     abas = "".join(
         f'<a href="/horarios/geracao/versao/{versao_id}?ver={k}" class="btn" style="margin:0 6px 6px 0; {"background:#0f766e; color:white; border-color:#0f766e;" if ver == k else ""}">{r}</a>'
@@ -3606,7 +4148,7 @@ def horario_final(request: Request, ano: str = "", ver: str = "turmas", msg: str
     if df["vm"] and df["vt"] and df["vt"]["base_versao_id"] != df["vm"]["id"] and df["vm"]["base_versao_id"] != df["vt"]["id"] and df["vm"]["id"] != df["vt"]["id"]:
         aviso_con = ('<div class="hd-avisos" style="display:block; margin-bottom:14px;">ℹ️ A tarde escolhida não foi gerada conectada a esta manhã — '
                      'os dias de quem trabalha nos dois turnos podem não coincidir. Para conectar, gere a tarde escolhendo esta manhã em “Gerar horário”.</div>')
-    fora_set = {(x["professor_id"], x["dia"], x["turno"]) for x in df["fora"]}
+    fora_set = _conjunto_fora(df["fora"])
     abas = "".join(
         f'<a href="/horarios/final?ano={ano_i}&ver={k}" class="btn" style="margin:0 6px 6px 0; {"background:#0f766e; color:white; border-color:#0f766e;" if ver == k else ""}">{r}</a>'
         for k, r in (("turmas", "👥 Por turma"), ("professores", "👩‍🏫 Por professor"), ("laboratorio", "💻 Laboratório")))
@@ -4049,12 +4591,12 @@ def _indicadores_de_aulas(aulas: list, disp: dict) -> tuple:
     fora, n_pend = {}, 0
     for a in aulas:
         pid = a.get("professor_id")
-        if pid in disp and (DIAS_SEMANA[a["dia"]], a["turno"]) not in disp[pid]:
-            fora[(pid, a["dia"], a["turno"])] = 1
+        if pid in disp and (DIAS_SEMANA[a["dia"]], a["turno"], a["bloco"]) not in disp[pid]:
+            fora.setdefault((pid, a["dia"], a["turno"]), set()).add(a["bloco"])
             n_pend += 1
     ind = {"janelas": janelas, "turnos_usados": len(ocup), "fora_disponibilidade": len(fora), "pendencias": n_pend, "sugestoes": 0,
            **_indicador_dia_inteiro(aulas)}
-    return ind, [{"professor_id": p, "dia": d, "turno": k} for (p, d, k) in fora]
+    return ind, [{"professor_id": p, "dia": d, "turno": k, "blocos": sorted(bs)} for (p, d, k), bs in fora.items()]
 
 
 @router.post("/horarios/importar/confirmar")
@@ -4146,7 +4688,7 @@ async def importar_confirmar(request: Request):
                     "turno": a["turno"], "dia": a["dia"], "bloco": a["bloco"], "turma_nome": a["turma"], "componente_nome": a["componente"],
                     "professor_nome": nomes.get(usuario_do_curto.get(a["prof"]), a["prof"])}
                    for a in dados["aulas"] if a["turma"] in tid and a["componente"] in cid]
-        disp = {r["professor_id"]: {(d, k) for d in DIAS_SEMANA for k in ("m", "t") if r[f"{d}_{k}"]}
+        disp = {r["professor_id"]: {c for c, v in _blocos_de(r).items() if v}
                 for r in conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ?", (coleta_id,)).fetchall()}
         ind, fora = _indicadores_de_aulas(aulas_v, disp)
         fora = [dict(f, professor_nome=nomes.get(f["professor_id"], "")) for f in fora]
