@@ -1407,12 +1407,26 @@ def _abas_config(ativa: str, ano: int) -> str:
         ("viabilidade", "🔎 Viabilidade", "/horarios/configuracao/viabilidade"),
         ("geracao", "🚀 Gerar horário", "/horarios/geracao"),
         ("final", "📋 Horário final", "/horarios/final"),
+        ("importar", "📥 Importar ensaio", "/horarios/importar"),
     ]
     links = ""
     for chave, rotulo, href in abas:
         estilo = ("background:#0f766e; color:white; border-color:#0f766e;" if chave == ativa else "")
         links += f'<a href="{href}?ano={ano}" class="btn" style="margin:0 6px 6px 0; {estilo}">{rotulo}</a>'
-    return f'<div style="display:flex; flex-wrap:wrap; margin-bottom:16px;">{links}</div>'
+    # Seletor de ano letivo (aparece quando existe mais de um ano com dados — ex.: um ensaio)
+    seletor = ""
+    try:
+        conn = _db()
+        anos = sorted({r[0] for r in conn.execute("SELECT ano_letivo FROM horario_turmas UNION SELECT ano_letivo FROM horario_coletas "
+                                                    "UNION SELECT ano_letivo FROM horario_versoes").fetchall()} | {ano}, reverse=True)
+        conn.close()
+        if len(anos) > 1:
+            opts = "".join(f'<option value="{a}"{" selected" if a == ano else ""}>{a}</option>' for a in anos)
+            seletor = (f'<label style="margin:0 0 6px auto; display:flex; gap:6px; align-items:center; font-size:13px;">Ano letivo'
+                       f'<select style="width:100px;" onchange="location.href=location.pathname + \'?ano=\' + this.value">{opts}</select></label>')
+    except Exception:
+        seletor = ""
+    return f'<div style="display:flex; flex-wrap:wrap; align-items:center; margin-bottom:16px;">{links}{seletor}</div>'
 
 
 def _cabecalho_config(titulo: str, subtitulo: str, ativa: str, ano: int, msg_html: str = "") -> str:
@@ -1443,7 +1457,7 @@ def _exige_gestao(request: Request):
 # ---------- Resumo (página central) ----------
 
 @router.get("/horarios/configuracao", response_class=HTMLResponse)
-def config_resumo(request: Request, ano: str = ""):
+def config_resumo(request: Request, ano: str = "", msg: str = ""):
     prof, negado = _exige_gestao(request)
     if negado:
         return negado
@@ -1484,7 +1498,9 @@ def config_resumo(request: Request, ano: str = ""):
                ("Nenhum impedimento encontrado." if problemas == 0 else f"{problemas} impedimento(s) para resolver antes de gerar.") if turmas else "Aparece depois de cadastrar turmas e aulas.",
                "/horarios/configuracao/viabilidade")
     )
-    conteudo = _cabecalho_config("⚙️ Configuração do horário", "Preencha na ordem. Quando tudo estiver ✅, o horário poderá ser gerado.", "resumo", ano_i) + f"""
+    msg_box = _msg_box("✅ Ensaio importado. Confira a viabilidade, defina o professor de Educação Digital de cada turno em “Quem dá cada aula” "
+                       "(o horário do Urânia não mostra) e gere o horário. O horário do Urânia ficou guardado como versão, para comparar." if msg == "importado" else "")
+    conteudo = _cabecalho_config("⚙️ Configuração do horário", "Preencha na ordem. Quando tudo estiver ✅, o horário poderá ser gerado.", "resumo", ano_i, msg_box) + f"""
         {lista}
         <a href="/horarios/geracao?ano={ano_i}" class="card" style="display:flex; gap:14px; align-items:center; padding:14px 16px; margin-top:6px;
            text-decoration:none; color:white; background:linear-gradient(135deg,#0f766e,#0891b2); border:none;">
@@ -2574,7 +2590,7 @@ def _rotulos_aulas(itens, dados) -> list:
 
 
 def _descrever_pendencias(ativos, dados) -> list:
-    return [{"professor_nome": dados["nomes"].get(pid, "?"), "dia": d, "turno": k,
+    return [{"professor_id": pid, "professor_nome": dados["nomes"].get(pid, "?"), "dia": d, "turno": k,
              "blocos": sorted({b for _, _, b in itens}), "aulas": _rotulos_aulas(itens, dados)}
             for (pid, d, k), itens in sorted(ativos.items(), key=lambda c: (dados["nomes"].get(c[0][0], ""), c[0][1]))]
 
@@ -2782,8 +2798,12 @@ def geracao_inicio(request: Request, ano: str = "", msg: str = ""):
     for v in versoes:
         ind = _json.loads(v["indicadores"]) if v["indicadores"] else {}
         if v["status"] == "pronta":
-            situacao = ("✅ Dentro da disponibilidade" if v["modo"] == "estrito"
-                        else f'⚠️ {ind.get("pendencias", ind.get("fora_disponibilidade", "?"))} pendência(s) · {ind.get("sugestoes", "?")} sugestões')
+            if v["modo"] == "importado":
+                situacao = f'📥 Importado do Urânia · {ind.get("fora_disponibilidade", 0)} turno(s) fora do formulário'
+            elif v["modo"] == "estrito":
+                situacao = "✅ Dentro da disponibilidade"
+            else:
+                situacao = f'⚠️ {ind.get("pendencias", ind.get("fora_disponibilidade", "?"))} pendência(s) · {ind.get("sugestoes", "?")} sugestões'
             qual = f'{ind.get("janelas", "—")} janelas · {ind.get("turnos_usados", "—")} turnos de presença'
         elif v["status"] == "gerando":
             situacao, qual = "⏳ Gerando…", ""
@@ -2881,6 +2901,14 @@ def _quando(dia: int, turno: str, blocos: list, horas: dict) -> str:
     return f'{nome} à {"manhã" if turno == "m" else "tarde"}' + (f" — {bl} bloco" + ("s" if len(blocos) > 1 else "") if blocos else "")
 
 
+def _linha_clicavel(pid, dia, turno, texto_html: str) -> str:
+    """Linha de sugestão: um clique abre a disponibilidade do professor (como no Urânia)."""
+    if not pid:
+        return f'<div class="hs-item">{texto_html}</div>'
+    return (f'<div class="hs-item hs-clicavel" onclick="hsDisp({int(pid)}, {int(dia)}, \'{turno}\', this)" '
+            f'title="Clique para abrir a disponibilidade deste professor e alterar">{texto_html} <span class="hs-editar">✏️</span></div>')
+
+
 def _html_sugestoes(sugestoes: list, horas: dict, ao_vivo: bool = False) -> str:
     """Texto da caixa de sugestões. Cada pendência = aulas que só couberam num turno que o
     professor marcou como indisponível."""
@@ -2893,15 +2921,18 @@ def _html_sugestoes(sugestoes: list, horas: dict, ao_vivo: bool = False) -> str:
         linhas = [f'<div class="hs-titulo">ANÁLISE DA PENDÊNCIA {s.get("n", "")}</div>',
                   f'<div class="hs-pend">{_e(", ".join(s.get("aulas", [])))} · {nome} — só coube em {_e(_quando(s["dia"], s["turno"], s.get("blocos", []), horas))}.</div>',
                   '<div class="hs-nivel">Ajudará muitíssimo na eliminação da pendência se....</div>',
-                  f'<div class="hs-item">• {nome} deixar disponível {_e(_quando(s["dia"], s["turno"], s.get("blocos", []), horas))} ({motivo})</div>']
+                  _linha_clicavel(s.get("professor_id"), s["dia"], s["turno"],
+                                  f'• {nome} deixar disponível {_e(_quando(s["dia"], s["turno"], s.get("blocos", []), horas))} ({motivo})')]
         if s.get("muito"):
             linhas.append('<div class="hs-nivel">Ajudará muito na eliminação da pendência se....</div>')
-            linhas += [f'<div class="hs-item">• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
-                       f'(está indisponível neste turno)</div>' for a in s["muito"]]
+            linhas += [_linha_clicavel(a.get("professor_id"), a["dia"], a["turno"],
+                                       f'• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
+                                       f'(está indisponível neste turno)') for a in s["muito"]]
         if s.get("pouco"):
             linhas.append('<div class="hs-nivel">Ajudará um pouco na eliminação da pendência se....</div>')
-            linhas += [f'<div class="hs-item">• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
-                       f'(está indisponível neste turno)</div>' for a in s["pouco"]]
+            linhas += [_linha_clicavel(a.get("professor_id"), a["dia"], a["turno"],
+                                       f'• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
+                                       f'(está indisponível neste turno)') for a in s["pouco"]]
         if not ao_vivo:
             linhas.append('<div class="hs-nivel">Se nenhuma sugestão acima for viável, verifique se é possível....</div>')
             if any(a.startswith("Educação Digital") for a in s.get("aulas", [])):
@@ -2937,16 +2968,50 @@ dialog.hs-caixa::backdrop { background: rgba(15,23,42,.45); }
 .hs-bloco { margin-bottom:18px; padding-bottom:12px; border-bottom:1px dashed #cbd5e1; }
 .hs-titulo { display:inline-block; border:1px solid #64748b; padding:2px 14px; margin:6px 0 8px; font-weight:700; }
 .hs-pend { margin-bottom:6px; } .hs-nivel { margin-top:8px; font-weight:700; } .hs-item { padding-left:12px; } .hs-obs { margin-top:6px; color:#64748b; }
+.hs-clicavel { cursor:pointer; border-radius:4px; } .hs-clicavel:hover { background:#dcfce7; } .hs-editar { font-size:11px; opacity:.6; }
+.hs-clicavel.hs-feito { color:#15803d; } .hs-clicavel.hs-feito::after { content:"  ✓ disponibilidade alterada"; font-weight:700; }
+dialog.hs-disp { width:min(640px, 94vw); border:none; border-radius:10px; padding:0; box-shadow:0 20px 60px rgba(0,0,0,.4); }
+dialog.hs-disp::backdrop { background: rgba(15,23,42,.35); }
+.hs-sugerido span { outline:3px solid #f59e0b; outline-offset:2px; }
 </style>
 """
 
 
-def _caixa_sugestoes_html(titulo: str, conteudo_html: str) -> str:
+def _caixa_sugestoes_html(titulo: str, conteudo_html: str, ano: int = 0, versao_id: int = 0) -> str:
     return f"""
     <dialog id="hs-caixa" class="hs-caixa">
         <div class="hs-cab"><span>{_e(titulo)}</span><button type="button" onclick="document.getElementById('hs-caixa').close()">Fechar ✕</button></div>
         <div class="hs-corpo" id="hs-corpo">{conteudo_html}</div>
-    </dialog>"""
+    </dialog>
+    <dialog id="hs-disp" class="hs-disp">
+        <div class="hs-cab"><span>Disponibilidade do professor</span><button type="button" onclick="document.getElementById('hs-disp').close()">Fechar ✕</button></div>
+        <div id="hs-disp-corpo" style="padding:16px 18px;">Carregando…</div>
+    </dialog>
+    <script>
+    var hsLinhaAtual = null;
+    function hsDisp(pid, dia, turno, linha) {{
+      hsLinhaAtual = linha || null;
+      var d = document.getElementById('hs-disp'), corpo = document.getElementById('hs-disp-corpo');
+      corpo.innerHTML = 'Carregando…';
+      if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+      fetch('/horarios/disponibilidade/quadro/' + pid + '?ano={ano}&versao={versao_id}&dia=' + dia + '&turno=' + turno, {{credentials: 'same-origin'}})
+        .then(function (r) {{ return r.text(); }}).then(function (h) {{ corpo.innerHTML = h; hsLigaForm(pid); }});
+    }}
+    function hsLigaForm(pid) {{
+      var f = document.getElementById('hs-disp-form');
+      if (!f) return;
+      f.addEventListener('submit', function (ev) {{
+        ev.preventDefault();
+        var msg = document.getElementById('hs-disp-msg');
+        msg.textContent = 'Salvando…';
+        fetch(f.action, {{method: 'POST', body: new FormData(f), credentials: 'same-origin'}})
+          .then(function (r) {{ return r.json(); }}).then(function (j) {{
+            msg.innerHTML = j.ok ? '✅ ' + j.mensagem : '❌ ' + j.mensagem;
+            if (j.ok && hsLinhaAtual) hsLinhaAtual.classList.add('hs-feito');
+          }}).catch(function () {{ msg.textContent = '❌ Não consegui salvar. Tente de novo.'; }});
+      }});
+    }}
+    </script>"""
 
 
 @router.get("/horarios/geracao/versao/{versao_id}/status")
@@ -2971,6 +3036,129 @@ def geracao_status(request: Request, versao_id: int):
         "flexivel": bool(info.get("flexivel")), "pendencias": info.get("pendencias"), "sugestoes": info.get("sugestoes"),
         "html": _html_sugestoes(sugest, horas, ao_vivo=True) if sugest else "",
     })
+
+
+
+
+# ---------- janela de disponibilidade (clique numa sugestão) ----------
+
+def _coleta_para_ano(conn, ano: int):
+    """Coleta do ano; se não existir (ex.: ano de teste montado à mão), cria uma já encerrada."""
+    c = _coleta_do_ano(conn, ano)
+    if not c:
+        hoje = _hoje().isoformat()
+        conn.execute("INSERT OR IGNORE INTO horario_coletas (ano_letivo, data_inicio, data_fim, encerrada) VALUES (?, ?, ?, 1)", (ano, hoje, hoje))
+        conn.commit()
+        c = _coleta_do_ano(conn, ano)
+    return c
+
+
+@router.get("/horarios/disponibilidade/quadro/{professor_id}", response_class=HTMLResponse)
+def quadro_disponibilidade(request: Request, professor_id: int, ano: str = "", versao: str = "", dia: str = "", turno: str = ""):
+    """Pedaço de tela (aberto dentro da janela): quadro manhã/tarde × dias do professor, com o turno
+    sugerido destacado, e as aulas dele na versão que está sendo analisada."""
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return HTMLResponse("<p>Acesso restrito à gestão.</p>", status_code=403)
+    conn = _db()
+    ano_i = _ano_config(conn, ano)
+    alvo = conn.execute("SELECT id, nome FROM professores WHERE id = ?", (professor_id,)).fetchone()
+    if not alvo:
+        conn.close()
+        return HTMLResponse("<p>Professor não encontrado.</p>")
+    coleta = _coleta_do_ano(conn, ano_i)
+    resp = conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ? AND professor_id = ?",
+                        (coleta["id"], professor_id)).fetchone() if coleta else None
+    aulas = []
+    if str(versao).isdigit():
+        vv = conn.execute("SELECT base_versao_id FROM horario_versoes WHERE id = ?", (int(versao),)).fetchone()
+        ids = [int(versao)] + ([vv["base_versao_id"]] if vv and vv["base_versao_id"] else [])
+        aulas = conn.execute(f"SELECT * FROM horario_aulas WHERE professor_id = ? AND versao_id IN ({','.join('?' * len(ids))})",
+                             (professor_id, *ids)).fetchall()
+    conn.close()
+    sug = (int(dia), turno) if str(dia).isdigit() and turno in ("m", "t") else None
+    cab = "".join(f"<th>{nome}</th>" for _, nome in DIAS)
+    linhas = ""
+    for t, nome_t in TURNOS:
+        cel = ""
+        for i, (d, nome_d) in enumerate(DIAS):
+            campo = f"{d}_{t}"
+            marcado = " checked" if resp and resp[campo] else ""
+            destaque = " hs-sugerido" if sug == (i, t) else ""
+            cel += (f'<td class="hd-cel{destaque}"><label title="{nome_d} — {nome_t}"><input type="checkbox" name="{campo}" value="1"{marcado}>'
+                    f'<span>✓</span></label></td>')
+        linhas += f'<tr><td class="hd-rot">{nome_t}</td>{cel}</tr>'
+    info = ""
+    if resp:
+        info = (f'<div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">{_e(resp["situacao"])} · {_e(resp["disciplina"])}'
+                f'{" · dupla regência: " + str(resp["dupla_tempos"]) + " tempos" if resp["dupla_interesse"] else ""}</div>'
+                + (f'<div style="font-size:12px; background:#f8fafc; border:1px solid var(--border); border-radius:6px; padding:6px 8px; margin-bottom:8px;">'
+                   f'<strong>Observações:</strong> {_e(resp["observacoes"])}</div>' if resp["observacoes"] else ""))
+    else:
+        info = '<div class="hd-avisos" style="display:block;">Este professor não tem resposta na coleta deste ano. Ao salvar, a gestão cadastra a disponibilidade dele.</div>'
+    aulas_html = ""
+    if aulas:
+        por = {}
+        for a in aulas:
+            por.setdefault((a["turno"], a["dia"]), []).append(a["turma_nome"])
+        cab2 = "".join(f'<th style="font-size:11px; padding:2px 6px;">{nome[:3]}</th>' for _, nome in DIAS)
+        lin2 = ""
+        for t, nome_t in TURNOS:
+            tds = "".join(f'<td style="font-size:11px; text-align:center; padding:2px 6px; border:1px solid var(--border);">'
+                          f'{_e(" ".join(sorted(set(por.get((t, i), [])))) or "·")}</td>' for i in range(len(DIAS)))
+            lin2 += f'<tr><td style="font-size:11px; padding-right:6px;">{nome_t}</td>{tds}</tr>'
+        aulas_html = (f'<div style="font-size:12px; font-weight:600; margin:10px 0 4px;">Turmas dele(a) nesta versão</div>'
+                      f'<table style="border-collapse:collapse;"><tr><td></td>{cab2}</tr>{lin2}</table>')
+    dica = (f'<div style="font-size:12px; margin:4px 0 8px;">O turno sugerido está com contorno <span style="color:#d97706; font-weight:700;">laranja</span>: '
+            f'{_e(NOME_DIA[DIAS_SEMANA[sug[0]]])}-feira à {"manhã" if sug[1] == "m" else "tarde"}.</div>') if sug else ""
+    return HTMLResponse(f"""
+        <div style="font-size:16px; font-weight:700; margin-bottom:2px;">{_e(alvo["nome"])}</div>
+        {info}{dica}
+        <form id="hs-disp-form" method="post" action="/horarios/disponibilidade/quadro/{professor_id}?ano={ano_i}">
+            <table class="hd-quadro"><tr><th></th>{cab}</tr>{linhas}</table>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+                <button type="submit" class="btn btn-primary">💾 Salvar disponibilidade</button>
+                <span id="hs-disp-msg" style="font-size:13px;"></span>
+            </div>
+        </form>
+        {aulas_html}
+        <p style="font-size:11px; color:var(--text-muted); margin:10px 0 0;">A mudança vale para a coleta de {ano_i} (fica registrado que foi a gestão).
+        Depois de ajustar, gere o horário de novo para o gerador usar a nova disponibilidade.</p>""")
+
+
+@router.post("/horarios/disponibilidade/quadro/{professor_id}")
+async def quadro_disponibilidade_salvar(request: Request, professor_id: int, ano: str = ""):
+    from fastapi.responses import JSONResponse
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return JSONResponse({"ok": False, "mensagem": "Acesso restrito à gestão."}, status_code=403)
+    form = await request.form()
+    conn = _db()
+    ano_i = _ano_config(conn, ano)
+    if not conn.execute("SELECT 1 FROM professores WHERE id = ?", (professor_id,)).fetchone():
+        conn.close()
+        return JSONResponse({"ok": False, "mensagem": "Professor não encontrado."})
+    coleta = _coleta_para_ano(conn, ano_i)
+    resp = conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ? AND professor_id = ?", (coleta["id"], professor_id)).fetchone()
+    turnos_novos = {c: (1 if form.get(c) else 0) for c in CAMPOS_TURNO}
+    if not any(turnos_novos.values()):
+        conn.close()
+        return JSONResponse({"ok": False, "mensagem": "Marque pelo menos um turno."})
+    if resp:
+        dados = dict(resp)
+    else:
+        # sem resposta: cria com o básico (disciplina pela primeira aula atribuída, se houver)
+        area = conn.execute("""SELECT c.area_coleta FROM horario_atribuicoes a JOIN horario_componentes c ON c.id = a.componente_id
+                               JOIN horario_turmas t ON t.id = a.turma_id WHERE a.professor_id = ? AND t.ano_letivo = ? LIMIT 1""",
+                            (professor_id, ano_i)).fetchone()
+        dados = {"situacao": "Matrícula", "disciplina": (area["area_coleta"] if area else "") or "", "dupla_interesse": 0, "dupla_tempos": 0,
+                 "observacoes": "Disponibilidade cadastrada pela gestão no gerador de horário."}
+    dados.update(turnos_novos)
+    _salvar(conn, coleta["id"], professor_id, dados, atualizado_por=prof["id"])
+    conn.commit()
+    conn.close()
+    n = sum(turnos_novos.values())
+    return JSONResponse({"ok": True, "mensagem": f"Disponibilidade salva ({n} turno{'s' if n != 1 else ''}). Gere o horário de novo para aplicar."})
 
 
 # ---------- tela: ver uma versão ----------
@@ -3128,7 +3316,7 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
     if v["status"] == "gerando":
         conn.close()
         conteudo = _cabecalho_config(f"⏳ Gerando o horário (versão #{versao_id})", "Pode sair desta página: a geração continua e a versão aparece na lista quando terminar.",
-                                     "geracao", ano_i) + _CSS_SUGESTOES + f"""
+                                     "geracao", ano_i) + _CSS_FORM + _CSS_SUGESTOES + f"""
             <div class="card" style="padding:18px; text-align:center;">
                 <div class="hs-painel">
                     <button type="button" class="hs-cont" onclick="hsAbrir()" title="Clique para ver as pendências">
@@ -3143,7 +3331,7 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
                 <div id="hs-tempo" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
                 <button type="button" class="btn" style="margin-top:12px;" onclick="hsAbrir()">🔍 Ver pendências e sugestões</button>
             </div>
-            {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", '<p>Ainda não há pendências: o gerador está procurando um horário que respeite toda a disponibilidade.</p>')}
+            {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", '<p>Ainda não há pendências: o gerador está procurando um horário que respeite toda a disponibilidade.</p>', ano_i, versao_id)}
             <script>
             function hsAbrir() {{ var d = document.getElementById('hs-caixa'); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); }}
             function hsPad(n) {{ return (n === null || n === undefined) ? '--' : String(n).padStart(2, '0'); }}
@@ -3195,8 +3383,8 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
         return (f'<div class="card" style="padding:10px 14px; flex:1 1 150px;"><div style="font-size:24px; font-weight:800; color:{cor};">{valor}</div>'
                 f'<div style="font-size:12px; color:var(--text-muted);">{rotulo}</div></div>')
     n_fora = ind.get("fora_disponibilidade", 0)
-    cards = (card("✅" if v["modo"] == "estrito" else n_fora, "dentro da disponibilidade" if v["modo"] == "estrito" else "turnos fora da disponibilidade",
-                  "#16a34a" if v["modo"] == "estrito" else "#b91c1c")
+    cards = (card("✅" if (v["modo"] == "estrito" or not n_fora) else n_fora, "dentro da disponibilidade" if (v["modo"] == "estrito" or not n_fora) else "turnos fora da disponibilidade",
+                  "#16a34a" if (v["modo"] == "estrito" or not n_fora) else "#b91c1c")
              + card(ind.get("janelas", 0), "janelas de professor")
              + card(ind.get("turnos_usados", 0), "turnos de presença (somando todos os professores)"))
     if ind.get("profs_dois_turnos"):
@@ -3207,7 +3395,14 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
         for k, info in sorted(ed_info.items()))
     bloco_fora = ""
     sugestoes = _json.loads(v["sugestoes"] or "[]") if "sugestoes" in v.keys() else []
-    if fora:
+    if v["modo"] == "importado":
+        itens_fora = "".join(f'<li>{_e(f["professor_nome"])} — {_e(_quando(f["dia"], f["turno"], [], horas))}</li>'
+                             for f in sorted(fora, key=lambda f: (f["professor_nome"], f["dia"])))
+        bloco_fora = (f'<div class="hd-avisos" style="display:block; margin-bottom:14px;">📥 <strong>Horário importado do Urânia</strong> — serve para comparar com as versões do gerador. '
+                      + (f'Comparado com o formulário, {len(fora)} turno(s) têm aula fora do que o professor marcou (provavelmente combinados depois):'
+                         f'<ul style="margin:6px 0 0 18px; padding:0; columns:2;">{itens_fora}</ul>' if fora else "Todas as aulas estão dentro da disponibilidade do formulário.")
+                      + '</div>')
+    elif fora:
         n_pend = ind.get("pendencias", len(fora))
         n_sug = ind.get("sugestoes", len(sugestoes))
         bloco_fora = _CSS_SUGESTOES + f"""
@@ -3226,7 +3421,7 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
                 </div>
             </div>
             {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", _html_sugestoes(sugestoes, horas) if sugestoes else
-               "".join(f'<div class="hs-item">• {_e(f["professor_nome"])} deixar disponível {_e(_quando(f["dia"], f["turno"], [], horas))}</div>' for f in fora))}
+               "".join(f'<div class="hs-item">• {_e(f["professor_nome"])} deixar disponível {_e(_quando(f["dia"], f["turno"], [], horas))}</div>' for f in fora), ano_i, versao_id)}
             <script>function hsAbrir() {{ var d = document.getElementById('hs-caixa'); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); }}</script>"""
 
     abas = "".join(
@@ -3238,7 +3433,7 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
     if ind.get("sem_resposta"):
         bloco_fora += (f'<div class="hd-avisos" style="display:block; margin-bottom:14px;">ℹ️ Sem resposta na coleta (considerados disponíveis em todos os turnos): '
                        f'<strong>{_e(", ".join(ind["sem_resposta"]))}</strong>. Confira o horário deles antes de usar.</div>')
-    modo_txt = "respeitando toda a disponibilidade" if v["modo"] == "estrito" else "modo diagnóstico (disponibilidade flexível)"
+    modo_txt = {"estrito": "respeitando toda a disponibilidade", "importado": "importado do Urânia"}.get(v["modo"], "modo diagnóstico (disponibilidade flexível)")
     conteudo = (_CSS_FORM + _CSS_GRADE + f"""
         <div class="page-header">
             <h1>🗓️ Horário {ano_i} — versão #{versao_id} <span style="font-size:16px; color:var(--text-muted); font-weight:500;">· {ROTULO_TURNO_VERSAO.get(turno_v)}{f" (conectada à #{base_id})" if base_id else ""}</span></h1>
@@ -3469,6 +3664,550 @@ def horario_final_exportar(request: Request, ano: str = ""):
     if not df["aulas"]:
         return RedirectResponse(f"/horarios/final?ano={ano_i}", status_code=303)
     return _excel_horario(df["aulas"], horas, f"horario_final_{ano_i}.xlsx")
+
+
+
+# ==========================================
+#  IMPORTAÇÃO DE ENSAIO (01/11/2026)
+# ==========================================
+# Carrega um ano antigo (ex.: 2025) para testar o gerador com dados reais, direto no sistema:
+#   1) respostas do Google Forms (planilha exportada);
+#   2) horário do Urânia exportado para Excel ("Cópia de Horário - Alunos - Manhã/Tarde"),
+#      que diz quais turmas existem, de que turno são e quem dá cada aula.
+# Tudo fica no ano letivo escolhido (separado do ano da coleta atual). Professores que não
+# têm conta no sistema viram "usuários de ensaio" BLOQUEADOS (não fazem login) e somem
+# quando o ensaio é apagado.
+
+import os as _os
+import uuid as _uuid
+import unicodedata as _unicodedata
+
+PASTA_IMPORTACAO = "tmp_importacoes_horario"
+
+# Nomes de componentes como aparecem no Urânia → nome no sistema.
+ALIAS_COMPONENTES = {
+    "lingua portuguesa": "Língua Portuguesa", "portugues": "Língua Portuguesa",
+    "producao textual": "Produção de Texto", "producao de texto": "Produção de Texto",
+    "matematica": "Álgebra", "algebra": "Álgebra", "geometria": "Geometria",
+    "historia": "História", "geografia": "Geografia", "ciencias": "Ciências",
+    "educacao fisica": "Educação Física", "ed. fisica": "Educação Física", "ingles": "Inglês", "arte": "Arte",
+}
+
+
+def _norm(texto) -> str:
+    t = _unicodedata.normalize("NFD", str(texto or "").strip().lower())
+    t = "".join(c for c in t if _unicodedata.category(c) != "Mn")
+    return " ".join(t.split())
+
+
+def _quase_igual(a: str, b: str) -> bool:
+    """Iguais, ou diferem em uma letra (Willians/Wilians, Neiliane/Nelliane)."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1 or min(len(a), len(b)) < 4:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    curto, longo = (a, b) if len(a) < len(b) else (b, a)
+    return any(longo[:i] + longo[i + 1:] == curto for i in range(len(longo)))
+
+
+def _ler_respostas_forms(conteudo: bytes) -> list:
+    """Planilha de respostas do Forms → uma resposta por pessoa (a mais recente)."""
+    from openpyxl import load_workbook
+    wb = load_workbook(BytesIO(conteudo), data_only=True, read_only=True)
+    ws = wb.worksheets[0]
+    linhas = list(ws.iter_rows(values_only=True))
+    if not linhas:
+        return []
+    cab = [_norm(c) for c in linhas[0]]
+
+    def col(*trechos):
+        for i, c in enumerate(cab):
+            if all(t in c for t in trechos):
+                return i
+        return None
+    i_nome, i_email, i_sit = col("nome"), col("e-mail"), col("situacao")
+    i_disc, i_dupla, i_tempos = col("disciplina"), col("dupla regencia"), col("quantos tempos")
+    i_m, i_t, i_obs, i_ts = col("[manha]"), col("[tarde]"), col("observa"), col("carimbo")
+    if i_nome is None or (i_m is None and i_t is None):
+        raise ValueError("Não reconheci a planilha do formulário (faltam as colunas Nome e Manhã/Tarde).")
+    mapa_dia = {"segunda": "seg", "terca": "ter", "quarta": "qua", "quinta": "qui", "sexta": "sex"}
+    por_pessoa = {}
+    for r in linhas[1:]:
+        nome = str(r[i_nome] or "").strip() if i_nome is not None else ""
+        if not nome:
+            continue
+        email = str(r[i_email] or "").strip().lower() if i_email is not None else ""
+        resp = {"nome": " ".join(nome.split()), "email": email,
+                "situacao": str(r[i_sit] or "").strip() if i_sit is not None else "",
+                "disciplina": str(r[i_disc] or "").strip() if i_disc is not None else "",
+                "dupla": 1 if i_dupla is not None and _norm(r[i_dupla]) == "sim" else 0,
+                "tempos": 0, "observacoes": str(r[i_obs] or "").strip() if i_obs is not None else "",
+                "ts": str(r[i_ts] or "") if i_ts is not None else ""}
+        try:
+            resp["tempos"] = int(float(r[i_tempos] or 0)) if i_tempos is not None else 0
+        except (TypeError, ValueError):
+            resp["tempos"] = 0
+        for c in CAMPOS_TURNO:
+            resp[c] = 0
+        for i_col, k in ((i_m, "m"), (i_t, "t")):
+            if i_col is None:
+                continue
+            for parte in str(r[i_col] or "").split(","):
+                d = mapa_dia.get(_norm(parte))
+                if d:
+                    resp[f"{d}_{k}"] = 1
+        chave = email or _norm(nome)
+        if chave not in por_pessoa or resp["ts"] >= por_pessoa[chave]["ts"]:
+            resp["chave"] = chave
+            por_pessoa[chave] = resp
+    return sorted(por_pessoa.values(), key=lambda x: _norm(x["nome"]))
+
+
+def _ler_horario_urania_xlsx(conteudo: bytes, turno: str, nomes_componentes: dict) -> tuple:
+    """Excel 'Cópia de Horário - Alunos' (1ª aba): blocos 'Turma 601' com 3 horários × 5 dias;
+    em cada horário, uma linha com o professor e a de baixo com o componente."""
+    from openpyxl import load_workbook
+    wb = load_workbook(BytesIO(conteudo), data_only=True)
+    ws = wb.worksheets[0]
+    linhas = list(ws.iter_rows(values_only=True))
+    turmas, aulas, desconhecidos = [], [], set()
+    turma, horarios_turma = None, []
+    for idx, r in enumerate(linhas):
+        a = r[0] if r else None
+        if isinstance(a, str) and _norm(a).startswith("turma"):
+            turma = a.split()[-1].strip()
+            if turma not in [t["nome"] for t in turmas]:
+                turmas.append({"nome": turma, "turno": turno,
+                               "ano": int(turma[0]) if turma[:1] in "6789" else 0})
+            horarios_turma = []
+            continue
+        if turma and a is not None and hasattr(a, "hour"):
+            horarios_turma.append(a)
+            bloco = len(horarios_turma)
+            if bloco > BLOCOS_POR_TURNO:
+                continue
+            baixo = linhas[idx + 1] if idx + 1 < len(linhas) else ()
+            for j in range(1, 6):
+                prof = str(r[j]).strip() if j < len(r) and r[j] else ""
+                comp_txt = str(baixo[j]).strip() if j < len(baixo) and baixo[j] else ""
+                if not prof and not comp_txt:
+                    continue
+                nome_comp = ALIAS_COMPONENTES.get(_norm(comp_txt)) or nomes_componentes.get(_norm(comp_txt))
+                if not nome_comp:
+                    desconhecidos.add(comp_txt or "(vazio)")
+                    continue
+                aulas.append({"turma": turma, "turno": turno, "dia": j - 1, "bloco": bloco,
+                              "prof": " ".join(prof.split()), "componente": nome_comp})
+    return turmas, aulas, sorted(desconhecidos)
+
+
+def _casar_curto_resposta(curto: str, areas: set, respostas: list) -> Optional[str]:
+    toks = _norm(curto).split()
+    if not toks:
+        return None
+    cands = []
+    for r in respostas:
+        tn = _norm(r["nome"]).split()
+        if not tn or not _quase_igual(toks[0], tn[0]):
+            continue
+        if all(any(_quase_igual(t, x) or x.startswith(t) for x in tn[1:]) for t in toks[1:]):
+            cands.append(r)
+    if len(cands) > 1 and areas:
+        por_area = [r for r in cands if r["disciplina"] in areas]
+        cands = por_area or cands
+    if len(cands) > 1:   # mesma pessoa respondendo com e-mails diferentes: fica com a mais completa
+        nomes = {_norm(r["nome"]) for r in cands}
+        if len(nomes) == 1:
+            cands = [max(cands, key=lambda r: r["ts"])]
+    return cands[0]["chave"] if len(cands) == 1 else None
+
+
+def _casar_usuario(nome: str, email: str, usuarios: list) -> Optional[int]:
+    if email:
+        for u in usuarios:
+            if (u["email"] or "").lower() == email:
+                return u["id"]
+    n = _norm(nome)
+    iguais = [u for u in usuarios if _norm(u["nome"]) == n]
+    if len(iguais) == 1:
+        return iguais[0]["id"]
+    partes = n.split()
+    if len(partes) >= 2:
+        pl = [u for u in usuarios if _norm(u["nome"]).split()[:1] == partes[:1] and _norm(u["nome"]).split()[-1:] == partes[-1:]]
+        if len(pl) == 1:
+            return pl[0]["id"]
+    return None
+
+
+def _usuarios_sistema(conn) -> list:
+    return [dict(r) for r in conn.execute(
+        "SELECT id, nome, email, COALESCE(status, 'ativo') AS status FROM professores ORDER BY nome COLLATE NOCASE").fetchall()]
+
+
+@router.get("/horarios/importar", response_class=HTMLResponse)
+def importar_inicio(request: Request, ano: str = "", msg: str = "", erro: str = ""):
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return negado
+    conn = _db()
+    atual = _coleta_atual(conn)
+    ano_atual = atual["ano_letivo"] if atual else None
+    ano_sug = int(ano) if str(ano).isdigit() else ((ano_atual or _hoje().year + 1) - 2)
+    anos_com_dados = sorted({r[0] for r in conn.execute(
+        "SELECT ano_letivo FROM horario_turmas UNION SELECT ano_letivo FROM horario_coletas UNION SELECT ano_letivo FROM horario_versoes").fetchall()})
+    conn.close()
+    msgs = {"apagado": "Dados do ano de ensaio apagados.", "importado": "Ensaio importado com sucesso."}
+    apagar = ""
+    anos_apagaveis = [a for a in anos_com_dados if a != ano_atual]
+    if anos_apagaveis:
+        opts = "".join(f"<option>{a}</option>" for a in anos_apagaveis)
+        apagar = f"""
+        <details class="card" style="padding:14px 16px; margin-top:16px;">
+            <summary style="cursor:pointer; font-weight:600; color:var(--red);">🗑️ Apagar um ano de ensaio</summary>
+            <form method="post" action="/horarios/importar/apagar" style="margin-top:10px;"
+                  onsubmit="return confirm('Apagar TODOS os dados do horário deste ano (coleta, turmas, atribuições, versões) e os usuários de ensaio criados para ele?');">
+                <p style="font-size:13px; margin:0 0 8px;">Apaga coleta, turmas, atribuições, versões e horário final do ano escolhido, e os usuários de ensaio
+                (bloqueados) criados na importação. Não mexe em nada fora do módulo de horários. O ano da coleta atual ({ano_atual or "—"}) não pode ser apagado por aqui.</p>
+                <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+                    <label style="margin:0;">Ano<select name="ano" style="width:110px;">{opts}</select></label>
+                    <label style="margin:0;">Para confirmar, digite APAGAR<input type="text" name="confirmacao" required style="width:160px;"></label>
+                    <button type="submit" class="btn" style="color:var(--red); border-color:var(--red);">Apagar</button>
+                </div>
+            </form>
+        </details>"""
+    conteudo = _cabecalho_config("📥 Importar ensaio", "Carregue um ano antigo (disponibilidade do Forms + horário do Urânia em Excel) para testar o gerador com dados reais. "
+                                 "Fica num ano letivo separado — a coleta atual não é afetada.", "importar", ano_sug,
+                                 _msg_box(msgs.get(msg, "")) + _msg_box(_e(erro), erro=True)) + f"""
+        <form method="post" action="/horarios/importar/previa" enctype="multipart/form-data" class="card" style="padding:16px;">
+            <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+                <label style="margin:0;">Ano letivo do ensaio
+                    <input type="number" name="ano" value="{ano_sug}" min="2000" max="2100" required style="width:120px;"></label>
+            </div>
+            <label style="margin-top:14px;">1. Respostas do formulário de disponibilidade (planilha .xlsx exportada do Google Forms)
+                <input type="file" name="forms" accept=".xlsx" required></label>
+            <label style="margin-top:10px;">2. Horário da MANHÃ exportado do Urânia (.xlsx — "Cópia de Horário - Alunos - Manhã")
+                <input type="file" name="manha" accept=".xlsx"></label>
+            <label style="margin-top:10px;">3. Horário da TARDE exportado do Urânia (.xlsx)
+                <input type="file" name="tarde" accept=".xlsx"></label>
+            <p style="font-size:12px; color:var(--text-muted); margin:10px 0 0;">Nada é gravado agora: o próximo passo mostra uma prévia para você conferir
+            a correspondência dos nomes (o Urânia usa apelidos, o formulário usa o nome completo) antes de confirmar.</p>
+            <div class="page-actions" style="margin-top:12px;"><button type="submit" class="btn btn-primary">Ler arquivos e ver prévia →</button></div>
+        </form>
+        {apagar}"""
+    return _pagina(request, "Importar ensaio", conteudo, "horarios-config")
+
+
+@router.post("/horarios/importar/previa", response_class=HTMLResponse)
+async def importar_previa(request: Request):
+    import json as _js
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return negado
+    form = await request.form()
+    try:
+        ano = int(form.get("ano") or 0)
+    except ValueError:
+        ano = 0
+    conn = _db()
+    atual = _coleta_atual(conn)
+    if ano < 2000 or (atual and ano == atual["ano_letivo"]):
+        conn.close()
+        return RedirectResponse("/horarios/importar?erro=" + _url("Escolha um ano letivo de ensaio diferente do ano da coleta atual."), status_code=303)
+    _garantir_config(conn, ano)
+    comps = _componentes(conn, ano)
+    nomes_comp = {_norm(c["nome"]): c["nome"] for c in comps}
+    area_comp = {c["nome"]: c["area_coleta"] for c in comps}
+    usuarios = _usuarios_sistema(conn)
+    conn.close()
+
+    async def ler(campo):
+        f = form.get(campo)
+        if f is None or not hasattr(f, "read"):
+            return b""
+        return await f.read()
+    try:
+        respostas = _ler_respostas_forms(await ler("forms"))
+        turmas, aulas, desconhecidos = [], [], []
+        for campo, k in (("manha", "m"), ("tarde", "t")):
+            dados = await ler(campo)
+            if dados:
+                t, a, d = _ler_horario_urania_xlsx(dados, k, nomes_comp)
+                turmas += t
+                aulas += a
+                desconhecidos += d
+    except Exception as erro:
+        return RedirectResponse("/horarios/importar?erro=" + _url(f"Não consegui ler os arquivos: {erro}"), status_code=303)
+    if not respostas and not aulas:
+        return RedirectResponse("/horarios/importar?erro=" + _url("Nenhum dado encontrado nos arquivos."), status_code=303)
+
+    # Pessoas do horário (nome curto) → resposta do formulário → usuário do sistema
+    por_curto = {}
+    for a in aulas:
+        if a["prof"]:
+            por_curto.setdefault(a["prof"], []).append(a)
+    resp_por_chave = {r["chave"]: r for r in respostas}
+    pessoas = []
+    usadas = set()
+    for i, (curto, lista) in enumerate(sorted(por_curto.items(), key=lambda x: _norm(x[0])), start=1):
+        areas = {area_comp.get(a["componente"]) for a in lista}
+        chave = _casar_curto_resposta(curto, areas, respostas)
+        resp = resp_por_chave.get(chave)
+        usuario = _casar_usuario(resp["nome"] if resp else curto, resp["email"] if resp else "", usuarios) if (resp or len(curto.split()) > 1) else None
+        if chave:
+            usadas.add(chave)
+        comps_txt = sorted({a["componente"] for a in lista})
+        pessoas.append({"id": f"h{i}", "curto": curto, "resposta": chave, "usuario": usuario,
+                        "n_aulas": len(lista), "componentes": comps_txt})
+    for j, r in enumerate([r for r in respostas if r["chave"] not in usadas], start=1):
+        pessoas.append({"id": f"f{j}", "curto": None, "resposta": r["chave"], "usuario": _casar_usuario(r["nome"], r["email"], usuarios),
+                        "n_aulas": 0, "componentes": []})
+
+    _os.makedirs(PASTA_IMPORTACAO, exist_ok=True)
+    token = _uuid.uuid4().hex
+    with open(_os.path.join(PASTA_IMPORTACAO, f"{token}.json"), "w", encoding="utf-8") as fh:
+        _js.dump({"ano": ano, "respostas": respostas, "turmas": turmas, "aulas": aulas, "pessoas": pessoas}, fh, ensure_ascii=False)
+
+    def opts_resp(atual_ch):
+        o = '<option value="">— sem resposta no formulário —</option>'
+        for r in respostas:
+            o += f'<option value="{_e(r["chave"])}"{" selected" if r["chave"] == atual_ch else ""}>{_e(r["nome"])} ({_e(r["disciplina"])})</option>'
+        return o
+
+    def opts_user(atual_u, permite_ignorar):
+        o = ('<option value="">— não importar —</option>' if permite_ignorar else "")
+        o += f'<option value="novo"{" selected" if atual_u is None and not permite_ignorar else ""}>➕ criar usuário de ensaio (bloqueado)</option>'
+        for u in usuarios:
+            o += f'<option value="{u["id"]}"{" selected" if u["id"] == atual_u else ""}>{_e(u["nome"])} — {_e(u["email"])}</option>'
+        return o
+
+    linhas_h, linhas_f = "", ""
+    n_sem_resp = n_novos = 0
+    for p_ in pessoas:
+        if p_["curto"]:
+            alerta = "" if p_["resposta"] else ' style="background:#fffbeb;"'
+            n_sem_resp += 0 if p_["resposta"] else 1
+            n_novos += 1 if p_["usuario"] is None else 0
+            linhas_h += f"""<tr{alerta} style="border-top:1px solid var(--border);">
+                <td style="padding:6px 8px; font-weight:700;">{_e(p_["curto"])}</td>
+                <td style="padding:6px 8px; font-size:12px;">{p_["n_aulas"]} aulas · {_e(", ".join(p_["componentes"]))}</td>
+                <td style="padding:6px 8px;"><select name="resp_{p_["id"]}" style="font-size:12px; max-width:300px;">{opts_resp(p_["resposta"])}</select></td>
+                <td style="padding:6px 8px;"><select name="user_{p_["id"]}" style="font-size:12px; max-width:300px;">{opts_user(p_["usuario"], False)}</select></td>
+            </tr>"""
+        else:
+            r = resp_por_chave[p_["resposta"]]
+            linhas_f += f"""<tr style="border-top:1px solid var(--border);">
+                <td style="padding:6px 8px;">{_e(r["nome"])} <span style="color:var(--text-muted); font-size:11px;">({_e(r["disciplina"])})</span></td>
+                <td style="padding:6px 8px;"><select name="user_{p_["id"]}" style="font-size:12px; max-width:320px;">{opts_user(p_["usuario"], True)}</select></td>
+            </tr>"""
+    n_m = sum(1 for t in turmas if t["turno"] == "m")
+    aviso_desc = ""
+    if desconhecidos:
+        aviso_desc = (f'<div class="hd-avisos" style="display:block;">⚠️ Componentes não reconhecidos (essas aulas serão ignoradas): '
+                      f'{_e(", ".join(sorted(set(desconhecidos))))}</div>')
+    conteudo = _CSS_FORM + _cabecalho_config(f"📥 Prévia da importação — ano {ano}", "Confira a correspondência dos nomes e confirme. Nada foi gravado ainda.", "importar", ano) + f"""
+        <div class="card" style="padding:14px 16px; margin-bottom:14px; font-size:14px;">
+            <strong>{len(turmas)}</strong> turmas ({n_m} de manhã, {len(turmas) - n_m} à tarde) · <strong>{len(aulas)}</strong> aulas no horário ·
+            <strong>{len(respostas)}</strong> respostas no formulário (uma por pessoa, a mais recente) ·
+            <strong>{len(por_curto)}</strong> professores no horário, {n_sem_resp} sem resposta reconhecida · {n_novos} sem usuário no sistema
+        </div>
+        {aviso_desc}
+        <form method="post" action="/horarios/importar/confirmar">
+            <input type="hidden" name="token" value="{token}">
+            <div class="card" style="padding:14px 16px; margin-bottom:14px;">
+                <h2 style="margin:0 0 4px; font-size:15px;">Professores do horário</h2>
+                <p style="margin:0 0 8px; font-size:12px; color:var(--text-muted);">O Urânia usa apelidos. Confira a resposta do formulário e o usuário do sistema de cada um.
+                Linhas em amarelo: não achei a resposta — escolha na lista, ou deixe sem resposta (o gerador considera o professor disponível em tudo).
+                Quem não tem usuário vira <strong>usuário de ensaio bloqueado</strong> (não faz login; é apagado junto com o ensaio).</p>
+                <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
+                    <thead><tr style="background:var(--bg-subtle);"><th style="padding:6px 8px; text-align:left;">No horário</th><th style="padding:6px 8px; text-align:left;">Aulas</th>
+                    <th style="padding:6px 8px; text-align:left;">Resposta no formulário</th><th style="padding:6px 8px; text-align:left;">Usuário no sistema</th></tr></thead>
+                    <tbody>{linhas_h or '<tr><td colspan="4" style="padding:10px;">Nenhum horário enviado.</td></tr>'}</tbody></table></div>
+            </div>
+            <details class="card" style="padding:14px 16px; margin-bottom:14px;">
+                <summary style="cursor:pointer; font-weight:600;">Responderam o formulário mas não aparecem no horário ({len(linhas_f) and linhas_f.count("<tr")})</summary>
+                <p style="font-size:12px; color:var(--text-muted);">Só entram na coleta do ensaio se você escolher um usuário.</p>
+                <table style="width:100%; border-collapse:collapse; font-size:13px;"><tbody>{linhas_f}</tbody></table>
+            </details>
+            <label style="display:flex; gap:8px; align-items:center; font-size:13px; margin-bottom:12px;">
+                <input type="checkbox" name="importar_versao" value="1" checked style="width:auto;">
+                Guardar também o horário do Urânia como uma versão — para comparar com o que o gerador fizer</label>
+            <div class="page-actions"><button type="submit" class="btn btn-primary">✅ Confirmar importação</button>
+                <a href="/horarios/importar" class="btn">Cancelar</a></div>
+        </form>"""
+    return _pagina(request, "Prévia da importação", conteudo, "horarios-config")
+
+
+def _indicadores_de_aulas(aulas: list, disp: dict) -> tuple:
+    """Indicadores de um horário pronto (ex.: o do Urânia), no mesmo padrão do gerador."""
+    ocup = {}
+    for a in aulas:
+        if a.get("professor_id"):
+            ocup.setdefault((a["professor_id"], a["turno"], a["dia"]), set()).add(a["bloco"])
+    janelas = sum(1 for bs in ocup.values() if 1 in bs and 3 in bs and 2 not in bs)
+    fora, n_pend = {}, 0
+    for a in aulas:
+        pid = a.get("professor_id")
+        if pid in disp and (DIAS_SEMANA[a["dia"]], a["turno"]) not in disp[pid]:
+            fora[(pid, a["dia"], a["turno"])] = 1
+            n_pend += 1
+    ind = {"janelas": janelas, "turnos_usados": len(ocup), "fora_disponibilidade": len(fora), "pendencias": n_pend, "sugestoes": 0,
+           **_indicador_dia_inteiro(aulas)}
+    return ind, [{"professor_id": p, "dia": d, "turno": k} for (p, d, k) in fora]
+
+
+@router.post("/horarios/importar/confirmar")
+async def importar_confirmar(request: Request):
+    import json as _js
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return negado
+    form = await request.form()
+    token = "".join(c for c in str(form.get("token") or "") if c in "0123456789abcdef")
+    caminho = _os.path.join(PASTA_IMPORTACAO, f"{token}.json")
+    if not token or not _os.path.exists(caminho):
+        return RedirectResponse("/horarios/importar?erro=" + _url("A prévia expirou. Envie os arquivos de novo."), status_code=303)
+    with open(caminho, encoding="utf-8") as fh:
+        dados = _js.load(fh)
+    ano = dados["ano"]
+    resp_por_chave = {r["chave"]: r for r in dados["respostas"]}
+    conn = _db()
+    atual = _coleta_atual(conn)
+    if atual and ano == atual["ano_letivo"]:
+        conn.close()
+        return RedirectResponse("/horarios/importar?erro=" + _url("Não é possível importar ensaio no ano da coleta atual."), status_code=303)
+    validos = {r["id"] for r in conn.execute("SELECT id FROM professores").fetchall()}
+    _garantir_config(conn, ano)
+
+    # coleta do ensaio (já encerrada)
+    datas = sorted(r["ts"][:10] for r in dados["respostas"] if r.get("ts"))
+    conn.execute("INSERT OR IGNORE INTO horario_coletas (ano_letivo, data_inicio, data_fim, encerrada) VALUES (?, ?, ?, 1)",
+                 (ano, datas[0] if datas else f"{ano - 1}-11-01", datas[-1] if datas else f"{ano - 1}-11-15"))
+    coleta_id = conn.execute("SELECT id FROM horario_coletas WHERE ano_letivo = ?", (ano,)).fetchone()["id"]
+
+    criados = 0
+
+    def criar_usuario(nome):
+        nonlocal criados
+        criados += 1
+        slug = "".join(c for c in _norm(nome).replace(" ", ".") if c.isalnum() or c == ".")[:40] or "professor"
+        email = f"ensaio{ano}.{_uuid.uuid4().hex[:6]}.{slug}@ensaio.local"
+        cur = conn.execute("INSERT INTO professores (email, nome, is_admin, is_gestor, status, papel) VALUES (?, ?, 0, 0, 'bloqueado', 'docente')",
+                           (email, nome))
+        return cur.lastrowid
+
+    usuario_do_curto = {}
+    for p_ in dados["pessoas"]:
+        escolha_resp = form.get(f"resp_{p_['id']}") if p_["curto"] else p_["resposta"]
+        resp = resp_por_chave.get(escolha_resp or "")
+        escolha_user = str(form.get(f"user_{p_['id']}") or "")
+        if escolha_user == "":
+            continue                                   # "não importar"
+        if escolha_user == "novo":
+            pid = criar_usuario(resp["nome"] if resp else p_["curto"])
+            validos.add(pid)
+        elif escolha_user.isdigit() and int(escolha_user) in validos:
+            pid = int(escolha_user)
+        else:
+            continue
+        if p_["curto"]:
+            usuario_do_curto[p_["curto"]] = pid
+        if resp:
+            d = {"situacao": resp["situacao"] or "Matrícula", "disciplina": resp["disciplina"] or "", "dupla_interesse": resp["dupla"],
+                 "dupla_tempos": resp["tempos"] if resp["dupla"] else 0, "observacoes": resp["observacoes"]}
+            for c in CAMPOS_TURNO:
+                d[c] = resp.get(c, 0)
+            _salvar(conn, coleta_id, pid, d, atualizado_por=prof["id"])
+
+    # turmas e atribuições (professor mais frequente de cada componente na turma)
+    for t in dados["turmas"]:
+        if t["ano"] in (6, 7, 8, 9):
+            conn.execute("INSERT OR IGNORE INTO horario_turmas (ano_letivo, nome, ano_escolaridade, turno) VALUES (?, ?, ?, ?)",
+                         (ano, t["nome"], t["ano"], t["turno"]))
+    tid = {r["nome"]: r["id"] for r in conn.execute("SELECT id, nome FROM horario_turmas WHERE ano_letivo = ?", (ano,)).fetchall()}
+    cid = {c["nome"]: c["id"] for c in _componentes(conn, ano)}
+    contagem = {}
+    for a in dados["aulas"]:
+        pid = usuario_do_curto.get(a["prof"])
+        if pid and a["turma"] in tid and a["componente"] in cid:
+            chave = (tid[a["turma"]], cid[a["componente"]])
+            contagem.setdefault(chave, {}).setdefault(pid, 0)
+            contagem[chave][pid] += 1
+    for (t_id, c_id), votos in contagem.items():
+        pid = max(votos, key=votos.get)
+        conn.execute("""INSERT INTO horario_atribuicoes (turma_id, componente_id, professor_id) VALUES (?, ?, ?)
+                        ON CONFLICT(turma_id, componente_id) DO UPDATE SET professor_id = excluded.professor_id""", (t_id, c_id, pid))
+
+    # o horário do Urânia como versão, para comparar
+    if form.get("importar_versao") and dados["aulas"]:
+        nomes = {r["id"]: r["nome"] for r in conn.execute("SELECT id, nome FROM professores").fetchall()}
+        aulas_v = [{"turma_id": tid.get(a["turma"]), "componente_id": cid.get(a["componente"]), "professor_id": usuario_do_curto.get(a["prof"]),
+                    "turno": a["turno"], "dia": a["dia"], "bloco": a["bloco"], "turma_nome": a["turma"], "componente_nome": a["componente"],
+                    "professor_nome": nomes.get(usuario_do_curto.get(a["prof"]), a["prof"])}
+                   for a in dados["aulas"] if a["turma"] in tid and a["componente"] in cid]
+        disp = {r["professor_id"]: {(d, k) for d in DIAS_SEMANA for k in ("m", "t") if r[f"{d}_{k}"]}
+                for r in conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ?", (coleta_id,)).fetchall()}
+        ind, fora = _indicadores_de_aulas(aulas_v, disp)
+        fora = [dict(f, professor_nome=nomes.get(f["professor_id"], "")) for f in fora]
+        ed_anos = {c["id"]: sorted(_anos_ed(c)) for c in _componentes(conn, ano) if _anos_ed(c)}
+        cur = conn.execute("""INSERT INTO horario_versoes (ano_letivo, criada_por, status, modo, resultado, tempo, indicadores, pares_ed, fora,
+                              ed_anos, sugestoes, turno, mensagem) VALUES (?, ?, 'pronta', 'importado', 'importado', 0, ?, '{}', ?, ?, '[]', 'mt', ?)""",
+                           (ano, prof["id"], _js.dumps(ind), _js.dumps(fora, ensure_ascii=False), _js.dumps(ed_anos), "Horário importado do Urânia"))
+        vid = cur.lastrowid
+        for a in aulas_v:
+            conn.execute("""INSERT INTO horario_aulas (versao_id, turma_id, componente_id, professor_id, turno, dia, bloco,
+                            turma_nome, componente_nome, professor_nome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         (vid, a["turma_id"], a["componente_id"], a["professor_id"], a["turno"], a["dia"], a["bloco"],
+                          a["turma_nome"], a["componente_nome"], a["professor_nome"]))
+    conn.commit()
+    conn.close()
+    try:
+        _os.remove(caminho)
+    except OSError:
+        pass
+    return RedirectResponse(f"/horarios/configuracao?ano={ano}&msg=importado", status_code=303)
+
+
+@router.post("/horarios/importar/apagar")
+async def importar_apagar(request: Request):
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return negado
+    form = await request.form()
+    try:
+        ano = int(form.get("ano") or 0)
+    except ValueError:
+        ano = 0
+    if str(form.get("confirmacao") or "").strip().upper() != "APAGAR":
+        return RedirectResponse("/horarios/importar?erro=" + _url("Para apagar, digite APAGAR no campo de confirmação."), status_code=303)
+    conn = _db()
+    atual = _coleta_atual(conn)
+    if not ano or (atual and ano == atual["ano_letivo"]):
+        conn.close()
+        return RedirectResponse("/horarios/importar?erro=" + _url("O ano da coleta atual não pode ser apagado por aqui."), status_code=303)
+    # Sem CASCADE nesta app: apaga cada tabela explicitamente, dos "filhos" para os "pais".
+    for (cid,) in conn.execute("SELECT id FROM horario_coletas WHERE ano_letivo = ?", (ano,)).fetchall():
+        conn.execute("DELETE FROM horario_disponibilidade WHERE coleta_id = ?", (cid,))
+        conn.execute("DELETE FROM horario_coleta_dispensas WHERE coleta_id = ?", (cid,))
+    conn.execute("DELETE FROM horario_coletas WHERE ano_letivo = ?", (ano,))
+    for (vid,) in conn.execute("SELECT id FROM horario_versoes WHERE ano_letivo = ?", (ano,)).fetchall():
+        conn.execute("DELETE FROM horario_aulas WHERE versao_id = ?", (vid,))
+    conn.execute("DELETE FROM horario_versoes WHERE ano_letivo = ?", (ano,))
+    for (tid,) in conn.execute("SELECT id FROM horario_turmas WHERE ano_letivo = ?", (ano,)).fetchall():
+        conn.execute("DELETE FROM horario_atribuicoes WHERE turma_id = ?", (tid,))
+    for tabela in ("horario_turmas", "horario_componentes", "horario_blocos", "horario_ed_professores", "horario_parametros", "horario_final"):
+        conn.execute(f"DELETE FROM {tabela} WHERE ano_letivo = ?", (ano,))
+    # usuários de ensaio deste ano (bloqueados, e-mail @ensaio.local) — só se não estiverem em uso em outro ano
+    for (pid,) in conn.execute("SELECT id FROM professores WHERE email LIKE ? AND COALESCE(status, '') = 'bloqueado'", (f"ensaio{ano}.%@ensaio.local",)).fetchall():
+        em_uso = conn.execute("""SELECT 1 FROM horario_disponibilidade WHERE professor_id = ? UNION SELECT 1 FROM horario_atribuicoes WHERE professor_id = ?
+                                 UNION SELECT 1 FROM horario_aulas WHERE professor_id = ? LIMIT 1""", (pid, pid, pid)).fetchone()
+        if not em_uso:
+            conn.execute("DELETE FROM professores WHERE id = ?", (pid,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/horarios/importar?msg=apagado", status_code=303)
+
 
 # ==========================================
 #  PEÇAS PARA O MAIN.PY (menu e tela inicial)
