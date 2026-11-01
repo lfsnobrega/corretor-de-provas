@@ -38,6 +38,7 @@ Lições do sistema aplicadas aqui (ver histórico do main.py):
 from __future__ import annotations
 
 import html
+import time as _time
 from datetime import datetime, date, timedelta, timezone
 from io import BytesIO
 from typing import Optional
@@ -202,6 +203,7 @@ def _criar_tabelas():
             fora TEXT,
             ed_anos TEXT,
             mensagem TEXT,
+            sugestoes TEXT,
             publicada INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS horario_aulas (
@@ -227,6 +229,10 @@ def _criar_tabelas():
             UNIQUE(ano_letivo, chave)
         );
     """)
+    # Colunas acrescentadas depois da primeira versão das tabelas (só adiciona se faltar).
+    colunas_versoes = {r["name"] for r in conn.execute("PRAGMA table_info(horario_versoes)").fetchall()}
+    if "sugestoes" not in colunas_versoes:
+        conn.execute("ALTER TABLE horario_versoes ADD COLUMN sugestoes TEXT")
     # Primeira coleta (2027): só cria se a tabela estiver vazia. INSERT OR IGNORE garante
     # que dois processos iniciando juntos não criem duas.
     total = conn.execute("SELECT COUNT(*) AS c FROM horario_coletas").fetchone()["c"]
@@ -2205,11 +2211,10 @@ NOME_DIA = dict(DIAS)
 
 # Pesos das multas (quanto maior, mais o gerador evita). Ajustáveis no futuro.
 PESOS_PADRAO = {
-    "fora_disponibilidade": 1000,   # só existe no modo flexível (diagnóstico)
     "janela": 10,                   # professor com bloco vago entre duas aulas no mesmo turno
     "turno_usado": 4,               # cada turno em que o professor vem à escola (incentiva turnos cheios)
-    "dias_seguidos": 2,             # mesmo componente da turma em dois dias seguidos
 }
+# Componente em dias consecutivos é normal na escola: não entra como multa (Felipe, 01/11/2026).
 
 
 def _ortools_disponivel() -> bool:
@@ -2233,13 +2238,16 @@ def _dados_geracao(conn, ano: int) -> dict:
 
 
 def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = False, pesos: Optional[dict] = None,
-                      sementes: int = 0) -> dict:
-    """Monta e resolve o modelo. Devolve um dicionário com status, aulas e indicadores."""
+                      sementes: int = 0, progresso=None, tempo_sugestoes: int = 45) -> dict:
+    """Monta e resolve o modelo. Devolve um dicionário com status, aulas, indicadores e — no
+    modo flexível — as pendências (aulas fora da disponibilidade) e as sugestões para cada uma.
+    `progresso`, se informado, é chamado durante a busca com os números ao vivo."""
     from ortools.sat.python import cp_model
     p = dict(PESOS_PADRAO, **(pesos or {}))
     comps, turmas, atrib, disp, ed = dados["comps"], dados["turmas"], dados["atrib"], dados["disp"], dados["ed"]
     D, B = range(len(DIAS_SEMANA)), range(BLOCOS_POR_TURNO)
     m = cp_model.CpModel()
+    avisar = progresso or (lambda info: None)
 
     def disponivel(pid, d, k):
         # Professor sem resposta na coleta: tratado como disponível (a viabilidade já avisa).
@@ -2254,8 +2262,8 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                 for b in B:
                     x[tid, cid, d, b] = m.NewBoolVar(f"x_{tid}_{cid}_{d}_{b}")
 
-    multas = []
-    fora = []          # (variável, tid, cid, pid, d) — aulas fora da disponibilidade (modo flexível)
+    # Pendências possíveis (só no modo flexível): (professor, dia, turno) -> [(variável, tid, cid, bloco)]
+    grupos_fora = {}
 
     for tid, t in turmas.items():
         cids = [cid for cid in comps if comps[cid]["blocos"] > 0]
@@ -2282,7 +2290,7 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                 if not disponivel(pid, d, k):
                     for b in B:
                         if flexivel:
-                            fora.append((x[tid, cid, d, b], tid, cid, pid, d))
+                            grupos_fora.setdefault((pid, d, k), []).append((x[tid, cid, d, b], tid, cid, b + 1))
                         else:
                             m.Add(x[tid, cid, d, b] == 0)
     for vs in ocup.values():
@@ -2313,7 +2321,7 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                                 if flexivel:
                                     v = m.NewBoolVar(f"edfora_{tid}_{d}_{b}")
                                     m.Add(ed_occ[tid, d, b] <= v)
-                                    fora.append((v, tid, None, pid_ed, d))
+                                    grupos_fora.setdefault((pid_ed, d, k), []).append((v, tid, None, b + 1))
                                 else:
                                     m.Add(ed_occ[tid, d, b] == 0)
         z = [m.NewBoolVar(f"par_{k}_{j}") for j in range(len(PARES_ED))]
@@ -2329,7 +2337,8 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
                             m.Add(sum(termos) <= 1).OnlyEnforceIf(z[j])
 
     # ----- multas (regras desejáveis) -----
-    n_janelas, n_turnos, n_seguidos = [], [], []
+    # (Componente em dias seguidos NÃO é multado: na escola isso é normal — Felipe, 01/11/2026.)
+    n_janelas, n_turnos = [], []
     for (pid, k, d, b0), _ in list(ocup.items()):
         if b0 != 0:
             continue
@@ -2342,16 +2351,7 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
         janela = m.NewBoolVar(f"j_{pid}_{k}_{d}")
         m.Add(janela >= o[0] + o[2] - o[1] - 1)     # aula no 1º e no 3º bloco, vago no 2º
         n_janelas.append(janela)
-    for tid in turmas:
-        for cid, c in comps.items():
-            if c["blocos"] < 2:
-                continue
-            dia = [sum(x[tid, cid, d, b] for b in B) for d in D]
-            for d in range(len(DIAS_SEMANA) - 1):
-                s = m.NewBoolVar(f"s_{tid}_{cid}_{d}")
-                m.Add(s >= dia[d] + dia[d + 1] - 1)
-                n_seguidos.append(s)
-    qualidade = (p["janela"] * sum(n_janelas) + p["turno_usado"] * sum(n_turnos) + p["dias_seguidos"] * sum(n_seguidos))
+    qualidade = p["janela"] * sum(n_janelas) + p["turno_usado"] * sum(n_turnos)
 
     def novo_solver(segundos):
         sv = cp_model.CpSolver()
@@ -2360,25 +2360,62 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
         sv.parameters.random_seed = sementes
         return sv
 
+    todas_fora = [v for g in grupos_fora.values() for v, *_ in g]
+    soma_fora = sum(todas_fora) if todas_fora else 0
+    # "Este turno do professor está sendo usado fora da disponibilidade?" — um sim/não por turno,
+    # usado na análise das sugestões (para testar uma alternativa de cada vez).
+    ativa_grupo = {}
+    for chave, itens in grupos_fora.items():
+        a = m.NewBoolVar(f"g_{chave[0]}_{chave[1]}_{chave[2]}")
+        for v, *_ in itens:
+            m.Add(v <= a)
+        ativa_grupo[chave] = a
+
+    def grupos_ativos(valor):
+        """Pendências de uma solução: {(pid, d, k): [(tid, cid, bloco), ...]}"""
+        ativos = {}
+        for chave, itens in grupos_fora.items():
+            for v, tid, cid, b in itens:
+                if valor(v):
+                    ativos.setdefault(chave, []).append((tid, cid, b))
+        return ativos
+
+    class _AoVivo(cp_model.CpSolverSolutionCallback):
+        def __init__(self, etapa):
+            super().__init__()
+            self.etapa = etapa
+
+        def on_solution_callback(self):
+            try:
+                ativos = grupos_ativos(self.Value)
+                avisar({"etapa": self.etapa, "pendencias": sum(len(v) for v in ativos.values()),
+                        "pendencias_lista": _descrever_pendencias(ativos, dados), "sugestoes": len(ativos)})
+            except Exception:
+                pass
+
     tempo_total = 0.0
-    if fora:
+    if todas_fora:
         # Modo flexível em duas etapas: 1ª) o MENOR número possível de aulas fora da
         # disponibilidade; 2ª) com esse número travado, o horário de melhor qualidade.
-        soma_fora = sum(v for v, *_ in fora)
         m.Minimize(soma_fora)
         sv1 = novo_solver(limite_segundos * 0.4)
-        st1 = sv1.Solve(m)
+        st1 = sv1.Solve(m, _AoVivo("Reduzindo as pendências…"))
         tempo_total += sv1.WallTime()
+        mq = m.clone()
+        dica = {}
         if st1 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            m.Add(soma_fora <= int(round(sv1.ObjectiveValue())))
+            minimo = int(round(sv1.ObjectiveValue()))
+            mq.Add(soma_fora <= minimo)
+            dica = {v.Index(): sv1.Value(v) for v in x.values()}
             for v in x.values():
-                m.AddHint(v, sv1.Value(v))
-        m.Minimize(qualidade)
+                mq.AddHint(v, dica[v.Index()])
+        mq.Minimize(qualidade)
         solver = novo_solver(limite_segundos - tempo_total)
+        status = solver.Solve(mq, _AoVivo("Melhorando a qualidade do horário…"))
     else:
         m.Minimize(qualidade)
         solver = novo_solver(limite_segundos)
-    status = solver.Solve(m)
+        status = solver.Solve(m)
     tempo_total += solver.WallTime()
     nome_status = {cp_model.OPTIMAL: "otimo", cp_model.FEASIBLE: "viavel", cp_model.INFEASIBLE: "impossivel",
                    cp_model.MODEL_INVALID: "invalido"}.get(status, "sem_solucao")
@@ -2395,23 +2432,88 @@ def _resolver_horario(dados: dict, limite_segundos: int = 60, flexivel: bool = F
     for k, z in escolha_par.items():
         j = next(i for i, v in enumerate(z) if solver.Value(v))
         pares[k] = [list(PARES_ED[j][0]), list(PARES_ED[j][1])]
-    fora_lista = []
-    vistos = set()
-    for v, tid, cid, pid, d in fora:
-        if solver.Value(v):
-            chave = (pid, d, turmas[tid]["turno"])
-            if chave not in vistos:
-                vistos.add(chave)
-                fora_lista.append({"professor_id": pid, "dia": d, "turno": turmas[tid]["turno"]})
+    ativos = grupos_ativos(solver.Value)
+    fora_lista = [{"professor_id": pid, "dia": d, "turno": k} for (pid, d, k) in ativos]
+
+    # ----- sugestões para cada pendência (estilo Urânia) -----
+    # Para cada pendência, pergunta: "se este professor NÃO puder mesmo neste turno, existe
+    # UM outro turno (de qualquer professor) que, liberado sozinho, resolve — mantendo as
+    # demais pendências como estão?". Cada resposta é uma alternativa independente:
+    #   mesmo total de pendências → "ajudará muito"; com mais aulas fora → "ajudará um pouco".
+    sugestoes = []
+    if ativos:
+        total = sum(len(v) for v in ativos.values())
+        chaves = sorted(ativos, key=lambda c: (dados["nomes"].get(c[0], ""), c[1], c[2]))
+        prazo = _time.time() + tempo_sugestoes
+        dica = {v.Index(): solver.Value(v) for v in x.values()}
+        for i, chave in enumerate(chaves, start=1):
+            pid, d, k = chave
+            item = {"n": i, "professor_id": pid, "professor_nome": dados["nomes"].get(pid, "?"), "dia": d, "turno": k,
+                    "blocos": sorted({b for _, _, b in ativos[chave]}),
+                    "aulas": _rotulos_aulas(ativos[chave], dados), "sem_resposta": pid not in disp,
+                    "muito": [], "pouco": [], "analisada": False}
+            avisar({"etapa": f"Analisando sugestões ({i} de {len(chaves)})…", "pendencias": total,
+                    "pendencias_lista": _descrever_pendencias(ativos, dados), "sugestoes": len(chaves)})
+            ja_testadas = []
+            for _tentativa in range(3):            # até 3 alternativas por pendência
+                restante = prazo - _time.time()
+                if restante < 1.0:
+                    break
+                mt = m.clone()
+                for v, *_ in grupos_fora[chave]:
+                    mt.Add(v == 0)
+                novas = [ativa_grupo[c] for c in grupos_fora if c not in ativos]
+                if novas:
+                    mt.Add(sum(novas) <= 1)          # só UM turno novo liberado
+                for c in ja_testadas:
+                    mt.Add(ativa_grupo[c] == 0)
+                mt.Minimize(soma_fora)
+                for v in x.values():
+                    mt.AddHint(v, dica[v.Index()])
+                svt = novo_solver(min(3.0, max(1.0, restante / max(1, len(chaves) - i + 1))))
+                stt = svt.Solve(mt)
+                if stt not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    break
+                novos = grupos_ativos(svt.Value)
+                alternativa = next((c for c in novos if c not in ativos), None)
+                if alternativa is None:
+                    break
+                novo_total = int(round(svt.ObjectiveValue()))
+                destino = "muito" if novo_total <= total else "pouco"
+                pa, da, ka = alternativa
+                item[destino].append({"professor_id": pa, "professor_nome": dados["nomes"].get(pa, "?"), "dia": da, "turno": ka,
+                                      "blocos": sorted({b for _, _, b in novos[alternativa]})})
+                ja_testadas.append(alternativa)
+            item["analisada"] = True
+            sugestoes.append(item)
+
     saida.update({
-        "aulas": aulas, "pares_ed": pares, "fora": fora_lista,
+        "aulas": aulas, "pares_ed": pares, "fora": fora_lista, "sugestoes": sugestoes,
         "indicadores": {"janelas": int(sum(solver.Value(v) for v in n_janelas)),
                         "turnos_usados": int(sum(solver.Value(v) for v in n_turnos)),
-                        "dias_seguidos": int(sum(solver.Value(v) for v in n_seguidos)),
-                        "fora_disponibilidade": len(fora_lista)},
+                        "fora_disponibilidade": len(fora_lista),
+                        "pendencias": sum(len(v) for v in ativos.values()),
+                        "sugestoes": sum(1 + len(s["muito"]) + len(s["pouco"]) for s in sugestoes)},
         "objetivo": int(solver.ObjectiveValue()),
     })
     return saida
+
+
+def _rotulos_aulas(itens, dados) -> list:
+    """[(tid, cid, bloco)] -> ['Ciências 703', ...] (cid None = Educação Digital)."""
+    rot = []
+    for tid, cid, _ in itens:
+        nome = dados["comps"][cid]["nome"] if cid in dados["comps"] else "Educação Digital"
+        txt = f'{nome} {dados["turmas"][tid]["nome"]}'
+        if txt not in rot:
+            rot.append(txt)
+    return rot
+
+
+def _descrever_pendencias(ativos, dados) -> list:
+    return [{"professor_nome": dados["nomes"].get(pid, "?"), "dia": d, "turno": k,
+             "blocos": sorted({b for _, _, b in itens}), "aulas": _rotulos_aulas(itens, dados)}
+            for (pid, d, k), itens in sorted(ativos.items(), key=lambda c: (dados["nomes"].get(c[0][0], ""), c[0][1]))]
 
 
 # ---------- versões geradas: execução em segundo plano ----------
@@ -2464,9 +2566,15 @@ def _executar_geracao(versao_id: int, ano: int, limite: int):
             _GERACOES[versao_id] = {"inicio": _time.time(), "limite": limite, "etapa": "Procurando um horário que respeite toda a disponibilidade…"}
             r = _resolver_horario(dados, limite_segundos=limite, flexivel=False)
             if r["status"] not in ("otimo", "viavel"):
-                _GERACOES[versao_id] = {"inicio": _time.time(), "limite": limite,
+                _GERACOES[versao_id] = {"inicio": _time.time(), "limite": limite, "flexivel": True,
                                         "etapa": "Não existe horário dentro da disponibilidade informada. Procurando o horário com o menor número de aulas fora dela…"}
-                r = _resolver_horario(dados, limite_segundos=limite, flexivel=True)
+
+                def ao_vivo(info, _vid=versao_id):
+                    estado = _GERACOES.get(_vid)
+                    if estado is not None:
+                        estado.update(info)
+                r = _resolver_horario(dados, limite_segundos=limite, flexivel=True, progresso=ao_vivo,
+                                      tempo_sugestoes=max(15, min(60, limite // 2)))
             if r["status"] not in ("otimo", "viavel"):
                 conn.execute("UPDATE horario_versoes SET status = 'erro', resultado = ?, mensagem = ? WHERE id = ?",
                              (r["status"], "Nenhum horário encontrado, nem com a disponibilidade flexível. Confira a viabilidade "
@@ -2487,10 +2595,11 @@ def _executar_geracao(versao_id: int, ano: int, limite: int):
             com_aula = set(dados["atrib"].values()) | {p for p in dados["ed"].values() if p}
             r["indicadores"]["sem_resposta"] = sorted((dados["nomes"].get(p, "?") for p in com_aula if p not in dados["disp"]), key=str.lower)
             conn.execute("""UPDATE horario_versoes SET status = 'pronta', modo = ?, resultado = ?, tempo = ?, indicadores = ?,
-                            pares_ed = ?, fora = ?, ed_anos = ? WHERE id = ?""",
+                            pares_ed = ?, fora = ?, ed_anos = ?, sugestoes = ? WHERE id = ?""",
                          ("flexivel" if r["flexivel"] else "estrito", r["status"], r["tempo"], _json.dumps(r["indicadores"]),
                           _json.dumps(ed_info), _json.dumps(fora, ensure_ascii=False),
-                          _json.dumps({cid: sorted(c["ed_anos"]) for cid, c in comps.items() if c["ed_anos"]}), versao_id))
+                          _json.dumps({cid: sorted(c["ed_anos"]) for cid, c in comps.items() if c["ed_anos"]}),
+                          _json.dumps(r.get("sugestoes", []), ensure_ascii=False), versao_id))
             conn.commit()
         except Exception as erro:  # registra o erro na versão em vez de sumir em silêncio
             print(f"[horarios] geração {versao_id} falhou: {erro}")
@@ -2540,15 +2649,16 @@ def geracao_inicio(request: Request, ano: str = "", msg: str = ""):
                 {'<span style="font-size:12px; color:var(--text-muted);">Já existe uma geração em andamento — aguarde terminar.</span>' if ocupado else ""}
             </form>
             <p style="font-size:12px; color:var(--text-muted); margin:10px 0 0;">Mais tempo = horário melhor (menos janelas e turnos picados). Se a disponibilidade não
-            permitir nenhum horário, o gerador roda uma segunda busca de diagnóstico — o tempo pode dobrar.</p>"""
+            permitir nenhum horário, o gerador roda uma segunda busca de diagnóstico e depois analisa as sugestões para cada pendência —
+            o tempo total pode passar do dobro. Você acompanha as pendências ao vivo.</p>"""
 
     linhas = ""
     for v in versoes:
         ind = _json.loads(v["indicadores"]) if v["indicadores"] else {}
         if v["status"] == "pronta":
             situacao = ("✅ Dentro da disponibilidade" if v["modo"] == "estrito"
-                        else f'⚠️ {ind.get("fora_disponibilidade", "?")} turno(s) fora da disponibilidade')
-            qual = f'{ind.get("janelas", "—")} janelas · {ind.get("turnos_usados", "—")} turnos de presença · {ind.get("dias_seguidos", "—")} em dias seguidos'
+                        else f'⚠️ {ind.get("pendencias", ind.get("fora_disponibilidade", "?"))} pendência(s) · {ind.get("sugestoes", "?")} sugestões')
+            qual = f'{ind.get("janelas", "—")} janelas · {ind.get("turnos_usados", "—")} turnos de presença'
         elif v["status"] == "gerando":
             situacao, qual = "⏳ Gerando…", ""
         else:
@@ -2622,6 +2732,107 @@ def geracao_excluir(request: Request, versao_id: int):
     return RedirectResponse(f"/horarios/geracao?ano={v['ano_letivo'] if v else ''}&msg=excluida", status_code=303)
 
 
+
+# ---------- pendências e sugestões (apresentação no estilo do Urânia) ----------
+
+def _quando(dia: int, turno: str, blocos: list, horas: dict) -> str:
+    nome = NOME_DIA[DIAS_SEMANA[dia]] + "-feira"
+    bl = ", ".join(f"{b}º" + (f" ({horas[(turno, b)]})" if horas.get((turno, b)) else "") for b in blocos)
+    return f'{nome} à {"manhã" if turno == "m" else "tarde"}' + (f" — {bl} bloco" + ("s" if len(blocos) > 1 else "") if blocos else "")
+
+
+def _html_sugestoes(sugestoes: list, horas: dict, ao_vivo: bool = False) -> str:
+    """Texto da caixa de sugestões. Cada pendência = aulas que só couberam num turno que o
+    professor marcou como indisponível."""
+    if not sugestoes:
+        return '<p>Nenhuma pendência. 🎉</p>'
+    partes = []
+    for s in sugestoes:
+        nome = _e(s["professor_nome"])
+        motivo = "não respondeu a coleta" if s.get("sem_resposta") else "está indisponível neste turno"
+        linhas = [f'<div class="hs-titulo">ANÁLISE DA PENDÊNCIA {s.get("n", "")}</div>',
+                  f'<div class="hs-pend">{_e(", ".join(s.get("aulas", [])))} · {nome} — só coube em {_e(_quando(s["dia"], s["turno"], s.get("blocos", []), horas))}.</div>',
+                  '<div class="hs-nivel">Ajudará muitíssimo na eliminação da pendência se....</div>',
+                  f'<div class="hs-item">• {nome} deixar disponível {_e(_quando(s["dia"], s["turno"], s.get("blocos", []), horas))} ({motivo})</div>']
+        if s.get("muito"):
+            linhas.append('<div class="hs-nivel">Ajudará muito na eliminação da pendência se....</div>')
+            linhas += [f'<div class="hs-item">• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
+                       f'(está indisponível neste turno)</div>' for a in s["muito"]]
+        if s.get("pouco"):
+            linhas.append('<div class="hs-nivel">Ajudará um pouco na eliminação da pendência se....</div>')
+            linhas += [f'<div class="hs-item">• {_e(a["professor_nome"])} deixar disponível {_e(_quando(a["dia"], a["turno"], a.get("blocos", []), horas))} '
+                       f'(está indisponível neste turno)</div>' for a in s["pouco"]]
+        if not ao_vivo:
+            linhas.append('<div class="hs-nivel">Se nenhuma sugestão acima for viável, verifique se é possível....</div>')
+            if any(a.startswith("Educação Digital") for a in s.get("aulas", [])):
+                linhas.append('<div class="hs-item">• Trocar o professor de Educação Digital deste turno, ou rever a disponibilidade dele</div>')
+            else:
+                for a in s.get("aulas", [])[:3]:
+                    linhas.append(f'<div class="hs-item">• Atribuir {_e(a)} a outro professor em “Quem dá cada aula”</div>')
+            linhas.append(f'<div class="hs-item">• Conferir as observações de {nome} na coleta (pode haver turno parcial combinado)</div>')
+            if s.get("analisada") and not s.get("muito") and not s.get("pouco"):
+                linhas.append('<div class="hs-obs">O gerador não encontrou outro turno que resolva esta pendência sem criar outras.</div>')
+        partes.append('<div class="hs-bloco">' + "".join(linhas) + "</div>")
+    return "".join(partes)
+
+
+_CSS_SUGESTOES = """
+<style>
+.hs-painel { display:flex; flex-wrap:wrap; gap:28px; align-items:center; justify-content:center; padding:18px; }
+.hs-cont { text-align:center; cursor:pointer; background:none; border:none; font-family:inherit; color:inherit; padding:4px 10px; border-radius:8px; }
+.hs-cont:hover { background: var(--bg-subtle, #f1f5f9); }
+.hs-cont b { display:block; font-size:13px; text-transform:uppercase; letter-spacing:.5px; color:var(--text-muted); }
+.hs-cont span { font-family: ui-monospace, Menlo, Consolas, monospace; font-size:34px; font-weight:700; }
+.hs-roda { width:56px; height:56px; border-radius:50%; position:relative; overflow:hidden; animation: hs-gira 1.6s linear infinite; }
+.hs-roda i { position:absolute; width:50%; height:50%; }
+.hs-roda i:nth-child(1) { left:0; top:0; background:#b5cf3c; } .hs-roda i:nth-child(2) { right:0; top:0; background:#4c9a48; }
+.hs-roda i:nth-child(3) { left:0; bottom:0; background:#7cc24a; } .hs-roda i:nth-child(4) { right:0; bottom:0; background:#e5e7eb; }
+.hs-roda.parada { animation:none; }
+@keyframes hs-gira { to { transform: rotate(360deg); } }
+dialog.hs-caixa { width:min(920px, 94vw); max-height:86vh; border:none; border-radius:10px; padding:0; box-shadow:0 20px 60px rgba(0,0,0,.35); }
+dialog.hs-caixa::backdrop { background: rgba(15,23,42,.45); }
+.hs-cab { background:#16a34a; color:white; padding:12px 18px; font-weight:700; font-size:15px; display:flex; justify-content:space-between; align-items:center; position:sticky; top:0; }
+.hs-cab button { background:white; color:#166534; border:none; border-radius:6px; padding:4px 12px; font-weight:700; cursor:pointer; }
+.hs-corpo { padding:14px 22px 20px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:13px; line-height:1.55; color:#0f172a; background:#fafafa; }
+.hs-bloco { margin-bottom:18px; padding-bottom:12px; border-bottom:1px dashed #cbd5e1; }
+.hs-titulo { display:inline-block; border:1px solid #64748b; padding:2px 14px; margin:6px 0 8px; font-weight:700; }
+.hs-pend { margin-bottom:6px; } .hs-nivel { margin-top:8px; font-weight:700; } .hs-item { padding-left:12px; } .hs-obs { margin-top:6px; color:#64748b; }
+</style>
+"""
+
+
+def _caixa_sugestoes_html(titulo: str, conteudo_html: str) -> str:
+    return f"""
+    <dialog id="hs-caixa" class="hs-caixa">
+        <div class="hs-cab"><span>{_e(titulo)}</span><button type="button" onclick="document.getElementById('hs-caixa').close()">Fechar ✕</button></div>
+        <div class="hs-corpo" id="hs-corpo">{conteudo_html}</div>
+    </dialog>"""
+
+
+@router.get("/horarios/geracao/versao/{versao_id}/status")
+def geracao_status(request: Request, versao_id: int):
+    """Números ao vivo para a tela de progresso (consultado a cada 2 segundos)."""
+    from fastapi.responses import JSONResponse
+    prof, negado = _exige_gestao(request)
+    if negado:
+        return JSONResponse({"erro": "acesso"}, status_code=403)
+    conn = _db()
+    v = conn.execute("SELECT status, ano_letivo, limite_segundos FROM horario_versoes WHERE id = ?", (versao_id,)).fetchone()
+    horas = _horas_blocos(conn, v["ano_letivo"]) if v else {}
+    conn.close()
+    if not v:
+        return JSONResponse({"status": "inexistente"})
+    info = dict(_GERACOES.get(versao_id, {}))
+    lista = info.get("pendencias_lista") or []
+    sugest = [dict(x, n=i, muito=[], pouco=[]) for i, x in enumerate(lista, start=1)]
+    return JSONResponse({
+        "status": v["status"], "etapa": info.get("etapa", ""),
+        "decorrido": int(_time.time() - info.get("inicio", _time.time())), "limite": info.get("limite", v["limite_segundos"] or 0),
+        "flexivel": bool(info.get("flexivel")), "pendencias": info.get("pendencias"), "sugestoes": info.get("sugestoes"),
+        "html": _html_sugestoes(sugest, horas, ao_vivo=True) if sugest else "",
+    })
+
+
 # ---------- tela: ver uma versão ----------
 
 _CSS_GRADE = """
@@ -2671,19 +2882,40 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
 
     if v["status"] == "gerando":
         conn.close()
-        info = _GERACOES.get(versao_id, {})
-        decorrido = int(_time.time() - info.get("inicio", _time.time()))
-        limite = info.get("limite", v["limite_segundos"] or 120)
-        pct = min(99, int(100 * decorrido / max(1, limite)))
         conteudo = _cabecalho_config(f"⏳ Gerando o horário (versão #{versao_id})", "Pode sair desta página: a geração continua e a versão aparece na lista quando terminar.",
-                                     "geracao", ano_i) + f"""
-            <div class="card" style="padding:18px;">
-                <div style="font-size:15px; margin-bottom:8px;">{_e(info.get("etapa", "Gerando…"))}</div>
-                <div style="height:12px; background:var(--bg-subtle,#e2e8f0); border-radius:6px; overflow:hidden;">
-                    <div style="height:100%; width:{pct}%; background:#0f766e; transition:width 1s;"></div></div>
-                <div style="font-size:12px; color:var(--text-muted); margin-top:6px;">{decorrido}s de até {limite}s nesta etapa · a página atualiza sozinha</div>
+                                     "geracao", ano_i) + _CSS_SUGESTOES + f"""
+            <div class="card" style="padding:18px; text-align:center;">
+                <div class="hs-painel">
+                    <button type="button" class="hs-cont" onclick="hsAbrir()" title="Clique para ver as pendências">
+                        <b>Pendências</b><span id="hs-pend">--</span></button>
+                    <div class="hs-roda" id="hs-roda"><i></i><i></i><i></i><i></i></div>
+                    <button type="button" class="hs-cont" onclick="hsAbrir()" title="Clique para ver as sugestões">
+                        <b>Sugestões</b><span id="hs-sug">--</span></button>
+                </div>
+                <div id="hs-etapa" style="font-size:14px; margin:4px 0 10px;">Preparando…</div>
+                <div style="height:10px; background:var(--bg-subtle,#e2e8f0); border-radius:6px; overflow:hidden; max-width:520px; margin:0 auto;">
+                    <div id="hs-barra" style="height:100%; width:0%; background:#16a34a; transition:width 1s;"></div></div>
+                <div id="hs-tempo" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
+                <button type="button" class="btn" style="margin-top:12px;" onclick="hsAbrir()">🔍 Ver pendências e sugestões</button>
             </div>
-            <script>setTimeout(function () {{ location.reload(); }}, 3000);</script>"""
+            {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", '<p>Ainda não há pendências: o gerador está procurando um horário que respeite toda a disponibilidade.</p>')}
+            <script>
+            function hsAbrir() {{ var d = document.getElementById('hs-caixa'); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); }}
+            function hsPad(n) {{ return (n === null || n === undefined) ? '--' : String(n).padStart(2, '0'); }}
+            function hsAtualiza() {{
+              fetch('/horarios/geracao/versao/{versao_id}/status', {{credentials: 'same-origin'}}).then(function (r) {{ return r.json(); }}).then(function (j) {{
+                if (j.status !== 'gerando') {{ location.reload(); return; }}
+                document.getElementById('hs-etapa').textContent = j.etapa || 'Gerando…';
+                document.getElementById('hs-pend').textContent = j.flexivel ? hsPad(j.pendencias) : '00';
+                document.getElementById('hs-sug').textContent = j.flexivel ? hsPad(j.sugestoes) : '00';
+                var pct = Math.min(99, Math.round(100 * j.decorrido / Math.max(1, j.limite)));
+                document.getElementById('hs-barra').style.width = pct + '%';
+                document.getElementById('hs-tempo').textContent = j.decorrido + 's de até ' + j.limite + 's nesta etapa';
+                if (j.html) document.getElementById('hs-corpo').innerHTML = j.html;
+              }}).catch(function () {{}}).finally(function () {{ setTimeout(hsAtualiza, 2000); }});
+            }}
+            hsAtualiza();
+            </script>"""
         return _pagina(request, "Gerando horário", conteudo, "horarios-geracao")
 
     if v["status"] == "erro":
@@ -2717,23 +2949,33 @@ def geracao_versao(request: Request, versao_id: int, ver: str = "turmas"):
     cards = (card("✅" if v["modo"] == "estrito" else n_fora, "dentro da disponibilidade" if v["modo"] == "estrito" else "turnos fora da disponibilidade",
                   "#16a34a" if v["modo"] == "estrito" else "#b91c1c")
              + card(ind.get("janelas", 0), "janelas de professor")
-             + card(ind.get("turnos_usados", 0), "turnos de presença (somando todos os professores)")
-             + card(ind.get("dias_seguidos", 0), "componentes em dias seguidos"))
+             + card(ind.get("turnos_usados", 0), "turnos de presença (somando todos os professores)"))
     pares_txt = " · ".join(
         f'{NOME_TURNO[k]}: semana 1 {"+".join(str(a) + "º" for a in info["pares"][0])}, semana 2 {"+".join(str(a) + "º" for a in info["pares"][1])}'
         for k, info in sorted(ed_info.items()))
     bloco_fora = ""
+    sugestoes = _json.loads(v["sugestoes"] or "[]") if "sugestoes" in v.keys() else []
     if fora:
-        itens = "".join(f'<li><strong>{_e(f["professor_nome"])}</strong> — {NOME_DIA[DIAS_SEMANA[f["dia"]]]} à {"manhã" if f["turno"] == "m" else "tarde"}</li>'
-                        for f in sorted(fora, key=lambda f: (f["professor_nome"], f["dia"], f["turno"])))
-        bloco_fora = f"""
-            <div class="hd-avisos" style="display:block; margin-bottom:14px;">
-                <strong>⚠️ Não existe horário dentro da disponibilidade informada.</strong> Este é o horário com o menor número de aulas fora dela
-                que o gerador encontrou. Para usá-lo, estes professores precisariam dar aula em turnos que não marcaram:
-                <ul style="margin:6px 0 4px 18px; padding:0;">{itens}</ul>
-                Confirme com eles e ajuste a disponibilidade no <a href="/horarios/disponibilidade/painel">painel da coleta</a> — depois gere de novo.
-                As aulas nesses turnos aparecem com contorno vermelho.
-            </div>"""
+        n_pend = ind.get("pendencias", len(fora))
+        n_sug = ind.get("sugestoes", len(sugestoes))
+        bloco_fora = _CSS_SUGESTOES + f"""
+            <div class="card" style="padding:6px 16px 14px; margin-bottom:14px; border:2px solid #fcd34d;">
+                <div class="hs-painel" style="padding:10px;">
+                    <button type="button" class="hs-cont" onclick="hsAbrir()"><b>Pendências</b><span>{n_pend:02d}</span></button>
+                    <div class="hs-roda parada"><i></i><i></i><i></i><i></i></div>
+                    <button type="button" class="hs-cont" onclick="hsAbrir()"><b>Sugestões</b><span>{n_sug:02d}</span></button>
+                </div>
+                <div style="font-size:13px; text-align:center;">
+                    <strong>⚠️ Não existe horário dentro da disponibilidade informada.</strong> Este é o horário com o menor número de pendências
+                    (aulas em turnos que o professor marcou como indisponível) — elas aparecem com contorno vermelho.<br>
+                    <button type="button" class="btn btn-primary" style="margin-top:10px;" onclick="hsAbrir()">🔍 Ver pendências e sugestões</button>
+                    <span style="font-size:12px; color:var(--text-muted); display:block; margin-top:6px;">Combine com os professores, ajuste no
+                    <a href="/horarios/disponibilidade/painel">painel da coleta</a> e gere de novo.</span>
+                </div>
+            </div>
+            {_caixa_sugestoes_html(f"Sugestões para pendências — Horário {ano_i} — versão #{versao_id}", _html_sugestoes(sugestoes, horas) if sugestoes else
+               "".join(f'<div class="hs-item">• {_e(f["professor_nome"])} deixar disponível {_e(_quando(f["dia"], f["turno"], [], horas))}</div>' for f in fora))}
+            <script>function hsAbrir() {{ var d = document.getElementById('hs-caixa'); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); }}</script>"""
 
     abas = "".join(
         f'<a href="/horarios/geracao/versao/{versao_id}?ver={k}" class="btn" style="margin:0 6px 6px 0; {"background:#0f766e; color:white; border-color:#0f766e;" if ver == k else ""}">{r}</a>'
