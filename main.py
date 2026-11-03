@@ -3163,23 +3163,27 @@ def _bloco_horario_afastamento_html(sel_id: str, tipo_atual: str = "", horario_i
     dos tipos) e 'saída + quantidade de horas a compensar' (só Compensação de horas)
     (06/09/2026, a pedido de Felipe)."""
     eh_compensacao = tipo_atual == "compensacao_horas"
+    eh_extra = tipo_atual == "hora_extra"
+    lbl_ini = "Início" if eh_extra else "Horário de saída"
+    lbl_fim = "Término" if eh_extra else "Horário de retorno"
     display_bloco = "block" if (tipo_atual in TIPOS_COM_HORARIO) else "none"
     display_fim = "none" if eh_compensacao else "block"
     display_comp = "block" if eh_compensacao else "none"
     tip_texto = (
         'Informe o horário de saída e quantas horas precisam ser compensadas.'
         if eh_compensacao else
-        'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).'
+        ('Informe o horário de início e de término da hora extra.' if eh_extra else
+         'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).')
     )
     tipos_js = json.dumps(list(TIPOS_COM_HORARIO))
     return f"""
     <div id="bloco-horario-{sel_id}" style="display:{display_bloco};">
         <div class="tip" id="tip-horario-{sel_id}" style="margin-bottom:10px;">{tip_texto}</div>
         <div style="display:flex; flex-wrap:wrap; gap:14px;">
-            <label style="flex:1 1 200px;">Horário de saída
+            <label style="flex:1 1 200px;"><span id="txt-horario-inicio-{sel_id}">{lbl_ini}</span>
                 <input type="time" name="horario_inicio" id="inp-horario-inicio-{sel_id}" value="{horario_inicio_atual}">
             </label>
-            <label id="lbl-horario-fim-{sel_id}" style="flex:1 1 200px; display:{display_fim};">Horário de retorno
+            <label id="lbl-horario-fim-{sel_id}" style="flex:1 1 200px; display:{display_fim};"><span id="txt-horario-fim-{sel_id}">{lbl_fim}</span>
                 <input type="time" name="horario_fim" id="inp-horario-fim-{sel_id}" value="{horario_fim_atual}">
             </label>
             <label id="lbl-horas-compensar-{sel_id}" style="flex:1 1 200px; display:{display_comp};">Quantidade de horas a compensar
@@ -3200,9 +3204,13 @@ def _bloco_horario_afastamento_html(sel_id: str, tipo_atual: str = "", horario_i
             document.getElementById('inp-horario-inicio-{sel_id}').required = precisa;
             document.getElementById('inp-horario-fim-{sel_id}').required = precisa && !ehComp;
             document.getElementById('inp-horas-compensar-{sel_id}').required = precisa && ehComp;
+            var ehExtra = valor === 'hora_extra';
+            document.getElementById('txt-horario-inicio-{sel_id}').textContent = ehExtra ? 'Início' : 'Horário de saída';
+            document.getElementById('txt-horario-fim-{sel_id}').textContent = ehExtra ? 'Término' : 'Horário de retorno';
             document.getElementById('tip-horario-{sel_id}').textContent = ehComp
                 ? 'Informe o horário de saída e quantas horas precisam ser compensadas.'
-                : 'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).';
+                : (ehExtra ? 'Informe o horário de início e de término da hora extra.'
+                           : 'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).');
         }};
     }})();
     </script>
@@ -3217,6 +3225,8 @@ def _fmt_horario_afastamento(r) -> str:
     if r["tipo"] == "compensacao_horas":
         horas = r["horas_compensar"] if ("horas_compensar" in r.keys() and r["horas_compensar"]) else "?"
         return f'Saída {r["horario_inicio"]} · {horas}h a compensar'
+    if r["tipo"] == "hora_extra":
+        return f'Início {r["horario_inicio"]} · Término {r["horario_fim"]}'
     return f'{r["horario_inicio"]} às {r["horario_fim"]}'
 
 
@@ -3289,7 +3299,7 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     elif tipo in TIPOS_COM_HORARIO:
         horas_compensar = None
         if not horario_inicio or not horario_fim:
-            return HTMLResponse(render_page("Erro", f'<div class="page-header"><h1>Erro</h1></div><p>Pra "{TIPOS_AFASTAMENTO[tipo]}" é preciso informar o horário de saída e retorno.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
+            return HTMLResponse(render_page("Erro", f'<div class="page-header"><h1>Erro</h1></div><p>Pra "{TIPOS_AFASTAMENTO[tipo]}" é preciso informar o {"início e o término" if tipo == "hora_extra" else "horário de saída e retorno"}.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
     else:
         horario_inicio = horario_fim = horas_compensar = None
 
@@ -3586,7 +3596,7 @@ def exportar_relatorio_afastamentos(request: Request, mes: Optional[int] = None,
     wb = Workbook()
     ws = wb.active
     ws.title = "Justificativas"
-    cabecalho = ["Nome", "Matrícula", "Tipo", "Data início", "Data fim", "Horário saída", "Horário retorno", "Horas a compensar", "Dias", "Observação", "Link do documento"]
+    cabecalho = ["Nome", "Matrícula", "Tipo", "Data início", "Data fim", "Horário saída / início", "Horário retorno / término", "Horas a compensar", "Dias", "Observação", "Link do documento"]
     ws.append(cabecalho)
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
