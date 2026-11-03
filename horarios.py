@@ -523,7 +523,7 @@ def _diretrizes_html(coleta) -> str:
             <li>É obrigatório fornecer blocos disponíveis na <strong>segunda ou sexta-feira</strong>.</li>
             <li>O planejamento será cumprido obrigatoriamente <strong>terça, quarta ou quinta-feira</strong>.</li>
             <li>Preferencialmente disponibilizar o <strong>turno inteiro</strong> (os 3 blocos). Se você entra mais tarde ou sai mais cedo, marque só os blocos possíveis e explique nas observações gerais.</li>
-            <li>Todos os docentes deverão disponibilizar, em caso de somente a matrícula, <strong>5 turnos (15 blocos)</strong> de trabalho.</li>
+            <li>Todos os docentes deverão disponibilizar, em caso de somente a matrícula, <strong>5 turnos </strong> de trabalho.</li>
             <li>Caso tenha interesse em dupla regência, disponibilizar <strong>até 8 turnos (24 blocos)</strong>, marcando em <span style="color:#7c3aed; font-weight:700;">roxo</span> onde deseja a dupla.</li>
             <li><strong>Atenção:</strong> no próximo ano haverá realocação de turmas, com maior número de estudantes no <strong>turno da tarde</strong> — ajustes na disponibilidade deverão ser realizados.</li>
         </ol>
