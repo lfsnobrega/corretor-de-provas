@@ -3156,6 +3156,20 @@ async def salvar_onboarding(request: Request):
 
 # ============ MÓDULO ADMINISTRATIVO — afastamentos (25/08/2026) ============
 
+def _horas_entre(ini: Optional[str], fim: Optional[str]) -> Optional[str]:
+    """Horas entre dois horários 'HH:MM' (ex.: 08:00 e 10:30 -> '2.5'). None se inválido."""
+    try:
+        h1, m1 = [int(x) for x in (ini or "").split(":")[:2]]
+        h2, m2 = [int(x) for x in (fim or "").split(":")[:2]]
+    except Exception:
+        return None
+    mins = (h2 * 60 + m2) - (h1 * 60 + m1)
+    if mins <= 0:
+        return None
+    h = mins / 60
+    return str(int(h)) if h == int(h) else f"{h:.2f}".rstrip("0").rstrip(".")
+
+
 def _bloco_horario_afastamento_html(sel_id: str, tipo_atual: str = "", horario_inicio_atual: str = "",
                                      horario_fim_atual: str = "", horas_compensar_atual: str = ""):
     """Monta o bloco de horário do formulário de Justificativa (usado tanto em criar
@@ -3164,13 +3178,14 @@ def _bloco_horario_afastamento_html(sel_id: str, tipo_atual: str = "", horario_i
     (06/09/2026, a pedido de Felipe)."""
     eh_compensacao = tipo_atual == "compensacao_horas"
     eh_extra = tipo_atual == "hora_extra"
-    lbl_ini = "Início" if eh_extra else "Horário de saída"
-    lbl_fim = "Término" if eh_extra else "Horário de retorno"
+    usa_inicio_termino = eh_extra or eh_compensacao
+    lbl_ini = "Início" if usa_inicio_termino else "Horário de saída"
+    lbl_fim = "Término" if usa_inicio_termino else "Horário de retorno"
     display_bloco = "block" if (tipo_atual in TIPOS_COM_HORARIO) else "none"
-    display_fim = "none" if eh_compensacao else "block"
+    display_fim = "block"
     display_comp = "block" if eh_compensacao else "none"
     tip_texto = (
-        'Informe o horário de saída e quantas horas precisam ser compensadas.'
+        'Informe o início e o término da compensação. As horas a compensar são calculadas sozinhas (ou digite se for diferente).'
         if eh_compensacao else
         ('Informe o horário de início e de término da hora extra.' if eh_extra else
          'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).')
@@ -3186,8 +3201,8 @@ def _bloco_horario_afastamento_html(sel_id: str, tipo_atual: str = "", horario_i
             <label id="lbl-horario-fim-{sel_id}" style="flex:1 1 200px; display:{display_fim};"><span id="txt-horario-fim-{sel_id}">{lbl_fim}</span>
                 <input type="time" name="horario_fim" id="inp-horario-fim-{sel_id}" value="{horario_fim_atual}">
             </label>
-            <label id="lbl-horas-compensar-{sel_id}" style="flex:1 1 200px; display:{display_comp};">Quantidade de horas a compensar
-                <input type="number" name="horas_compensar" id="inp-horas-compensar-{sel_id}" step="0.5" min="0" placeholder="Ex: 2" value="{horas_compensar_atual}">
+            <label id="lbl-horas-compensar-{sel_id}" style="flex:1 1 200px; display:{display_comp};">Horas a compensar (opcional)
+                <input type="number" name="horas_compensar" id="inp-horas-compensar-{sel_id}" step="0.5" min="0" placeholder="Calcula sozinho" value="{horas_compensar_atual}">
             </label>
         </div>
     </div>
@@ -3199,16 +3214,17 @@ def _bloco_horario_afastamento_html(sel_id: str, tipo_atual: str = "", horario_i
             var precisa = _tiposComHorario.includes(valor);
             bloco.style.display = precisa ? 'block' : 'none';
             var ehComp = valor === 'compensacao_horas';
-            document.getElementById('lbl-horario-fim-{sel_id}').style.display = ehComp ? 'none' : 'block';
+            document.getElementById('lbl-horario-fim-{sel_id}').style.display = 'block';
             document.getElementById('lbl-horas-compensar-{sel_id}').style.display = ehComp ? 'block' : 'none';
             document.getElementById('inp-horario-inicio-{sel_id}').required = precisa;
-            document.getElementById('inp-horario-fim-{sel_id}').required = precisa && !ehComp;
-            document.getElementById('inp-horas-compensar-{sel_id}').required = precisa && ehComp;
+            document.getElementById('inp-horario-fim-{sel_id}').required = precisa;
+            document.getElementById('inp-horas-compensar-{sel_id}').required = false;
             var ehExtra = valor === 'hora_extra';
-            document.getElementById('txt-horario-inicio-{sel_id}').textContent = ehExtra ? 'Início' : 'Horário de saída';
-            document.getElementById('txt-horario-fim-{sel_id}').textContent = ehExtra ? 'Término' : 'Horário de retorno';
+            var iniTerm = ehExtra || ehComp;
+            document.getElementById('txt-horario-inicio-{sel_id}').textContent = iniTerm ? 'Início' : 'Horário de saída';
+            document.getElementById('txt-horario-fim-{sel_id}').textContent = iniTerm ? 'Término' : 'Horário de retorno';
             document.getElementById('tip-horario-{sel_id}').textContent = ehComp
-                ? 'Informe o horário de saída e quantas horas precisam ser compensadas.'
+                ? 'Informe o início e o término da compensação. As horas a compensar são calculadas sozinhas (ou digite se for diferente).'
                 : (ehExtra ? 'Informe o horário de início e de término da hora extra.'
                            : 'Esse tipo de documento precisa do horário de saída e retorno (não é o dia inteiro).');
         }};
@@ -3223,8 +3239,12 @@ def _fmt_horario_afastamento(r) -> str:
     if not ("horario_inicio" in r.keys() and r["horario_inicio"]):
         return "—"
     if r["tipo"] == "compensacao_horas":
-        horas = r["horas_compensar"] if ("horas_compensar" in r.keys() and r["horas_compensar"]) else "?"
-        return f'Saída {r["horario_inicio"]} · {horas}h a compensar'
+        horas = r["horas_compensar"] if ("horas_compensar" in r.keys() and r["horas_compensar"]) else None
+        fim = r["horario_fim"] if ("horario_fim" in r.keys() and r["horario_fim"]) else None
+        if fim:
+            horas = horas or _horas_entre(r["horario_inicio"], fim)
+            return f'Início {r["horario_inicio"]} · Término {fim}' + (f' · {horas}h a compensar' if horas else "")
+        return f'Início {r["horario_inicio"]} · {horas or "?"}h a compensar'
     if r["tipo"] == "hora_extra":
         return f'Início {r["horario_inicio"]} · Término {r["horario_fim"]}'
     return f'{r["horario_inicio"]} às {r["horario_fim"]}'
@@ -3293,9 +3313,9 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     horario_fim = horario_fim.strip() or None
     horas_compensar = horas_compensar.strip() or None
     if tipo == "compensacao_horas":
-        horario_fim = None
-        if not horario_inicio or not horas_compensar:
-            return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Pra "Compensação de horas" é preciso informar o horário de saída e a quantidade de horas a compensar.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
+        if not horario_inicio or not horario_fim:
+            return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Pra "Compensação de horas" é preciso informar o início e o término.</p><a href="/administrativo/afastamentos/novo" class="btn">Voltar</a>', active="administrativo-novo"))
+        horas_compensar = horas_compensar or _horas_entre(horario_inicio, horario_fim)
     elif tipo in TIPOS_COM_HORARIO:
         horas_compensar = None
         if not horario_inicio or not horario_fim:
@@ -3346,8 +3366,10 @@ async def criar_afastamento(request: Request, tipo: str = Form(...), data_inicio
     if erro_drive:
         aviso_html += f'<div class="tip" style="background:var(--orange-bg); border-color:var(--orange); margin-top:14px;"><strong>Atenção:</strong> a solicitação foi registrada, mas o documento NÃO foi enviado ao Drive ainda — {erro_drive} Avise o administrador; o arquivo original fica só com você por enquanto.</div>'
 
-    if tipo == "compensacao_horas" and horario_inicio and horas_compensar:
-        horario_str = f' · Saída: {horario_inicio} · {horas_compensar}h a compensar'
+    if tipo == "compensacao_horas" and horario_inicio and horario_fim:
+        horario_str = f' · Início: {horario_inicio} · Término: {horario_fim}' + (f' · {horas_compensar}h a compensar' if horas_compensar else "")
+    elif tipo == "compensacao_horas" and horario_inicio and horas_compensar:
+        horario_str = f' · Início: {horario_inicio} · {horas_compensar}h a compensar'
     elif horario_inicio and horario_fim:
         horario_str = f' · Horário: {horario_inicio} às {horario_fim}'
     else:
@@ -3546,7 +3568,7 @@ async def salvar_edicao_afastamento(request: Request, afastamento_id: int, tipo:
     horario_fim = horario_fim.strip() or None
     horas_compensar = horas_compensar.strip() or None
     if tipo == "compensacao_horas":
-        horario_fim = None
+        horas_compensar = horas_compensar or _horas_entre(horario_inicio, horario_fim)
     elif tipo in TIPOS_COM_HORARIO:
         horas_compensar = None
     else:
