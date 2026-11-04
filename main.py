@@ -11483,14 +11483,14 @@ def _render_picker_questoes(conn, selected_ids=None):
         ids_sel = [int(x) for x in selected_ids]
         ph_s = ",".join("?" * len(ids_sel)) if ids_sel else "NULL"
         questoes_db = conn.execute(f"""
-            SELECT q.id, q.enunciado, q.ano, q.tipo, q.texto_compartilhado_id AS tcid, d.nome AS disciplina_nome
+            SELECT q.id, q.enunciado, q.ano, q.tipo, q.texto_compartilhado_id AS tcid, q.criada_por_professor_id AS autor_id, d.nome AS disciplina_nome
             FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
             WHERE q.disciplina_id IN ({ph_d}) OR q.id IN ({ph_s})
             ORDER BY d.nome, q.id
         """, list(esc["ids"]) + ids_sel).fetchall()
     else:
         questoes_db = conn.execute("""
-            SELECT q.id, q.enunciado, q.ano, q.tipo, q.texto_compartilhado_id AS tcid, d.nome AS disciplina_nome
+            SELECT q.id, q.enunciado, q.ano, q.tipo, q.texto_compartilhado_id AS tcid, q.criada_por_professor_id AS autor_id, d.nome AS disciplina_nome
             FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id
             ORDER BY d.nome, q.id
         """).fetchall()
@@ -11540,6 +11540,7 @@ def _render_picker_questoes(conn, selected_ids=None):
             "preview": _preview_enunciado(q["enunciado"], max_chars=120),
             "bnccs": bncc_map.get(q["id"], []),
             "tcid": q["tcid"] or 0,
+            "edita": bool(_pode_editar_questao(_current_prof_ctx.get(), q["autor_id"])),
         }
         for q in questoes_db
     ]
@@ -11583,6 +11584,16 @@ __AVISO_ESCOPO__
     </div>
 </div>
 
+<div id="modal-questao" onclick="if(event.target===this) fecharQuestao();" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9999; align-items:center; justify-content:center; padding:20px;">
+    <div style="background:var(--bg); border:1px solid var(--border); border-radius:10px; width:min(900px,100%); height:85vh; display:flex; flex-direction:column; overflow:hidden;">
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 16px; border-bottom:1px solid var(--border);">
+            <strong>👁 Visualização da questão</strong>
+            <button type="button" class="btn" onclick="fecharQuestao()">✕ Fechar</button>
+        </div>
+        <iframe id="modal-questao-frame" src="about:blank" style="flex:1; border:0; width:100%; background:var(--bg);"></iframe>
+    </div>
+</div>
+
 <script>
 const TODAS_QUESTOES = __QUESTOES_JSON__;
 const TEXTOS = __TEXTOS_JSON__;
@@ -11598,6 +11609,24 @@ function tituloTexto(quest) {
     const t = quest.tcid ? TEXTOS[quest.tcid] : null;
     return t && t.titulo ? '«' + t.titulo + '»' : 'compartilhado';
 }
+
+function botoesQuestao(quest, estilo) {
+    estilo = estilo || 'padding:4px 8px; font-size:13px;';
+    let h = '<button type="button" onclick="verQuestao(' + quest.id + ')" class="btn" title="Visualizar a questão completa" style="' + estilo + '">👁</button>';
+    if (quest.edita) {
+        h += '<a href="/questoes/' + quest.id + '/editar" target="_blank" class="btn" title="Editar a questão (abre em nova aba)" style="' + estilo + ' text-decoration:none;">✏️</a>';
+    }
+    return h;
+}
+function verQuestao(id) {
+    document.getElementById('modal-questao-frame').src = '/questoes/' + id + '/visualizar';
+    document.getElementById('modal-questao').style.display = 'flex';
+}
+function fecharQuestao() {
+    document.getElementById('modal-questao').style.display = 'none';
+    document.getElementById('modal-questao-frame').src = 'about:blank';
+}
+document.addEventListener('keydown', function(e){ if (e.key === 'Escape') fecharQuestao(); });
 
 function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -11645,6 +11674,7 @@ function renderPicker() {
                     '<div style="font-size:11px; color:var(--text-muted);">Q' + quest.id + ' · ' + escapeHtml(quest.disciplina) + badgeAno + ' ' + badgesBncc + '</div>' +
                     '<div style="font-size:13px; margin-top:4px;">' + escapeHtml(quest.preview) + '</div>' + tcLinha +
                     '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">✓ Já adicionada</div>' +
+                    '<div style="display:flex; gap:4px; margin-top:6px;">' + botoesQuestao(quest, 'padding:2px 8px; font-size:12px;') + '</div>' +
                     '</div>';
             }
             return '<div style="padding:8px 10px; margin-bottom:6px; background:var(--bg); border:1px solid var(--border); border-radius:4px; display:flex; gap:8px; align-items:flex-start;">' +
@@ -11652,7 +11682,10 @@ function renderPicker() {
                 '<div style="font-size:11px; color:var(--text-muted);">Q' + quest.id + ' · ' + escapeHtml(quest.disciplina) + badgeAno + ' ' + badgesBncc + '</div>' +
                 '<div style="font-size:13px; margin-top:4px;">' + escapeHtml(quest.preview) + '</div>' + tcLinha +
                 '</div>' +
+                '<div style="display:flex; flex-direction:column; gap:4px; align-items:stretch;">' +
                 '<button type="button" onclick="adicionar(' + quest.id + ')" class="btn" style="padding:4px 10px; font-size:12px; white-space:nowrap;">+ Adicionar</button>' +
+                '<div style="display:flex; gap:4px; justify-content:flex-end;">' + botoesQuestao(quest, 'padding:2px 8px; font-size:12px;') + '</div>' +
+                '</div>' +
                 '</div>';
         }).join('');
     }
@@ -11680,6 +11713,7 @@ function renderPicker() {
                 '<button type="button" onclick="mover(' + idx + ', -1)" ' + upDisabled + ' class="btn" style="padding:0 6px; font-size:11px;">▴</button>' +
                 '<button type="button" onclick="mover(' + idx + ', 1)" ' + downDisabled + ' class="btn" style="padding:0 6px; font-size:11px;">▾</button>' +
                 '</div>' +
+                '<div style="display:flex; flex-direction:column; gap:3px;">' + botoesQuestao(quest, 'padding:2px 7px; font-size:12px;') + '</div>' +
                 '<button type="button" onclick="remover(' + quest.id + ')" class="btn" style="padding:4px 8px; font-size:11px; color:var(--red);">✕</button>' +
                 '</div>';
         }).join('');
@@ -18466,6 +18500,24 @@ def exportar_resultados_excel(aplicacao_id: int):
 # ==========================================
 #  EDITAR E EXCLUIR QUESTÕES
 # ==========================================
+
+@app.get("/questoes/{id}/visualizar", response_class=HTMLResponse)
+def visualizar_questao(id: int, request: Request):
+    """Mostra a questão completa (texto, imagens, alternativas) sem sidebar — usada no pop-up
+    do seletor de questões da prova."""
+    prof = get_current_professor(request)
+    if not prof:
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    try:
+        q = conn.execute("SELECT q.*, d.nome AS disciplina_nome FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id WHERE q.id = ?", (id,)).fetchone()
+        if not q:
+            return HTMLResponse(render_page("Questão não encontrada", '<div class="empty">Questão não encontrada.</div>', standalone=True))
+        card = render_questao_card(conn, q, numero=None, ctx_texto=None)
+    finally:
+        conn.close()
+    return HTMLResponse(render_page(f"Questão {id}", f'<div style="padding:8px 4px;">{card}</div>', standalone=True, head_extra=MATHJAX))
+
 
 @app.get("/questoes/{id}/editar", response_class=HTMLResponse)
 def form_editar_questao(id: int, request: Request):
