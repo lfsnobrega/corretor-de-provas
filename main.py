@@ -11584,7 +11584,7 @@ __AVISO_ESCOPO__
     </div>
 </div>
 
-<div id="modal-questao" onclick="if(event.target===this) fecharQuestao();" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9999; align-items:center; justify-content:center; padding:20px;">
+<div id="modal-questao" onclick="if(event.target===this) fecharQuestao();" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); z-index:9999; align-items:center; justify-content:center; padding:20px;">
     <div style="background:var(--bg); border:1px solid var(--border); border-radius:10px; width:min(900px,100%); height:85vh; display:flex; flex-direction:column; overflow:hidden;">
         <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 16px; border-bottom:1px solid var(--border);">
             <strong>👁 Visualização da questão</strong>
@@ -21105,8 +21105,8 @@ def form_escanear(aplicacao_id: int):
             <form id="form-single" action="/aplicacoes/{aplicacao_id}/escanear" method="post" enctype="multipart/form-data" style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
                 <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
                 <p class="muted-line" style="font-size:13px;">Recomendado pra correção ao vivo, durante a aplicação.</p>
-                <label>Foto<input type="file" name="foto" accept="image/*" capture="environment" required></label>
-                <p class="muted-line" style="font-size:11px;">No celular abre a câmera direto.</p>
+                {_campo_foto_celular_html("app")}
+                <p class="muted-line" style="font-size:11px;">No iPhone e no Android, escolha entre tirar a foto agora ou usar uma da galeria.</p>
                 <button type="submit" class="btn btn-primary" style="width:100%;">Processar 1 foto</button>
             </form>
 
@@ -26783,9 +26783,9 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
                   style="background:var(--bg-subtle); padding:18px; border-radius:8px;">
                 <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
                 <p style="font-size:13px; color:var(--text-muted);">Recomendado para correção ao vivo, durante a aplicação.</p>
-                <label>Foto<input type="file" name="foto" accept="image/*" capture="environment" required></label>
+                {_campo_foto_celular_html("sim")}
                 <div id="pre-check-status" style="font-size:12px; margin:6px 0 10px; min-height:16px; line-height:1.5;"></div>
-                <p style="font-size:11px; color:var(--text-muted);">No celular abre a câmera direto.</p>
+                <p style="font-size:11px; color:var(--text-muted);">No iPhone e no Android, escolha entre tirar a foto agora ou usar uma da galeria.</p>
                 <button type="submit" class="btn btn-primary" style="width:100%;">Processar 1 foto</button>
             </form>
 
@@ -26803,7 +26803,7 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
         </div>
 
         <!-- Overlay de loading -->
-        <div id="loading-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65);
+        <div id="loading-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65);
              z-index:9999; flex-direction:column; align-items:center; justify-content:center; gap:20px;">
             <div style="width:64px; height:64px; border:6px solid rgba(255,255,255,0.2);
                  border-top-color:#fff; border-radius:50%; animation:spin 0.9s linear infinite;"></div>
@@ -27599,6 +27599,56 @@ async def confirmar_lote_simulado(sim_id: int, app_id: int, request: Request):
 #  ESCANEAMENTO UNIVERSAL — SEM PRÉ-SELEÇÃO
 # ==========================================
 
+def _campo_foto_celular_html(uid: str) -> str:
+    """Campo de foto para celular (iPhone/Android) com DOIS botões claros:
+    '📷 Tirar foto' (abre a câmera) e '🖼️ Galeria / Arquivos' (abre a fototeca ou os arquivos).
+    O <input> fica invisível (não 'display:none', que o iPhone/Safari trata mal) e é acionado
+    pelos botões. A validação 'tem foto?' é feita aqui, sem depender do 'required' do navegador."""
+    return f"""
+<div id="cf-{uid}" style="position:relative;">
+    <input type="file" name="foto" id="cf-inp-{uid}" accept="image/*"
+           style="position:absolute; left:0; top:0; width:1px; height:1px; opacity:0; overflow:hidden;">
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button type="button" class="btn btn-primary" id="cf-cam-{uid}" style="flex:1 1 140px;">📷 Tirar foto</button>
+        <button type="button" class="btn" id="cf-gal-{uid}" style="flex:1 1 140px;">🖼️ Galeria / Arquivos</button>
+    </div>
+    <div id="cf-nome-{uid}" style="font-size:12px; margin-top:8px; color:var(--text-muted);">Nenhuma foto escolhida ainda.</div>
+</div>
+<script>
+(function() {{
+    var inp = document.getElementById('cf-inp-{uid}');
+    var nome = document.getElementById('cf-nome-{uid}');
+    document.getElementById('cf-cam-{uid}').addEventListener('click', function() {{
+        inp.setAttribute('capture', 'environment');
+        inp.click();
+    }});
+    document.getElementById('cf-gal-{uid}').addEventListener('click', function() {{
+        inp.removeAttribute('capture');
+        inp.click();
+    }});
+    inp.addEventListener('change', function() {{
+        if (inp.files && inp.files.length) {{
+            nome.style.color = 'var(--green)';
+            nome.textContent = '✅ Foto escolhida: ' + inp.files[0].name + ' — agora toque em "Processar".';
+        }} else {{
+            nome.style.color = 'var(--text-muted)';
+            nome.textContent = 'Nenhuma foto escolhida ainda.';
+        }}
+    }});
+    var form = inp.closest('form');
+    if (form) form.addEventListener('submit', function(e) {{
+        if (!inp.files || !inp.files.length) {{
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            nome.style.color = 'var(--red)';
+            nome.textContent = '⚠️ Primeiro toque em "Tirar foto" ou "Galeria / Arquivos" para escolher a foto.';
+        }}
+    }});
+}})();
+</script>
+"""
+
+
 @app.get("/escanear", response_class=HTMLResponse)
 def escanear_universal_tela(request: Request):
     prof = _current_prof_ctx.get()
@@ -27628,10 +27678,8 @@ def escanear_universal_tela(request: Request):
                   style="background:var(--bg-subtle);padding:18px;border-radius:8px;">
                 <h3 style="margin-top:0;">📷 Um cartão por vez</h3>
                 <p style="font-size:13px;color:var(--text-muted);">Recomendado para correção ao vivo. Exibe tela de revisão antes de salvar.</p>
-                <label>Foto
-                    <input type="file" name="foto" accept="image/*" capture="environment" required>
-                </label>
-                <p style="font-size:11px;color:var(--text-muted);">No celular abre a câmera direto.</p>
+                __CAMPO_FOTO__
+                <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">No iPhone e no Android, escolha entre tirar a foto agora ou usar uma da galeria.</p>
                 <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px;">Processar 1 foto</button>
             </form>
 
@@ -27650,14 +27698,14 @@ def escanear_universal_tela(request: Request):
         </div>
 
         <!-- Overlay de loading -->
-        <div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);
+        <div id="loading-overlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);
              z-index:9999;flex-direction:column;align-items:center;justify-content:center;gap:20px;">
             <div style="width:64px;height:64px;border:6px solid rgba(255,255,255,0.2);
                  border-top-color:#fff;border-radius:50%;animation:spin 0.9s linear infinite;"></div>
             <div id="loading-msg" style="color:#fff;font-size:18px;font-weight:600;">⏳ Identificando cartão…</div>
             <div style="color:rgba(255,255,255,0.7);font-size:13px;">Aguarde, não feche esta página.</div>
         </div>
-        <style>@keyframes spin{{to{{transform:rotate(360deg);}}}}</style>
+        <style>@keyframes spin{to{transform:rotate(360deg);}}</style>
         <script>
         (function() {{
             var overlay = document.getElementById('loading-overlay');
@@ -27676,6 +27724,7 @@ def escanear_universal_tela(request: Request):
         }})();
         </script>
     """
+    content = content.replace("__CAMPO_FOTO__", _campo_foto_celular_html("univ"))
     return render_page("Digitalizar cartão", content, active="aplicacoes")
 
 
