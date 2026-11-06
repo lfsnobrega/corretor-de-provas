@@ -11297,8 +11297,10 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
     where_extras = []
     params = []
     if not is_admin:
-        where_extras.append("(p.criada_por_professor_id = ? OR p.criada_por_professor_id IS NULL)")
-        params.append(prof["id"])
+        _cond_v, _par_v = _sql_provas_visiveis(conn, prof, "p")
+        if _cond_v:
+            where_extras.append(_cond_v)
+            params += _par_v
     if q and q.strip():
         where_extras.append("p.titulo LIKE ?")
         params.append(f"%{q.strip()}%")
@@ -11320,6 +11322,7 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
 
     sql = f"""
         SELECT p.id, p.titulo, p.descricao, p.criada_por_professor_id,
+               p.status_revisao, p.obs_gestao,
                prof.nome AS criador_nome,
                (SELECT COUNT(*) FROM prova_questoes WHERE prova_id = p.id) AS qtd_questoes
         FROM provas p
@@ -11393,6 +11396,22 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
             if is_admin:
                 nome_autor = p["criador_nome"] if p["criador_nome"] else "—"
                 autor_badge = f'<span class="badge" style="background:var(--purple-bg); color:var(--purple);">Por: {nome_autor}</span>'
+            # Situação na revisão da gestão (rascunho / aguardando / devolvida / aprovada) + motivo da devolução
+            _st = p["status_revisao"] or "rascunho"
+            status_html = _status_badge_html(_st)
+            obs_html = (f'<div style="margin-top:8px; background:var(--orange-bg); border-left:3px solid var(--orange); padding:6px 10px; border-radius:4px; font-size:12px;">'
+                        f'<strong>Recado da gestão:</strong> {p["obs_gestao"]}</div>') if p["obs_gestao"] else ""
+            eh_minha = bool(is_admin or p["criada_por_professor_id"] == prof["id"] or p["criada_por_professor_id"] is None)
+            if not eh_minha:
+                autor_badge += f'<span class="badge" style="background:var(--purple-bg); color:var(--purple);">Por: {p["criador_nome"] or "—"}</span>'
+            btn_aplicar = (f'<a href="/aplicacoes/nova?prova_id={p["id"]}" class="btn btn-primary" style="padding:4px 10px; font-size:12px;">📤 Criar aplicação</a>'
+                           if _st == "aprovada" else "")
+            if eh_minha:
+                btns_dono = (f'<a href="/provas/{p["id"]}/editar" class="btn" style="padding:4px 10px; font-size:12px;">Editar</a>'
+                             f'<form action="/provas/{p["id"]}/deletar" method="post" style="margin:0;" onsubmit="return confirm(\'Excluir esta prova | tarefa? Se ela tiver aplicações, a exclusão será bloqueada.\');">'
+                             f'<button type="submit" class="btn" style="padding:4px 10px; font-size:12px; background:var(--red); color:white; border-color:var(--red);">Excluir</button></form>')
+            else:
+                btns_dono = ""
 
             cards += f"""
             <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin-bottom:10px;">
@@ -11404,16 +11423,15 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
                         {desc}
                         <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center;">
                             <span class="badge">{p["qtd_questoes"]} questões</span>
-                            {disc_tags}{ano_tags}{apl_badge}{autor_badge}
+                            {status_html}{disc_tags}{ano_tags}{apl_badge}{autor_badge}
                         </div>
+                        {obs_html}
                     </div>
-                    <div style="display:flex; gap:6px; flex-shrink:0;">
+                    <div style="display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end;">
+                        {btn_aplicar}
                         <a href="/provas/{p["id"]}" class="btn" style="padding:4px 10px; font-size:12px;">Abrir</a>
                         <a href="/provas/{p["id"]}/imprimir" class="btn" style="padding:4px 10px; font-size:12px;" target="_blank" title="Ver como será impressa">👁️ Prévia</a>
-                        <a href="/provas/{p["id"]}/editar" class="btn" style="padding:4px 10px; font-size:12px;">Editar</a>
-                        <form action="/provas/{p["id"]}/deletar" method="post" style="margin:0;" onsubmit="return confirm('Excluir esta prova | tarefa? Se ela tiver aplicações, a exclusão será bloqueada.');">
-                            <button type="submit" class="btn" style="padding:4px 10px; font-size:12px; background:var(--red); color:white; border-color:var(--red);">Excluir</button>
-                        </form>
+                        {btns_dono}
                     </div>
                 </div>
             </div>
@@ -11467,6 +11485,29 @@ def _prof_pode_disciplina(conn, prof, disciplina_id):
     """True se o usuário pode mexer com questões/blocos dessa disciplina."""
     esc = _escopo_disciplinas_prof(conn, prof)
     return (not esc["restrito"]) or (disciplina_id in esc["ids"])
+
+
+def _sql_provas_visiveis(conn, prof, alias="p"):
+    """Pedaço de SQL (condição, parâmetros) com as provas que o usuário pode ver/usar.
+    Admin e gestão: todas (None). Docente: as que ele criou (ou sem dono) MAIS as provas APROVADAS
+    pela gestão que sejam do(s) componente(s) curricular(es) dele — assim uma prova aprovada de
+    Matemática aparece para todos os docentes de Matemática, e não para os de outras disciplinas."""
+    if not prof or prof.get("is_admin") or prof.get("is_gestor"):
+        return None, []
+    esc = _escopo_disciplinas_prof(conn, prof)
+    cond = f"({alias}.criada_por_professor_id = ? OR {alias}.criada_por_professor_id IS NULL"
+    params = [prof["id"]]
+    if esc["restrito"]:
+        ph = ",".join("?" * len(esc["ids"]))
+        cond += (f" OR ({alias}.status_revisao = 'aprovada' AND EXISTS ("
+                 f"SELECT 1 FROM prova_questoes pqv JOIN questoes qv ON qv.id = pqv.questao_id "
+                 f"WHERE pqv.prova_id = {alias}.id AND qv.disciplina_id IN ({ph})))")
+        params += list(esc["ids"])
+    else:
+        # docente sem disciplina vinculada: não dá para filtrar por componente; vê as próprias + aprovadas
+        cond += f" OR {alias}.status_revisao = 'aprovada'"
+    cond += ")"
+    return cond, params
 
 
 def _render_picker_questoes(conn, selected_ids=None):
@@ -17461,9 +17502,13 @@ def listar_aplicacoes(
 
 
 @app.get("/aplicacoes/nova", response_class=HTMLResponse)
-def form_nova_aplicacao():
+def form_nova_aplicacao(request: Request, prova_id: Optional[int] = None):
+    prof = get_current_professor(request)
     conn = get_db()
-    provas = conn.execute("SELECT id, titulo FROM provas ORDER BY criada_em DESC").fetchall()
+    _cond_v, _par_v = _sql_provas_visiveis(conn, prof, "p")
+    provas = conn.execute(
+        "SELECT p.id, p.titulo, p.status_revisao FROM provas p"
+        + (f" WHERE {_cond_v}" if _cond_v else "") + " ORDER BY p.criada_em DESC, p.id DESC", _par_v).fetchall()
     turmas = conn.execute("SELECT id, nome, ano_letivo FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
     conn.close()
 
@@ -17482,7 +17527,10 @@ def form_nova_aplicacao():
         """
         return render_page("Nova aplicação", content, active="aplicacoes")
 
-    provas_options = "".join(f'<option value="{p["id"]}">{p["titulo"]}</option>' for p in provas)
+    _rot = {"aprovada": "✅ aprovada", "rascunho": "rascunho", "submetida": "aguardando revisão", "devolvida": "↩️ devolvida"}
+    provas_options = "".join(
+        f'<option value="{p["id"]}"{" selected" if prova_id == p["id"] else ""}>{p["titulo"]} ({_rot.get(p["status_revisao"] or "rascunho", p["status_revisao"])})</option>'
+        for p in provas)
     turmas_options = "".join(f'<option value="{t["id"]}">{t["nome"]} ({t["ano_letivo"]})</option>' for t in turmas)
 
     content = f"""
@@ -17526,6 +17574,15 @@ def criar_aplicacao(request: Request, prova_id: int = Form(...), turma_id: int =
         return RedirectResponse("/login", status_code=303)
     mostrar_resultado = 1 if mostrar_resultado_aluno else 0
     conn = get_db()
+    _cond_v, _par_v = _sql_provas_visiveis(conn, prof, "p")
+    if _cond_v:
+        _ok = conn.execute(f"SELECT 1 FROM provas p WHERE p.id = ? AND {_cond_v}", [prova_id] + _par_v).fetchone()
+        if not _ok:
+            conn.close()
+            return HTMLResponse(render_page("Prova não disponível",
+                '<div class="page-header"><h1>⚠️ Prova não disponível</h1></div>'
+                '<div class="empty">Esta prova não é do seu componente curricular (ou ainda não foi aprovada pela gestão).</div>'
+                '<div class="page-actions"><a href="/aplicacoes/nova" class="btn btn-primary">Voltar</a></div>', active="aplicacoes"), status_code=403)
     cursor = conn.execute(
         "INSERT INTO aplicacoes (prova_id, turma_id, modo, titulo, criada_por_professor_id, mostrar_resultado_aluno) VALUES (?, ?, ?, ?, ?, ?)",
         (prova_id, turma_id, modo, titulo.strip() or None, prof["id"], mostrar_resultado)
