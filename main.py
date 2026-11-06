@@ -17079,7 +17079,7 @@ def admin_usuarios(request: Request):
         return HTMLResponse(render_page("Acesso negado", '<div class="empty">Apenas administradores.</div>', active=""), status_code=403)
     conn = get_db()
     usuarios = conn.execute(
-        "SELECT id, email, nome, is_admin, is_gestor, status, criado_em, ultimo_acesso, cargo FROM professores ORDER BY CASE COALESCE(status,'ativo') WHEN 'pendente' THEN 0 WHEN 'ativo' THEN 1 ELSE 2 END, nome"
+        "SELECT id, email, nome, is_admin, is_gestor, status, criado_em, ultimo_acesso, cargo, tipo_login, username FROM professores ORDER BY CASE COALESCE(status,'ativo') WHEN 'pendente' THEN 0 WHEN 'ativo' THEN 1 ELSE 2 END, nome"
     ).fetchall()
     conn.close()
     pendentes = [u for u in usuarios if (u["status"] if "status" in u.keys() else "ativo") == "pendente"]
@@ -17098,6 +17098,8 @@ def admin_usuarios(request: Request):
         is_eu = u["id"] == prof["id"]
         acoes = f'<a href="/admin/usuarios/{u["id"]}/editar-nome" class="btn" style="padding:4px 10px; font-size:11px;">✏️ Nome</a>'
         acoes += f' <a href="/admin/usuarios/{u["id"]}/editar-cargo" class="btn" style="padding:4px 10px; font-size:11px;">🎓 Cargo</a>'
+        if (u["tipo_login"] or "google") == "local":
+            acoes += f' <a href="/admin/usuarios/{u["id"]}/resetar-senha" class="btn" style="padding:4px 10px; font-size:11px; color:var(--orange); border-color:var(--orange);">🔑 Redefinir senha</a>'
         if not is_eu:
             if us == "pendente":
                 acoes += f'<form method="post" action="/admin/usuarios/{u["id"]}/aprovar" style="margin:0; display:inline;"><button type="submit" class="btn" style="padding:4px 10px; font-size:11px; color:var(--green); border-color:var(--green);">✅ Aprovar</button></form>'
@@ -17114,7 +17116,7 @@ def admin_usuarios(request: Request):
         rb = ' style="background:var(--orange-bg);"' if us == "pendente" else ""
         cargo_linha = f'<div style="font-size:11px; color:var(--text-muted);">{u["cargo"]}</div>' if ("cargo" in u.keys() and u["cargo"]) else ""
         rows += f'''<tr{rb}><td style="padding:10px 8px;">{u["nome"]}{"&nbsp;<em style=\'font-size:11px; color:var(--text-muted);\'>( você)</em>" if is_eu else ""}{cargo_linha}</td>
-            <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{u["email"]}</td>
+            <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{(("Usuário: <strong>" + u["username"] + "</strong> (login com senha)") if ((u["tipo_login"] or "google") == "local" and u["username"]) else u["email"])}</td>
             <td style="padding:10px 8px;">{" ".join(perfil)}</td>
             <td style="padding:10px 8px; font-size:12px; color:var(--text-muted);">{acesso}</td>
             <td style="padding:10px 8px;">{acoes}</td></tr>'''
@@ -17252,6 +17254,84 @@ def form_novo_usuario_local(request: Request):
         </form>
     """
     return HTMLResponse(render_page("Novo usuário local", content, active=""))
+
+
+@app.get("/admin/usuarios/{usuario_id}/resetar-senha", response_class=HTMLResponse)
+def form_resetar_senha(usuario_id: int, request: Request):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    u = conn.execute("SELECT id, nome, username, tipo_login FROM professores WHERE id = ?", (usuario_id,)).fetchone()
+    conn.close()
+    if not u:
+        return RedirectResponse("/admin/usuarios", status_code=303)
+    if (u["tipo_login"] or "google") != "local":
+        return HTMLResponse(render_page("Redefinir senha", f"""
+            <div class="page-header"><h1>🔑 Redefinir senha — {u["nome"]}</h1></div>
+            <div class="tip" style="background:var(--orange-bg); border-color:var(--orange);">
+                Este usuário entra com a <strong>conta Google institucional</strong> (e-mail da escola/prefeitura).
+                A senha dele é da conta Google, não do sistema, e <strong>não pode ser redefinida aqui</strong>.
+                Ele deve usar "Esqueci minha senha" na tela de login do Google ou procurar o responsável pelas contas de e-mail.
+            </div>
+            <div class="page-actions"><a href="/admin/usuarios" class="btn">← Voltar</a></div>""", active=""))
+    return HTMLResponse(render_page("Redefinir senha", f"""
+        <div class="page-header"><h1>🔑 Redefinir senha — {u["nome"]}</h1>
+        <p class="subtitle">Usuário de login: <strong style="font-family:monospace;">{u["username"]}</strong></p></div>
+        <form method="post" action="/admin/usuarios/{usuario_id}/resetar-senha" style="max-width:520px;">
+            <label style="font-weight:normal; display:flex; gap:8px; align-items:flex-start; margin-bottom:10px;">
+                <input type="radio" name="modo" value="auto" checked style="width:auto; margin-top:4px;">
+                <span><strong>Gerar uma senha provisória automática</strong><br><small>O sistema cria uma senha e mostra na próxima tela.</small></span>
+            </label>
+            <label style="font-weight:normal; display:flex; gap:8px; align-items:flex-start; margin-bottom:6px;">
+                <input type="radio" name="modo" value="manual" style="width:auto; margin-top:4px;">
+                <span><strong>Digitar uma senha provisória</strong><br><small>Mínimo de 6 caracteres.</small></span>
+            </label>
+            <input type="text" name="senha_manual" placeholder="Senha provisória (só se escolheu digitar)" autocomplete="off" style="margin-bottom:14px;">
+            <div class="tip" style="font-size:12px;">Em qualquer caso, a pessoa será obrigada a criar uma senha nova assim que entrar com a provisória.</div>
+            <div class="page-actions">
+                <button type="submit" class="btn btn-primary" onclick="return confirm('Redefinir a senha de {u["nome"]}? A senha atual deixa de funcionar.');">🔑 Redefinir senha</button>
+                <a href="/admin/usuarios" class="btn">Cancelar</a>
+            </div>
+        </form>""", active=""))
+
+
+@app.post("/admin/usuarios/{usuario_id}/resetar-senha", response_class=HTMLResponse)
+def resetar_senha_usuario(usuario_id: int, request: Request, modo: str = Form("auto"), senha_manual: str = Form("")):
+    prof = _current_prof_ctx.get()
+    if not prof or not prof.get("is_admin"):
+        return RedirectResponse("/login", status_code=303)
+    conn = get_db()
+    u = conn.execute("SELECT id, nome, username, tipo_login FROM professores WHERE id = ?", (usuario_id,)).fetchone()
+    if not u or (u["tipo_login"] or "google") != "local":
+        conn.close()
+        return RedirectResponse("/admin/usuarios", status_code=303)
+    if modo == "manual":
+        nova = senha_manual.strip()
+        if len(nova) < 6:
+            conn.close()
+            return HTMLResponse(render_page("Senha curta", f"""
+                <div class="page-header"><h1>⚠️ Senha muito curta</h1></div>
+                <div class="empty">A senha provisória precisa ter pelo menos 6 caracteres. Nada foi alterado.</div>
+                <div class="page-actions"><a href="/admin/usuarios/{usuario_id}/resetar-senha" class="btn btn-primary">Tentar de novo</a></div>""", active=""))
+    else:
+        nova = _gerar_senha_temporaria()
+    h, salt = _hash_senha(nova)
+    conn.execute("UPDATE professores SET senha_hash = ?, senha_salt = ?, senha_temporaria = 1 WHERE id = ?", (h, salt, usuario_id))
+    conn.commit()
+    conn.close()
+    return HTMLResponse(render_page("Senha redefinida", f"""
+        <div class="page-header"><h1>✅ Senha redefinida</h1></div>
+        <div class="tip" style="background:var(--green-bg); border-color:var(--green);">
+            <strong>Anote e repasse pessoalmente</strong> — a senha não fica salva em lugar nenhum depois desta tela.
+        </div>
+        <table style="margin-top:14px; font-size:14px;">
+            <tr><td style="padding:6px 12px; color:var(--text-muted);">Nome</td><td style="padding:6px 12px; font-weight:600;">{u["nome"]}</td></tr>
+            <tr><td style="padding:6px 12px; color:var(--text-muted);">Usuário</td><td style="padding:6px 12px; font-weight:600; font-family:monospace;">{u["username"]}</td></tr>
+            <tr><td style="padding:6px 12px; color:var(--text-muted);">Senha provisória</td><td style="padding:6px 12px; font-weight:600; font-family:monospace; font-size:16px;">{nova}</td></tr>
+        </table>
+        <p style="font-size:12px; color:var(--text-muted); margin-top:10px;">No próximo login a pessoa será obrigada a trocar essa senha.</p>
+        <div class="page-actions" style="margin-top:16px;"><a href="/admin/usuarios" class="btn btn-primary">Voltar pra usuários</a></div>""", active=""))
 
 
 @app.post("/admin/usuarios/novo-local", response_class=HTMLResponse)
