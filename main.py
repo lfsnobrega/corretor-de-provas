@@ -9031,8 +9031,8 @@ def home(request: Request):
                    COALESCE(a.titulo, p.titulo) AS titulo,
                    t.nome AS turma_nome, t.ano_letivo,
                    prof.nome AS criador_nome,
-                   (SELECT COUNT(*) FROM entregas e WHERE e.aplicacao_id = a.id) AS n_entregas,
-                   (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id) AS n_alunos
+                   (SELECT COUNT(*) FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = a.id AND al.turma_id = a.turma_id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS n_entregas,
+                   (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS n_alunos
             FROM aplicacoes a
             JOIN provas p ON p.id = a.prova_id
             JOIN turmas t ON t.id = a.turma_id
@@ -9047,8 +9047,8 @@ def home(request: Request):
                    COALESCE(a.titulo, p.titulo) AS titulo,
                    t.nome AS turma_nome, t.ano_letivo,
                    NULL AS criador_nome,
-                   (SELECT COUNT(*) FROM entregas e WHERE e.aplicacao_id = a.id) AS n_entregas,
-                   (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id) AS n_alunos
+                   (SELECT COUNT(*) FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = a.id AND al.turma_id = a.turma_id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS n_entregas,
+                   (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = a.turma_id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS n_alunos
             FROM aplicacoes a
             JOIN provas p ON p.id = a.prova_id
             JOIN turmas t ON t.id = a.turma_id
@@ -13840,7 +13840,7 @@ def boletim_ver_turma(request: Request, trimestre: int, ano: int, turma_id: int)
     """, (trimestre, ano)).fetchall()
 
     alunos = conn.execute("""
-        SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome
+        SELECT id, nome, numero FROM alunos WHERE turma_id = ? AND COALESCE(status,'ativo')='ativo' AND COALESCE(remanejado,0)=0 ORDER BY numero, nome
     """, (turma_id,)).fetchall()
 
     notas_map = {}
@@ -14024,7 +14024,7 @@ def _boletim_possiveis_repetentes(conn, ano, turma_id=None):
         JOIN boletim_medias m2 ON m2.aluno_id = a.id AND m2.trimestre = 2 AND m2.ano = ? AND m2.nota IS NOT NULL
             AND m2.disciplina_id = m1.disciplina_id
         JOIN disciplinas d ON d.id = m1.disciplina_id
-        WHERE d.nome != 'Educação Digital' {where_turma}
+        WHERE d.nome != 'Educação Digital' AND COALESCE(a.status,'ativo')='ativo' AND COALESCE(a.remanejado,0)=0 {where_turma}
         ORDER BY a.nome, d.nome
     """, params).fetchall()
 
@@ -14049,7 +14049,7 @@ def _boletim_enriquecer_alunos(conn, trimestre, ano, turma_id=None):
     sql = """
         SELECT a.id, a.nome, a.numero, a.raca, a.sexo, a.data_nascimento, t.nome AS turma_nome
         FROM alunos a JOIN turmas t ON t.id = a.turma_id
-        WHERE t.ano_letivo = ?
+        WHERE t.ano_letivo = ? AND COALESCE(a.status,'ativo')='ativo' AND COALESCE(a.remanejado,0)=0
     """
     params = [ano]
     if turma_id:
@@ -14810,14 +14810,14 @@ BOLETIM_ORDEM_DISCIPLINAS = ['Português', 'Matemática', 'Ciências', 'Históri
                              'Inglês', 'Arte', 'Ed. Física', 'Educação Digital']
 
 
-def _boletim_dados_turma_multitrimestre(conn, ano, turma_id):
+def _boletim_dados_turma_multitrimestre(conn, ano, turma_id, somente_ativos=False):
     """Monta, pra cada aluno de uma turma, o quadro completo dos 3 trimestres:
     notas por disciplina em cada trimestre, faltas por trimestre, e um resumo (média
     final, situação SAEB, alertas, observações) — base pro boletim impresso, que
     mostra os 3 trimestres lado a lado mesmo que só o 1º já tenha dado."""
     alunos = conn.execute("""
-        SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome
-    """, (turma_id,)).fetchall()
+        SELECT id, nome, numero FROM alunos WHERE turma_id = ? {extra} ORDER BY numero, nome
+    """.replace("{extra}", "AND COALESCE(status,'ativo')='ativo' AND COALESCE(remanejado,0)=0" if somente_ativos else ""), (turma_id,)).fetchall()
     aluno_ids = [a["id"] for a in alunos]
     if not aluno_ids:
         return []
@@ -15857,7 +15857,7 @@ def boletim_soma_trimestres(request: Request, ano: Optional[int] = None, turma_i
     turmas = conn.execute("SELECT id, nome FROM turmas WHERE ano_letivo = ? ORDER BY nome", (ano,)).fetchall()
     if turma_id is None and turmas:
         turma_id = turmas[0]["id"]
-    dados = _boletim_dados_turma_multitrimestre(conn, ano, turma_id) if turma_id else []
+    dados = _boletim_dados_turma_multitrimestre(conn, ano, turma_id, somente_ativos=True) if turma_id else []
     turma_nome = html.escape(str(next((t["nome"] for t in turmas if t["id"] == turma_id), "?")))
     conn.close()
 
@@ -16409,7 +16409,7 @@ def boletim_analise_form(request: Request, trimestre: Optional[int] = None, ano:
     turma = conn.execute("SELECT * FROM turmas WHERE id = ?", (turma_id,)).fetchone()
     disciplina = conn.execute("SELECT * FROM disciplinas WHERE id = ?", (disciplina_id,)).fetchone()
 
-    alunos = conn.execute("SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)).fetchall()
+    alunos = conn.execute("SELECT id, nome, numero FROM alunos WHERE turma_id = ? AND COALESCE(status,'ativo')='ativo' AND COALESCE(remanejado,0)=0 ORDER BY numero, nome", (turma_id,)).fetchall()
     analises_existentes = {}
     for r in conn.execute("""SELECT * FROM boletim_analise WHERE trimestre=? AND ano=? AND disciplina_id=?
                               AND aluno_id IN (SELECT id FROM alunos WHERE turma_id=?)""",
@@ -17013,8 +17013,8 @@ def minhas_aplicacoes(request: Request, aba: Optional[str] = "abertas", turma: O
     wc = "WHERE " + " AND ".join(where)
     aplicacoes = conn.execute(f"""SELECT a.id, a.titulo, a.modo, a.aberta, a.criada_em, p.titulo AS prova_titulo,
                t.nome AS turma_nome, t.ano_letivo, pr.nome AS criador_nome,
-               (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS qtd_entregas,
-               (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS qtd_alunos
+               (SELECT COUNT(*) FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = a.id AND al.turma_id = a.turma_id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS qtd_entregas,
+               (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = t.id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS qtd_alunos
         FROM aplicacoes a JOIN provas p ON p.id = a.prova_id JOIN turmas t ON t.id = a.turma_id
         LEFT JOIN professores pr ON pr.id = a.criada_por_professor_id {wc} ORDER BY a.id DESC""", params_q).fetchall()
     turmas_lista = conn.execute("SELECT * FROM turmas ORDER BY ano_letivo DESC, nome").fetchall()
@@ -17460,8 +17460,8 @@ def listar_aplicacoes(
         SELECT a.id, p.titulo AS prova_titulo, t.nome AS turma_nome, t.ano_letivo,
                a.criada_em, a.aberta, a.modo, a.titulo, a.criada_por_professor_id,
                prof.nome AS criador_nome,
-               (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS qtd_entregas,
-               (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS qtd_alunos
+               (SELECT COUNT(*) FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = a.id AND al.turma_id = a.turma_id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS qtd_entregas,
+               (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = t.id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS qtd_alunos
         FROM aplicacoes a
         JOIN provas p ON p.id = a.prova_id
         JOIN turmas t ON t.id = a.turma_id
@@ -17699,7 +17699,10 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
         conn.close()
         return HTMLResponse(render_page("Não encontrada", '<h1>Aplicação não encontrada</h1><p><a href="/aplicacoes">← Voltar</a></p>', active="aplicacoes"), status_code=404)
 
-    alunos_atuais = conn.execute("SELECT *, NULL AS transferido_para FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
+    _todos_turma = conn.execute("SELECT *, NULL AS transferido_para FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
+    # Só quem CONTA (ativo, não remanejado, não AEE) entra na lista principal, nas métricas e na média.
+    alunos_atuais = [a for a in _todos_turma if not _aluno_fora_motivo(a)]
+    alunos_fora = [a for a in _todos_turma if _aluno_fora_motivo(a)]
     fantasmas = conn.execute("""
         SELECT a.*, t.nome AS transferido_para FROM alunos a
         JOIN turmas t ON t.id = a.turma_id
@@ -17710,15 +17713,17 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
     """, (apl["turma_id"], aplicacao_id, aplicacao_id)).fetchall()
     alunos = list(alunos_atuais) + list(fantasmas)
     entregas = {row["aluno_id"]: row["finalizada_em"] for row in conn.execute("SELECT aluno_id, finalizada_em FROM entregas WHERE aplicacao_id = ?", (aplicacao_id,)).fetchall()}
+    _ids_contam = {a["id"] for a in alunos_atuais}
     total_questoes = conn.execute("SELECT COUNT(*) AS c FROM prova_questoes WHERE prova_id = ?", (apl["prova_id"],)).fetchone()["c"]
 
     alunos_data = {}
     notas = []
-    for a in alunos:
+    for a in list(alunos) + list(alunos_fora):
         if a["id"] in entregas:
             score, _ = _calcular_nota(conn, aplicacao_id, a["id"])
             alunos_data[a["id"]] = {"entregue": True, "score": score}
-            notas.append(score)
+            if a["id"] in _ids_contam:   # só alunos que contam entram na média
+                notas.append(score)
         else:
             alunos_data[a["id"]] = {"entregue": False}
 
@@ -17760,7 +17765,7 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
         metrics_html = f"""
         <div class="metric-grid">
             <div class="metric"><div class="metric-label">Alunos da turma</div><div class="metric-value">{n_atuais}</div></div>
-            <div class="metric"><div class="metric-label">Entregaram</div><div class="metric-value">{len(entregas)}</div></div>
+            <div class="metric"><div class="metric-label">Entregaram</div><div class="metric-value">{sum(1 for i in entregas if i in _ids_contam)}</div></div>
             <div class="metric"><div class="metric-label">Pendentes</div><div class="metric-value">{pendentes_atuais}</div></div>
             <div class="metric"><div class="metric-label">Média</div><div class="metric-value">{media_nota:.1f}/{total_questoes}</div></div>
         </div>"""
@@ -17788,6 +17793,15 @@ def ver_aplicacao(aplicacao_id: int, request: Request):
         lista_html = rows
     else:
         lista_html = '<div class="empty">Esta turma não tem alunos cadastrados.</div>'
+    if alunos_fora:
+        _linhas_fora = ""
+        for a in alunos_fora:
+            d = alunos_data.get(a["id"], {"entregue": False})
+            extra = f' · fez a prova: {d["score"]}/{total_questoes} (não conta na média)' if d["entregue"] else ""
+            _linhas_fora += (f'<div style="padding:6px 0; border-bottom:1px solid var(--border); font-size:13px; color:var(--text-muted);">'
+                             f'{a["nome"]} <span class="badge" style="background:var(--bg-muted); font-size:10px;">{_aluno_fora_motivo(a)}</span>{extra}</div>')
+        lista_html += (f'<details style="margin-top:18px;"><summary style="cursor:pointer; font-weight:600; color:var(--text-muted);">'
+                       f'Fora das contagens ({len(alunos_fora)}) — transferidos, remanejados e AEE</summary>{_linhas_fora}</details>')
 
     content = f"""
         <div class="page-header">
@@ -17960,7 +17974,7 @@ def cartoes_qr(aplicacao_id: int, request: Request):
         conn.close()
         return HTMLResponse("<h1>Aplicação não encontrada</h1>", status_code=404)
 
-    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
+    alunos = conn.execute("SELECT * FROM alunos al WHERE turma_id = ? AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
     conn.close()
 
     base_url = get_base_url(request)
@@ -18128,6 +18142,33 @@ def _faixa_saeb(nota_10):
         if f["min"] <= nota_10 < f["max"]:
             return f
     return FAIXAS_SAEB[-1] if nota_10 >= 8.0 else FAIXAS_SAEB[0]
+
+
+# ── Quem conta nos RESULTADOS (provas, simulados, análises, planilhas) ───────────────
+# Regra única (11/11/2026): o aluno só entra em listas de resultado, médias, rankings e
+# planilhas se estiver ATIVO na escola (não transferido/saída), NÃO remanejado e NÃO for
+# AEE (educação especial tem avaliação própria). O cadastro e o histórico continuam
+# guardados; eles apenas ficam de fora das contas. Cartões-resposta/QR só deixam de ser
+# gerados para transferidos e remanejados (AEE continua recebendo o cartão).
+def _cond_conta(a="al"):
+    return (f"COALESCE({a}.status,'ativo')='ativo' AND COALESCE({a}.remanejado,0)=0 "
+            f"AND COALESCE({a}.educacao_especial,0)=0")
+
+
+def _cond_ativo(a="al"):
+    return f"COALESCE({a}.status,'ativo')='ativo' AND COALESCE({a}.remanejado,0)=0"
+
+
+def _aluno_fora_motivo(a):
+    """Texto curto do motivo de o aluno ficar fora das contas, ou None se ele conta."""
+    k = a.keys()
+    if "status" in k and (a["status"] or "ativo") != "ativo":
+        return "Transferido(a)/saída"
+    if "remanejado" in k and a["remanejado"]:
+        return "Remanejado(a)"
+    if "educacao_especial" in k and a["educacao_especial"]:
+        return "AEE"
+    return None
 
 
 def _calcular_nota_objetiva(conn, aplicacao_id, aluno_id):
@@ -18463,7 +18504,7 @@ def exportar_resultados_excel(aplicacao_id: int):
     total_questoes = len(questoes)
 
     # 3. Obter todos os alunos da turma
-    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
+    alunos = conn.execute("SELECT * FROM alunos al WHERE turma_id = ? AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0 ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
     
     # 4. Obter o mapeamento de entregas finalizadas
     entregas = {row["aluno_id"]: row["finalizada_em"] for row in conn.execute("SELECT aluno_id, finalizada_em FROM entregas WHERE aplicacao_id = ?", (aplicacao_id,)).fetchall()}
@@ -19310,7 +19351,7 @@ def analise_aplicacao(aplicacao_id: int):
     """, (apl["prova_id"],)).fetchall()
     total_questoes = len(questoes)
 
-    entregas = conn.execute("SELECT aluno_id FROM entregas WHERE aplicacao_id = ?", (aplicacao_id,)).fetchall()
+    entregas = conn.execute("SELECT e.aluno_id FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = ? AND al.turma_id = (SELECT ap_x.turma_id FROM aplicacoes ap_x WHERE ap_x.id = e.aplicacao_id) AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0", (aplicacao_id,)).fetchall()
     alunos_entregues = [e["aluno_id"] for e in entregas]
     total_entregas = len(alunos_entregues)
 
@@ -19401,7 +19442,7 @@ def analise_aplicacao(aplicacao_id: int):
             "total": oport_h,
         })
 
-    alunos_info = {a["id"]: a for a in conn.execute("SELECT id, nome, numero FROM alunos WHERE turma_id = ?", (apl["turma_id"],)).fetchall()}
+    alunos_info = {a["id"]: a for a in conn.execute("SELECT id, nome, numero FROM alunos al WHERE turma_id = ? AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0", (apl["turma_id"],)).fetchall()}
 
     ranking = []
     for n in notas_alunos:
@@ -19812,10 +19853,10 @@ def comparativo_prova(prova_id: int):
 
     aplicacoes_dados = []
     for apl in aplicacoes:
-        entregas = conn.execute("SELECT aluno_id FROM entregas WHERE aplicacao_id = ?", (apl["id"],)).fetchall()
+        entregas = conn.execute("SELECT e.aluno_id FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = ? AND al.turma_id = (SELECT ap_x.turma_id FROM aplicacoes ap_x WHERE ap_x.id = e.aplicacao_id) AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0", (apl["id"],)).fetchall()
         alunos_entregues = [e["aluno_id"] for e in entregas]
         n_entregas = len(alunos_entregues)
-        total_alunos = conn.execute("SELECT COUNT(*) AS c FROM alunos a JOIN aplicacoes ap ON ap.turma_id = a.turma_id WHERE ap.id = ?", (apl["id"],)).fetchone()["c"]
+        total_alunos = conn.execute("SELECT COUNT(*) AS c FROM alunos al JOIN aplicacoes ap ON ap.turma_id = al.turma_id WHERE ap.id = ? AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0", (apl["id"],)).fetchone()["c"]
 
         if n_entregas > 0:
             notas = []
@@ -20531,7 +20572,7 @@ def cartao_resposta_pdf(aplicacao_id: int):
         conn.close()
         return RedirectResponse("/aplicacoes", status_code=303)
 
-    alunos = conn.execute("SELECT * FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
+    alunos = conn.execute("SELECT * FROM alunos al WHERE turma_id = ? AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 ORDER BY numero, nome", (apl["turma_id"],)).fetchall()
     questoes = conn.execute("SELECT q.id FROM prova_questoes pq JOIN questoes q ON q.id = pq.questao_id WHERE pq.prova_id = ? ORDER BY pq.ordem", (apl["prova_id"],)).fetchall()
 
     if not alunos:
@@ -23049,7 +23090,7 @@ def _coletar_dados_painel_global(conn, trimestre: int, ano: int, dia: int) -> li
             entregas = conn.execute("""
                 SELECT e.aluno_id, al.nome, al.raca, al.data_nascimento
                 FROM entregas e JOIN alunos al ON al.id = e.aluno_id
-                WHERE e.aplicacao_id = ?
+                WHERE e.aplicacao_id = ? AND al.turma_id = (SELECT ap_x.turma_id FROM aplicacoes ap_x WHERE ap_x.id = e.aplicacao_id) AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0
             """, (apl["id"],)).fetchall()
 
             for e in entregas:
@@ -23139,7 +23180,7 @@ def _analise_disciplinas_turma(conn, aplicacao_id: int, prova_id: int) -> list:
     consolidadas."""
     alunos = conn.execute("""
         SELECT DISTINCT e.aluno_id, al.nome FROM entregas e
-        JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = ?
+        JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = ? AND al.turma_id = (SELECT ap_x.turma_id FROM aplicacoes ap_x WHERE ap_x.id = e.aplicacao_id) AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0
     """, (aplicacao_id,)).fetchall()
     aluno_nomes = {a["aluno_id"]: a["nome"] for a in alunos}
     if not aluno_nomes:
@@ -23935,12 +23976,15 @@ def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
     prova_id = _prova_id_do_simulado(conn, sim_id)
     if not prova_id:
         return {}
-    aplicacao = conn.execute(
-        "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)
-    ).fetchone()
-    if not aplicacao:
+    # Aplicações do simulado em QUALQUER turma: um aluno remanejado pode ter feito a
+    # prova (cartão digitalizado) na aplicação da turma antiga e hoje constar em outra.
+    # A nota dele precisa aparecer na turma onde ele está, então somamos as respostas
+    # dele em todas as aplicações deste simulado (11/11/2026).
+    aplic_ids = [r["id"] for r in conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ?", (prova_id,)).fetchall()]
+    if not aplic_ids:
         return {}
-    aplicacao_id = aplicacao["id"]
+    ph = ",".join("?" * len(aplic_ids))
+    aplic_turma = [r["id"] for r in conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)).fetchall()]
 
     total_questoes = conn.execute(
         """SELECT COUNT(*) AS c FROM simulado_questoes sq
@@ -23953,18 +23997,31 @@ def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
     # (Dia 01 + Dia 02 = 2,0 pontos), não algo que varia por simulado.
     valor_questao = (1.0 / total_questoes) if total_questoes else 0
 
+    # Quem entra: todo aluno ATIVO da turma (mesmo remanejado ou AEE) + qualquer aluno
+    # (inclusive de outra turma ou transferido) que tenha respostas na aplicação desta turma.
+    # Remanejado/AEE/transferido SEM nenhuma resposta não aparece (nada a mostrar).
     alunos = conn.execute(
-        "SELECT id, nome, numero FROM alunos WHERE turma_id = ? ORDER BY numero, nome", (turma_id,)
+        f"""SELECT al.id, al.nome, al.numero, al.status, al.remanejado, al.educacao_especial, al.turma_id
+            FROM alunos al
+            WHERE (al.turma_id = ? AND COALESCE(al.status,'ativo')='ativo')
+               OR al.id IN (SELECT DISTINCT aluno_id FROM respostas WHERE aplicacao_id IN ({",".join("?" * len(aplic_turma)) or "NULL"}))
+            ORDER BY al.numero, al.nome""", (turma_id, *aplic_turma)
     ).fetchall()
 
     resultado = {}
     for aluno in alunos:
         acertos = conn.execute(
-            """SELECT COUNT(*) AS c FROM respostas r
+            f"""SELECT COUNT(DISTINCT r.questao_id) AS c FROM respostas r
                JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
-               WHERE r.aplicacao_id = ? AND r.aluno_id = ?""",
-            (aplicacao_id, aluno["id"])
+               WHERE r.aplicacao_id IN ({ph}) AND r.aluno_id = ?""",
+            (*aplic_ids, aluno["id"])
         ).fetchone()["c"]
+        tem_resp = conn.execute(
+            f"SELECT 1 FROM respostas WHERE aplicacao_id IN ({ph}) AND aluno_id = ? LIMIT 1", (*aplic_ids, aluno["id"])
+        ).fetchone()
+        especial = (aluno["status"] or "ativo") != "ativo" or aluno["remanejado"] or aluno["educacao_especial"] or aluno["turma_id"] != turma_id
+        if especial and not tem_resp:
+            continue
         resultado[aluno["id"]] = {
             "nome": aluno["nome"], "numero": aluno["numero"],
             "acertos": acertos, "total_questoes": total_questoes,
@@ -23985,12 +24042,10 @@ def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) 
     prova_id = _prova_id_do_simulado(conn, sim_id)
     if not prova_id:
         return {}
-    aplicacao = conn.execute(
-        "SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)
-    ).fetchone()
-    if not aplicacao:
+    aplic_ids = [r["id"] for r in conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ?", (prova_id,)).fetchall()]
+    if not aplic_ids:
         return {}
-    aplicacao_id = aplicacao["id"]
+    ph = ",".join("?" * len(aplic_ids))
 
     total_questoes = conn.execute(
         """SELECT COUNT(*) AS c FROM simulado_questoes sq
@@ -24008,11 +24063,11 @@ def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) 
     composicao = {}
     for b in blocos:
         acertos = conn.execute(
-            """SELECT COUNT(*) AS c FROM respostas r
+            f"""SELECT COUNT(DISTINCT r.questao_id) AS c FROM respostas r
                JOIN simulado_questoes sq ON sq.questao_id = r.questao_id AND sq.bloco_id = ?
                JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
-               WHERE r.aplicacao_id = ? AND r.aluno_id = ?""",
-            (b["bloco_id"], aplicacao_id, aluno_id)
+               WHERE r.aplicacao_id IN ({ph}) AND r.aluno_id = ?""",
+            (b["bloco_id"], *aplic_ids, aluno_id)
         ).fetchone()["c"]
         pontos = round(acertos * valor_questao, 2)
         composicao[b["disciplina_nome"]] = composicao.get(b["disciplina_nome"], 0) + pontos
@@ -24687,8 +24742,8 @@ def simulado_aplicacoes(sim_id: int):
     if prova_vinculada:
         apps = conn.execute("""
             SELECT a.*, t.nome AS turma_nome,
-                   (SELECT COUNT(*) FROM entregas WHERE aplicacao_id = a.id) AS n_entregas,
-                   (SELECT COUNT(*) FROM alunos WHERE turma_id = t.id) AS n_alunos
+                   (SELECT COUNT(*) FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = a.id AND al.turma_id = a.turma_id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS n_entregas,
+                   (SELECT COUNT(*) FROM alunos al WHERE al.turma_id = t.id AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0) AS n_alunos
             FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id
             WHERE a.prova_id = ? AND a.titulo LIKE ?
         """, (prova_vinculada["id"], f"%[SIM-{sim_id}]%")).fetchall()
@@ -24816,7 +24871,7 @@ def diagnostico_respostas_simulado(sim_id: int):
         entregas = conn.execute("""
             SELECT e.aluno_id, al.nome AS aluno_nome, al.numero
             FROM entregas e JOIN alunos al ON al.id = e.aluno_id
-            WHERE e.aplicacao_id = ?
+            WHERE e.aplicacao_id = ? AND al.turma_id = (SELECT ap_x.turma_id FROM aplicacoes ap_x WHERE ap_x.id = e.aplicacao_id) AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0
         """, (apl["aplicacao_id"],)).fetchall()
 
         for e in entregas:
@@ -25019,7 +25074,7 @@ def auditoria_calibracao_global():
             entregas = conn.execute("""
                 SELECT e.aluno_id, al.nome AS aluno_nome, al.numero
                 FROM entregas e JOIN alunos al ON al.id = e.aluno_id
-                WHERE e.aplicacao_id = ?
+                WHERE e.aplicacao_id = ? AND al.turma_id = (SELECT ap_x.turma_id FROM aplicacoes ap_x WHERE ap_x.id = e.aplicacao_id) AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0
             """, (apl["aplicacao_id"],)).fetchall()
 
             for e in entregas:
@@ -26887,10 +26942,10 @@ def escanear_simulado_tela(sim_id: int, app_id: int):
         WHERE a.id = ?
     """, (app_id,)).fetchone()
     n_cartoes = conn.execute(
-        "SELECT COUNT(DISTINCT aluno_id) FROM entregas WHERE aplicacao_id = ?", (app_id,)
+        "SELECT COUNT(DISTINCT e.aluno_id) FROM entregas e JOIN alunos al ON al.id = e.aluno_id WHERE e.aplicacao_id = ? AND al.turma_id = (SELECT ap_x.turma_id FROM aplicacoes ap_x WHERE ap_x.id = e.aplicacao_id) AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0", (app_id,)
     ).fetchone()[0]
     n_alunos = conn.execute(
-        "SELECT COUNT(*) FROM alunos WHERE turma_id = ?", (apl["turma_id"],)
+        "SELECT COUNT(*) FROM alunos al WHERE turma_id = ? AND COALESCE(al.status,'ativo')='ativo' AND COALESCE(al.remanejado,0)=0 AND COALESCE(al.educacao_especial,0)=0", (apl["turma_id"],)
     ).fetchone()[0] if apl else 0
     conn.close()
     if not sim or not apl:
