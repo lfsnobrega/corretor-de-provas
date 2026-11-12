@@ -1746,6 +1746,33 @@ def _compactar_imagem_ate(data: bytes, limite_kb: int = LIMITE_ANEXO_KB):
         return data, False
 
 
+_RE_TEM_TAGS = re.compile(r"</?(p|br|div|ul|ol|li|strong|b|em|i|u|span|h\d|blockquote|font|table)\b", re.I)
+
+
+def _desc_prova_para_html(descricao) -> tuple:
+    """Observações da prova -> (html_seguro, eh_texto_puro). Provas antigas guardam texto
+    puro (com quebras de linha); as novas guardam HTML do editor (negrito, itálico etc.)."""
+    d = (descricao or "").strip()
+    if not d:
+        return "", True
+    if _RE_TEM_TAGS.search(d):
+        return _sanitizar_html_enunciado(d), False
+    return html.escape(d), True
+
+
+def _desc_prova_para_editor(descricao) -> str:
+    """Valor inicial do editor de Observações (texto puro antigo vira HTML com <br>)."""
+    h, puro = _desc_prova_para_html(descricao)
+    return h.replace("\n", "<br>") if puro else h
+
+
+def _desc_prova_curta(descricao, limite: int = 180) -> str:
+    """Versão curta, só texto, para listas."""
+    t = re.sub(r"<[^>]+>", " ", descricao or "")
+    t = re.sub(r"\s+", " ", html.unescape(t)).strip()
+    return html.escape(t[:limite] + ("…" if len(t) > limite else ""))
+
+
 def _sanitizar_html_enunciado(html: str) -> str:
     """Permite apenas tags básicas de formatação no enunciado. Remove scripts, iframes, handlers JS.
     Tags permitidas: strong/b, em/i, u, br, p, div (só com style text-align), span (só com style text-align), ul, ol, li, blockquote.
@@ -11387,7 +11414,7 @@ def listar_provas(request: Request, disciplina: Optional[str] = None, ano: Optio
             tm = tags_map.get(p["id"], {"disciplinas": set(), "anos": set()})
             disc_tags = "".join(f'<span class="badge" style="background:var(--accent-bg); color:var(--accent);">{d}</span>' for d in sorted(tm["disciplinas"]))
             ano_tags = "".join(f'<span class="badge">{a}</span>' for a in sorted(tm["anos"]))
-            desc = f'<div style="font-size:13px; color:var(--text-muted); margin-top:4px;">{p["descricao"]}</div>' if p["descricao"] else ""
+            desc = f'<div style="font-size:13px; color:var(--text-muted); margin-top:4px;">{_desc_prova_curta(p["descricao"])}</div>' if p["descricao"] else ""
             n_apl = apl_count.get(p["id"], 0)
             apl_badge = f'<span class="badge" style="background:var(--orange-bg); color:var(--orange);">{n_apl} aplicação{"" if n_apl == 1 else "ões"}</span>' if n_apl else ""
 
@@ -11826,7 +11853,7 @@ def form_nova_prova():
         '<div class="page-header"><h1>Nova prova</h1></div>'
         '<form action="/provas/nova" method="post">'
         '<label>Título<input type="text" name="titulo" required placeholder="Ex: Prova de Matemática — 1º Bimestre — 9º Ano"></label>'
-        '<label>Descrição (opcional)<textarea name="descricao" rows="2"></textarea></label>'
+        + _editor_enunciado_html("descricao", "", required=False, label="Observações da prova (opcional) — aparecem no início da prova, depois de Nome/Turma/Data", min_height=110, placeholder="Ex.: orientações aos alunos, data, assunto… (use negrito, itálico, listas etc.)") +
         f'{picker}'
         '<div class="page-actions"><button type="submit" class="btn btn-primary">Criar prova</button><a href="/provas" class="btn">Cancelar</a></div>'
         '</form>'
@@ -11850,7 +11877,7 @@ def criar_prova(request: Request, titulo: str = Form(...), descricao: str = Form
         return RedirectResponse("/provas/nova", status_code=303)
     conn = get_db()
     cursor = conn.execute("INSERT INTO provas (titulo, descricao, criada_por_professor_id) VALUES (?, ?, ?)",
-                          (titulo.strip(), descricao.strip() or None, prof["id"]))
+                          (titulo.strip(), _sanitizar_html_enunciado(descricao).strip() or None, prof["id"]))
     prova_id = cursor.lastrowid
     for ordem, qid in enumerate(questao_ids):
         conn.execute("INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?, ?, ?)", (prova_id, qid, ordem))
@@ -11926,7 +11953,8 @@ def ver_prova(prova_id: int):
         _partes_q.append(_card)
     questoes_html = "".join(_partes_q)
     conn.close()
-    desc_html = f'<p class="subtitle" style="white-space:pre-line;">{html.escape(prova["descricao"])}</p>' if prova["descricao"] else ""
+    _dh, _dpuro = _desc_prova_para_html(prova["descricao"])
+    desc_html = f'<div class="subtitle" style="{"white-space:pre-line;" if _dpuro else ""}">{_dh}</div>' if _dh else ""
     comparativo_btn = ""
     if n_aplicacoes > 0:
         label = "Comparativo entre turmas" if n_aplicacoes >= 2 else "Ver análises pedagógicas"
@@ -11970,7 +11998,7 @@ def form_editar_prova(id: int):
         f'<div class="page-header"><h1>Editar: {prova["titulo"]}</h1></div>'
         f'<form action="/provas/{id}/editar" method="post">'
         f'<label>Título<input type="text" name="titulo" value="{html.escape(prova["titulo"], quote=True)}" required></label>'
-        f'<label>Descrição (opcional)<textarea name="descricao" rows="2">{html.escape(descricao)}</textarea></label>'
+        + _editor_enunciado_html("descricao", _desc_prova_para_editor(descricao), required=False, label="Observações da prova (opcional) — aparecem no início da prova, depois de Nome/Turma/Data", min_height=110, placeholder="Ex.: orientações aos alunos, data, assunto… (use negrito, itálico, listas etc.)") +
         f'{picker}'
         '<div class="page-actions" style="margin-top:20px;">'
         '<button type="submit" class="btn btn-primary">Salvar alterações</button>'
@@ -12011,7 +12039,7 @@ def atualizar_prova(id: int, titulo: str = Form(...), descricao: str = Form(""),
             vistos.add(q); unicos.append(q)
 
     conn.execute("UPDATE provas SET titulo = ?, descricao = ? WHERE id = ?",
-                 (titulo.strip(), descricao.strip() or None, id))
+                 (titulo.strip(), _sanitizar_html_enunciado(descricao).strip() or None, id))
     conn.execute("DELETE FROM prova_questoes WHERE prova_id = ?", (id,))
     for idx, q_id in enumerate(unicos):
         conn.execute("INSERT INTO prova_questoes (prova_id, questao_id, ordem) VALUES (?, ?, ?)", (id, q_id, idx))
@@ -20142,7 +20170,7 @@ def previa_prova_nao_salva(titulo: str = Form(""), descricao: str = Form(""), qu
             SELECT q.id, q.enunciado, q.tipo, d.nome AS disciplina_nome
             FROM questoes q JOIN disciplinas d ON d.id = q.disciplina_id WHERE q.id IN ({ph})""", ids).fetchall()}
         questoes = [por_id[i] for i in ids if i in por_id]
-    resp = _montar_prova_impressa(conn, titulo.strip() or "(prova sem título)", descricao.strip() or None, questoes, None, None, previa=True)
+    resp = _montar_prova_impressa(conn, titulo.strip() or "(prova sem título)", _sanitizar_html_enunciado(descricao).strip() or None, questoes, None, None, previa=True)
     conn.close()
     return resp
 
@@ -20221,13 +20249,8 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
 
     # Observações da prova: respeita as quebras de linha/parágrafos digitados (antes tudo
     # virava um bloco só, gigante e "desconfigurado" na impressão) — 12/11/2026.
-    if descricao:
-        _d = descricao.strip()
-        if not re.search(r"</?(p|br|div|ul|ol|li|strong|b|em|i|span|h\d)\b", _d, re.I):
-            _d = html.escape(_d)
-        desc_html = f'<div class="desc-prova">{_d}</div>'
-    else:
-        desc_html = ""
+    _d, _puro = _desc_prova_para_html(descricao)
+    desc_html = f'<div class="desc-prova{" desc-puro" if _puro else ""}">{_d}</div>' if _d else ""
 
     if previa:
         faixa_previa = ('<div class="no-print" style="background:#fff7ed;border:1px solid #fdba74;color:#9a3412;padding:10px 14px;'
@@ -20269,8 +20292,10 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         .inst-header .inst-text .escola {{ font-weight: 700; font-size: 12px; color: #000; }}
         .header {{ border-bottom: 2px solid #000; padding-bottom: 12px; margin-bottom: 18px; }}
         .header h1 {{ margin: 0; font-size: 18px; }}
-        .desc-prova {{ margin: 10px 0 0; color: #222; font-size: 11px; line-height: 1.5; text-align: justify; white-space: pre-line; overflow-wrap: anywhere; }}
+        .desc-prova {{ margin: 16px 0 0; color: #222; font-size: 11px; line-height: 1.5; text-align: justify; overflow-wrap: anywhere; }}
+        .desc-prova.desc-puro {{ white-space: pre-line; }}
         .desc-prova p {{ margin: 0 0 6px; }}
+        .desc-prova ul, .desc-prova ol {{ margin: 4px 0 4px 22px; padding: 0; }}
         .student-info {{ display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; margin-top: 14px; font-size: 10px; color:#555; }}
         .student-info > div {{ border-bottom: 1px solid #555; padding-bottom: 6px; min-height: 24px; }}
         .q-print {{ margin-bottom: 18px; page-break-inside: avoid; break-inside: avoid; }}
@@ -20316,12 +20341,12 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
     </div>
     <div class="header">
         <h1>{titulo}</h1>
-        {desc_html}
         <div class="student-info">
             <div><small>Nome:</small></div>
             <div><small>Turma:</small></div>
             <div><small>Data:</small></div>
         </div>
+        {desc_html}
     </div>
     {questoes_html}
 <script>{CAIXA_ALTA_JS}</script>
