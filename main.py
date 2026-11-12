@@ -11926,7 +11926,7 @@ def ver_prova(prova_id: int):
         _partes_q.append(_card)
     questoes_html = "".join(_partes_q)
     conn.close()
-    desc_html = f'<p class="subtitle">{prova["descricao"]}</p>' if prova["descricao"] else ""
+    desc_html = f'<p class="subtitle" style="white-space:pre-line;">{html.escape(prova["descricao"])}</p>' if prova["descricao"] else ""
     comparativo_btn = ""
     if n_aplicacoes > 0:
         label = "Comparativo entre turmas" if n_aplicacoes >= 2 else "Ver análises pedagógicas"
@@ -20211,7 +20211,7 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
 
         bncc_pref = _bncc_prefix(conn, q["id"])
         questoes_html += f"""
-        <div class="q-print">
+        <div class="q-print{' q-longa' if len(textos_html) > 1200 else ''}">
             <div class="q-head">Questão {idx} · {q['disciplina_nome']}</div>
             {textos_html}{imagens_html}
             <div class="q-enunciado">{bncc_pref}{q['enunciado']}</div>
@@ -20219,7 +20219,15 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         </div>
         """
 
-    desc_html = f'<p style="margin:6px 0 0; color:#555;">{descricao}</p>' if descricao else ""
+    # Observações da prova: respeita as quebras de linha/parágrafos digitados (antes tudo
+    # virava um bloco só, gigante e "desconfigurado" na impressão) — 12/11/2026.
+    if descricao:
+        _d = descricao.strip()
+        if not re.search(r"</?(p|br|div|ul|ol|li|strong|b|em|i|span|h\d)\b", _d, re.I):
+            _d = html.escape(_d)
+        desc_html = f'<div class="desc-prova">{_d}</div>'
+    else:
+        desc_html = ""
 
     if previa:
         faixa_previa = ('<div class="no-print" style="background:#fff7ed;border:1px solid #fdba74;color:#9a3412;padding:10px 14px;'
@@ -20261,9 +20269,13 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         .inst-header .inst-text .escola {{ font-weight: 700; font-size: 12px; color: #000; }}
         .header {{ border-bottom: 2px solid #000; padding-bottom: 12px; margin-bottom: 18px; }}
         .header h1 {{ margin: 0; font-size: 18px; }}
+        .desc-prova {{ margin: 10px 0 0; color: #222; font-size: 11px; line-height: 1.5; text-align: justify; white-space: pre-line; overflow-wrap: anywhere; }}
+        .desc-prova p {{ margin: 0 0 6px; }}
         .student-info {{ display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; margin-top: 14px; font-size: 10px; color:#555; }}
         .student-info > div {{ border-bottom: 1px solid #555; padding-bottom: 6px; min-height: 24px; }}
-        .q-print {{ margin-bottom: 18px; page-break-inside: avoid; }}
+        .q-print {{ margin-bottom: 18px; page-break-inside: avoid; break-inside: avoid; }}
+        .q-print.q-longa {{ page-break-inside: auto; break-inside: auto; }}
+        .q-print.q-longa .q-head, .q-print.q-longa .q-enunciado {{ break-after: avoid; }}
         .q-head {{ font-size: 10px; color: #555; margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }}
         blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 8px 0; color: #333; font-style: italic; background: #fafafa; font-size: 11px; }}
         blockquote footer {{ font-size: 9px; margin-top: 4px; font-style: normal; }}
