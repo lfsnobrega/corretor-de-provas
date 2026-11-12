@@ -24003,98 +24003,149 @@ def _prova_id_do_simulado(conn, sim_id: int) -> Optional[int]:
     return row["id"] if row else None
 
 
-def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
-    """Calcula a nota simples de cada aluno da turma em um simulado específico:
-    soma de acertos × valor da questão (prova de valor 'x', cada questão vale 'y').
-    Retorna dict aluno_id -> {nome, numero, acertos, total_questoes, nota}."""
-    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
-    if not sim:
-        return {}
+def _relnotas_norm_nome(nome) -> str:
+    t = unicodedata.normalize("NFKD", str(nome or "")).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
+def _relnotas_chave_ordem(numero, nome):
+    """Ordem da lista: nº de chamada (quem não tem nº vai para o fim) e depois nome
+    em ordem alfabética, ignorando acentos/maiúsculas."""
+    return (numero is None, numero if numero is not None else 0, _relnotas_norm_nome(nome))
+
+
+def _relnotas_base_simulado(conn, sim_id: int):
+    """(aplic_ids de TODAS as turmas, total_questoes, valor_questao) ou None."""
     prova_id = _prova_id_do_simulado(conn, sim_id)
     if not prova_id:
-        return {}
-    # Aplicações do simulado em QUALQUER turma: um aluno remanejado pode ter feito a
-    # prova (cartão digitalizado) na aplicação da turma antiga e hoje constar em outra.
-    # A nota dele precisa aparecer na turma onde ele está, então somamos as respostas
-    # dele em todas as aplicações deste simulado (11/11/2026).
+        return None
     aplic_ids = [r["id"] for r in conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ?", (prova_id,)).fetchall()]
     if not aplic_ids:
-        return {}
-    ph = ",".join("?" * len(aplic_ids))
-    aplic_turma = [r["id"] for r in conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ? AND turma_id = ?", (prova_id, turma_id)).fetchall()]
-
+        return None
     total_questoes = conn.execute(
         """SELECT COUNT(*) AS c FROM simulado_questoes sq
            JOIN simulado_blocos b ON b.id = sq.bloco_id
            WHERE b.simulado_id = ?""", (sim_id,)
     ).fetchone()["c"]
     # Cada simulado (por dia) vale sempre 1,0 ponto no total, dividido igualmente entre
-    # as questões — ex: 40 questões = 0,025 por questão. Não usamos o campo configurável
-    # "pontuacao_total" aqui porque essa é uma convenção fixa desse relatório específico
-    # (Dia 01 + Dia 02 = 2,0 pontos), não algo que varia por simulado.
+    # as questões — ex: 40 questões = 0,025 por questão (convenção fixa deste relatório:
+    # Dia 01 + Dia 02 = 2,0 pontos).
     valor_questao = (1.0 / total_questoes) if total_questoes else 0
+    return prova_id, aplic_ids, total_questoes, valor_questao
 
-    # Quem entra: todo aluno ATIVO da turma (mesmo remanejado ou AEE) + qualquer aluno
-    # (inclusive de outra turma ou transferido) que tenha respostas na aplicação desta turma.
-    # Remanejado/AEE/transferido SEM nenhuma resposta não aparece (nada a mostrar).
+
+def _relnotas_alunos_resposta(conn, aplic_ids) -> set:
+    ph = ",".join("?" * len(aplic_ids))
+    return {r["aluno_id"] for r in conn.execute(
+        f"SELECT DISTINCT aluno_id FROM respostas WHERE aplicacao_id IN ({ph})", aplic_ids).fetchall()}
+
+
+def _relnotas_ids_do_aluno(conn, aluno, turma_id, com_resp: set) -> list:
+    """Quais cadastros (aluno_id) somar para este aluno.
+    Normalmente só ele mesmo. Se ele NÃO tem cartão neste simulado mas existe outro
+    cadastro com o MESMO nome, marcado como remanejado ou em outra turma, que tem
+    cartão (caso do aluno remanejado que ganhou cadastro novo na turma nova e fez a
+    prova com o QR do cadastro antigo), usa o cartão desse outro cadastro."""
+    if aluno["id"] in com_resp:
+        return [aluno["id"]]
+    alvo = _relnotas_norm_nome(aluno["nome"])
+    if not alvo:
+        return [aluno["id"]]
+    candidatos = conn.execute(
+        """SELECT id, nome FROM alunos
+           WHERE id != ? AND (COALESCE(remanejado,0)=1 OR turma_id != ?)""",
+        (aluno["id"], turma_id)).fetchall()
+    for c in candidatos:
+        if c["id"] in com_resp and _relnotas_norm_nome(c["nome"]) == alvo:
+            return [c["id"]]
+    return [aluno["id"]]
+
+
+def _coletar_notas_simulado_turma(conn, sim_id: int, turma_id: int) -> dict:
+    """Nota simples de cada aluno DA TURMA em um simulado (acertos × valor da questão).
+
+    Revisado em 12/11/2026 (Felipe: 'trazendo alunos fora de ordem e estudantes que
+    não são da turma'). Regras:
+      • Entram SOMENTE alunos cadastrados nesta turma (alunos.turma_id).
+        Cartões de alunos de OUTRAS turmas que foram digitalizados na aplicação desta
+        turma NÃO entram aqui — eles aparecem na turma deles (ver abaixo).
+      • Aluno ativo entra sempre (sem cartão = nota 0). Remanejado, AEE ou
+        transferido só entra se tiver cartão neste simulado (marcado na lista).
+      • Os acertos do aluno são procurados em TODAS as aplicações do simulado
+        (qualquer turma): se o cartão dele foi lido na turma errada, a nota continua
+        aparecendo na turma certa dele.
+    Retorna dict aluno_id -> {nome, numero, acertos, total_questoes, nota, tem_cartao, marca}."""
+    base = _relnotas_base_simulado(conn, sim_id)
+    if not base:
+        return {}
+    _prova_id, aplic_ids, total_questoes, valor_questao = base
+    ph = ",".join("?" * len(aplic_ids))
+    com_resp = _relnotas_alunos_resposta(conn, aplic_ids)
+
     alunos = conn.execute(
-        f"""SELECT al.id, al.nome, al.numero, al.status, al.remanejado, al.educacao_especial, al.turma_id
-            FROM alunos al
-            WHERE (al.turma_id = ? AND COALESCE(al.status,'ativo')='ativo')
-               OR al.id IN (SELECT DISTINCT aluno_id FROM respostas WHERE aplicacao_id IN ({",".join("?" * len(aplic_turma)) or "NULL"}))
-            ORDER BY al.numero, al.nome""", (turma_id, *aplic_turma)
+        """SELECT id, nome, numero, status, remanejado, educacao_especial
+           FROM alunos WHERE turma_id = ?""", (turma_id,)
     ).fetchall()
 
     resultado = {}
     for aluno in alunos:
+        ids = _relnotas_ids_do_aluno(conn, aluno, turma_id, com_resp)
+        tem_cartao = any(i in com_resp for i in ids)
+        fora_ativo = (aluno["status"] or "ativo") != "ativo"
+        especial = fora_ativo or aluno["remanejado"] or aluno["educacao_especial"]
+        if especial and not tem_cartao:
+            continue
         acertos = conn.execute(
             f"""SELECT COUNT(DISTINCT r.questao_id) AS c FROM respostas r
                JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
-               WHERE r.aplicacao_id IN ({ph}) AND r.aluno_id = ?""",
-            (*aplic_ids, aluno["id"])
-        ).fetchone()["c"]
-        tem_resp = conn.execute(
-            f"SELECT 1 FROM respostas WHERE aplicacao_id IN ({ph}) AND aluno_id = ? LIMIT 1", (*aplic_ids, aluno["id"])
-        ).fetchone()
-        especial = (aluno["status"] or "ativo") != "ativo" or aluno["remanejado"] or aluno["educacao_especial"] or aluno["turma_id"] != turma_id
-        if especial and not tem_resp:
-            continue
+               WHERE r.aplicacao_id IN ({ph}) AND r.aluno_id IN ({",".join("?" * len(ids))})""",
+            (*aplic_ids, *ids)
+        ).fetchone()["c"] if tem_cartao else 0
+        marca = ("Transf." if fora_ativo else "Rem." if aluno["remanejado"] else "AEE" if aluno["educacao_especial"] else "")
         resultado[aluno["id"]] = {
             "nome": aluno["nome"], "numero": aluno["numero"],
             "acertos": acertos, "total_questoes": total_questoes,
-            # Nota "crua" (não arredondada ainda) — o arredondamento pra 1 casa decimal
-            # (comercial, half-up) acontece só na hora de exibir, pra não perder precisão
-            # antes da soma dos dois dias.
+            # Nota "crua" — o arredondamento (1 casa, comercial) só acontece na exibição.
             "nota": round(acertos * valor_questao, 4),
+            "tem_cartao": tem_cartao, "marca": marca,
         }
     return resultado
 
 
-def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) -> dict:
-    """Composição da nota de um aluno em um simulado (um dia), por disciplina de cada bloco.
-    Retorna dict disciplina_nome -> pontos obtidos naquele bloco."""
-    sim = conn.execute("SELECT * FROM simulados WHERE id = ?", (sim_id,)).fetchone()
-    if not sim:
-        return {}
+def _relnotas_cartoes_de_outras_turmas(conn, sim_id: int, turma_id: int) -> list:
+    """Cartões digitalizados na aplicação DESTA turma, mas de alunos cadastrados em
+    OUTRA turma (não entram no relatório desta turma). Para o aviso de conferência."""
     prova_id = _prova_id_do_simulado(conn, sim_id)
     if not prova_id:
-        return {}
-    aplic_ids = [r["id"] for r in conn.execute("SELECT id FROM aplicacoes WHERE prova_id = ?", (prova_id,)).fetchall()]
-    if not aplic_ids:
-        return {}
-    ph = ",".join("?" * len(aplic_ids))
+        return []
+    return conn.execute(
+        """SELECT DISTINCT al.id, al.nome, t.nome AS turma_nome, ap.id AS aplicacao_id
+           FROM aplicacoes ap
+           JOIN entregas e ON e.aplicacao_id = ap.id
+           JOIN alunos al ON al.id = e.aluno_id
+           LEFT JOIN turmas t ON t.id = al.turma_id
+           WHERE ap.prova_id = ? AND ap.turma_id = ? AND al.turma_id != ap.turma_id
+           ORDER BY al.nome""", (prova_id, turma_id)).fetchall()
 
-    total_questoes = conn.execute(
-        """SELECT COUNT(*) AS c FROM simulado_questoes sq
-           JOIN simulado_blocos b ON b.id = sq.bloco_id
-           WHERE b.simulado_id = ?""", (sim_id,)
-    ).fetchone()["c"]
-    valor_questao = (1.0 / total_questoes) if total_questoes else 0
+
+def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) -> dict:
+    """Composição da nota de um aluno em um simulado (um dia), por disciplina de cada bloco.
+    Usa as MESMAS regras do relatório (todas as aplicações do simulado + cadastro antigo
+    do remanejado). Retorna dict disciplina_nome -> pontos obtidos naquele bloco."""
+    base = _relnotas_base_simulado(conn, sim_id)
+    if not base:
+        return {}
+    _prova_id, aplic_ids, total_questoes, valor_questao = base
+    ph = ",".join("?" * len(aplic_ids))
+    aluno = conn.execute("SELECT id, nome FROM alunos WHERE id = ?", (aluno_id,)).fetchone()
+    if not aluno:
+        return {}
+    ids = _relnotas_ids_do_aluno(conn, aluno, turma_id, _relnotas_alunos_resposta(conn, aplic_ids))
 
     blocos = conn.execute(
         """SELECT b.id AS bloco_id, d.nome AS disciplina_nome
            FROM simulado_blocos b JOIN disciplinas d ON d.id = b.disciplina_id
-           WHERE b.simulado_id = ?""", (sim_id,)
+           WHERE b.simulado_id = ? ORDER BY b.numero""", (sim_id,)
     ).fetchall()
 
     composicao = {}
@@ -24103,8 +24154,8 @@ def _composicao_nota_aluno_dia(conn, sim_id: int, turma_id: int, aluno_id: int) 
             f"""SELECT COUNT(DISTINCT r.questao_id) AS c FROM respostas r
                JOIN simulado_questoes sq ON sq.questao_id = r.questao_id AND sq.bloco_id = ?
                JOIN alternativas a ON a.questao_id = r.questao_id AND a.letra = r.alternativa_letra AND a.correta = 1
-               WHERE r.aplicacao_id IN ({ph}) AND r.aluno_id = ?""",
-            (b["bloco_id"], *aplic_ids, aluno_id)
+               WHERE r.aplicacao_id IN ({ph}) AND r.aluno_id IN ({",".join("?" * len(ids))})""",
+            (b["bloco_id"], *aplic_ids, *ids)
         ).fetchone()["c"]
         pontos = round(acertos * valor_questao, 2)
         composicao[b["disciplina_nome"]] = composicao.get(b["disciplina_nome"], 0) + pontos
@@ -24285,21 +24336,45 @@ def gerar_relatorio_notas_simulado(par: str, turma_id: str, ponderado: int = 0):
 
     notas1 = _coletar_notas_simulado_turma(conn, sim1_id, turma_id)
     notas2 = _coletar_notas_simulado_turma(conn, sim2_id, turma_id)
+    # Cartões de alunos de outras turmas lidos na aplicação desta turma (só aviso).
+    _outros, _apl_outros = {}, set()
+    for _sid in (sim1_id, sim2_id):
+        for r in _relnotas_cartoes_de_outras_turmas(conn, _sid, turma_id):
+            _outros.setdefault(r["id"], r)
+            _apl_outros.add(r["aplicacao_id"])
     conn.close()
 
     alunos_ids = set(notas1.keys()) | set(notas2.keys())
     if not alunos_ids:
-        content = '<div class="empty">Nenhum aluno com respostas registradas para este par de simulados nesta turma.</div>'
+        content = '<div class="empty">Nenhum aluno cadastrado nesta turma com dados para este par de simulados.</div>'
         return render_page("Relatório de Notas", content, active="simulados")
 
-    alunos_ids = sorted(alunos_ids, key=lambda aid: ((notas1.get(aid) or notas2.get(aid))["numero"] or 999))
+    def _k(aid):
+        b = notas1.get(aid) or notas2.get(aid)
+        return _relnotas_chave_ordem(b["numero"], b["nome"])
+    alunos_ids = sorted(alunos_ids, key=_k)
+
+    aviso_outros = ""
+    if _outros:
+        _apl = sorted(_apl_outros)
+        _links = " · ".join(f'<a href="/aplicacoes/{x}/corrigir-turma" target="_blank">corrigir cartões da aplicação {x}</a>' for x in _apl)
+        _nomes = "; ".join(f'{html.escape(r["nome"])} ({html.escape(r["turma_nome"] or "sem turma")})' for r in sorted(_outros.values(), key=lambda r: _relnotas_norm_nome(r["nome"])))
+        aviso_outros = (f'<div class="no-print" style="background:#fff7ed;border:1px solid #fdba74;color:#9a3412;padding:10px 14px;'
+                        f'border-radius:8px;margin-bottom:14px;font-size:12px;">⚠️ <strong>{len(_outros)} aluno(s) de OUTRAS turmas</strong> '
+                        f'tiveram cartão digitalizado na aplicação desta turma. Eles <strong>não</strong> aparecem nesta lista — a nota deles sai no relatório da turma de cada um. '
+                        f'Para organizar, use: {_links}.<div style="margin-top:6px;color:#7c2d12;">{_nomes}</div></div>')
 
     linhas = ""
     for aid in alunos_ids:
         d1 = notas1.get(aid)
         d2 = notas2.get(aid)
         base = d1 or d2
-        nome = base["nome"]
+        nome = html.escape(base["nome"] or "")
+        if base.get("marca"):
+            nome += f' <span style="font-size:10px;font-weight:700;color:#555;border:1px solid #999;border-radius:6px;padding:0 5px;">{base["marca"]}</span>'
+        if not ((d1 and d1.get("tem_cartao")) or (d2 and d2.get("tem_cartao"))):
+            nome += ' <span class="no-print" style="font-size:10px;color:#b91c1c;">(sem cartão)</span>'
+
         numero = base["numero"] if base["numero"] is not None else "—"
         nota1_bruta = d1["nota"] if d1 else 0
         nota2_bruta = d2["nota"] if d2 else 0
@@ -24355,7 +24430,7 @@ def gerar_relatorio_notas_simulado(par: str, turma_id: str, ponderado: int = 0):
 
     titulo_relatorio = "Relatório de Notas (50/50)" if ponderado else "Relatório de Notas — Dia 01 + Dia 02"
 
-    html = f"""<!DOCTYPE html>
+    pagina = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{titulo_relatorio} — {turma['nome']}</title>
 <style>
   body {{ font-family: Arial, sans-serif; margin: 24px; color:#222; }}
@@ -24376,12 +24451,13 @@ def gerar_relatorio_notas_simulado(par: str, turma_id: str, ponderado: int = 0):
     <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
     <a href="/simulados/relatorio-notas">← Voltar</a>
   </div>
+  {aviso_outros}
   <table>
     <thead>{cabecalho}</thead>
     <tbody>{linhas}</tbody>
   </table>
 </body></html>"""
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=pagina)
 
 
 
