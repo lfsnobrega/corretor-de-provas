@@ -136,6 +136,29 @@ def _criar_tabelas():
             atualizado_por INTEGER,
             UNIQUE(coleta_id, professor_id)
         );
+        -- Cópia de segurança da resposta ORIGINAL do professor (12/11/2026): é gravada só
+        -- quando o PRÓPRIO professor envia o formulário (ou quando vem da importação do
+        -- Forms). Quando a gestão ajusta a disponibilidade, esta cópia NÃO muda — dá para
+        -- comparar e restaurar a original a qualquer momento.
+        CREATE TABLE IF NOT EXISTS horario_disponibilidade_original (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coleta_id INTEGER NOT NULL,
+            professor_id INTEGER NOT NULL,
+            dados TEXT NOT NULL,
+            origem TEXT,
+            salvo_em TEXT,
+            UNIQUE(coleta_id, professor_id)
+        );
+        -- Professores incluídos MANUALMENTE pela gestão na coleta (quem não é "docente
+        -- ativo" no sistema: professor novo sem conta, gestor que também dá aula etc.).
+        CREATE TABLE IF NOT EXISTS horario_coleta_inclusoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coleta_id INTEGER NOT NULL,
+            professor_id INTEGER NOT NULL,
+            criado_por INTEGER,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(coleta_id, professor_id)
+        );
         CREATE TABLE IF NOT EXISTS horario_coleta_dispensas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             coleta_id INTEGER NOT NULL,
@@ -259,6 +282,15 @@ def _criar_tabelas():
         conn.execute("ALTER TABLE horario_versoes ADD COLUMN turno TEXT")
     if "base_versao_id" not in colunas_versoes:
         conn.execute("ALTER TABLE horario_versoes ADD COLUMN base_versao_id INTEGER")
+    # Cópia original das respostas que já existiam antes desta função (12/11/2026): guarda
+    # agora as que foram salvas pelo PRÓPRIO professor. As que a gestão já tinha alterado
+    # antes desta atualização não têm como recuperar a versão anterior.
+    sem_original = conn.execute("""
+        SELECT hd.* FROM horario_disponibilidade hd
+        LEFT JOIN horario_disponibilidade_original o ON o.coleta_id = hd.coleta_id AND o.professor_id = hd.professor_id
+        WHERE o.id IS NULL AND (hd.atualizado_por IS NULL OR hd.atualizado_por = hd.professor_id)""").fetchall()
+    for r in sem_original:
+        _guardar_original(conn, r, "professor")
     # Primeira coleta (2027): só cria se a tabela estiver vazia. INSERT OR IGNORE garante
     # que dois processos iniciando juntos não criem duas.
     total = conn.execute("SELECT COUNT(*) AS c FROM horario_coletas").fetchone()["c"]
@@ -464,9 +496,58 @@ def _validar(dados: dict, exigir_justificativa: bool) -> list:
     return erros
 
 
-def _salvar(conn, coleta_id: int, professor_id: int, dados: dict, atualizado_por: int):
+COLUNAS_ORIGINAL = ["situacao", "disciplina", "dupla_interesse", "dupla_tempos"] + CAMPOS_TURNO + ["blocos", "observacoes", "atualizado_em"]
+ORIGEM_ORIGINAL = {"professor": "enviada pelo professor", "forms": "importada do Google Forms"}
+
+
+def _guardar_original(conn, row, origem: str = "professor"):
+    """Grava/atualiza a cópia ORIGINAL (a resposta do próprio professor)."""
+    import json as _js
+    r = dict(row)
+    dados = {c: r.get(c) for c in COLUNAS_ORIGINAL}
+    conn.execute("""INSERT INTO horario_disponibilidade_original (coleta_id, professor_id, dados, origem, salvo_em)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(coleta_id, professor_id) DO UPDATE SET dados = excluded.dados, origem = excluded.origem,
+                        salvo_em = excluded.salvo_em""",
+                 (r["coleta_id"], r["professor_id"], _js.dumps(dados, ensure_ascii=False), origem,
+                  r.get("atualizado_em") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))
+
+
+def _originais(conn, coleta_id: int) -> dict:
+    """{professor_id: dict com as colunas da resposta original + '_origem' e '_salvo_em'}."""
+    import json as _js
+    saida = {}
+    for o in conn.execute("SELECT * FROM horario_disponibilidade_original WHERE coleta_id = ?", (coleta_id,)).fetchall():
+        try:
+            d = _js.loads(o["dados"])
+        except (ValueError, TypeError):
+            continue
+        d["_origem"], d["_salvo_em"] = o["origem"], o["salvo_em"]
+        saida[o["professor_id"]] = d
+    return saida
+
+
+def _difere_da_original(resp, orig) -> bool:
+    """A disponibilidade atual (usada pelo gerador) é diferente da original do professor?"""
+    if not orig:
+        return False
+    if not resp:
+        return True
+    r = dict(resp)
+    if _blocos_de(r) != _blocos_de(orig):
+        return True
+    for c in ("situacao", "disciplina", "dupla_interesse", "dupla_tempos"):
+        if (r.get(c) or 0) != (orig.get(c) or 0):
+            return True
+    return (r.get("observacoes") or "").strip() != (orig.get("observacoes") or "").strip()
+
+
+def _salvar(conn, coleta_id: int, professor_id: int, dados: dict, atualizado_por: int,
+            original: Optional[bool] = None, origem: str = "professor"):
     """Grava (ou atualiza) a resposta. A disponibilidade por bloco fica na coluna 'blocos'; as
-    colunas por turno são recalculadas a partir dela (um turno conta se tiver algum bloco)."""
+    colunas por turno são recalculadas a partir dela (um turno conta se tiver algum bloco).
+    original: grava também a cópia ORIGINAL. Padrão: só quando quem salva é o próprio
+    professor (a gestão ajustando NÃO mexe na original)."""
     dados = dict(dados)
     estado = _blocos_de(dados)
     dados["blocos"] = _codigo_blocos(estado)
@@ -485,6 +566,13 @@ def _salvar(conn, coleta_id: int, professor_id: int, dados: dict, atualizado_por
                 {atualiza}, atualizado_por = excluded.atualizado_por, atualizado_em = CURRENT_TIMESTAMP""",
         [coleta_id, professor_id] + valores + [atualizado_por],
     )
+    if original is None:
+        original = (atualizado_por == professor_id)
+    if original:
+        row = conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ? AND professor_id = ?",
+                           (coleta_id, professor_id)).fetchone()
+        if row:
+            _guardar_original(conn, row, origem)
 
 
 def _pagina(request: Request, titulo: str, conteudo: str, ativo: str) -> HTMLResponse:
@@ -931,15 +1019,28 @@ def _dados_painel(conn, coleta) -> dict:
         WHERE d.coleta_id = ? ORDER BY p.nome COLLATE NOCASE
     """, (coleta["id"],)).fetchall()
     dispensados_ids = {d["id"] for d in dispensados}
-    # Quem deveria responder: todo docente ativo (papel "docente").
+    # Quem deveria responder: todo docente ativo (papel "docente") + quem a gestão incluiu
+    # manualmente nesta coleta (12/11/2026).
     docentes = conn.execute("""
-        SELECT id, nome, email FROM professores
+        SELECT id, nome, email, 0 AS incluido FROM professores
         WHERE COALESCE(status, 'ativo') = 'ativo' AND papel = 'docente'
         ORDER BY nome COLLATE NOCASE
     """).fetchall()
-    pendentes = [p for p in docentes if p["id"] not in respondidos_ids and p["id"] not in dispensados_ids]
+    incluidos = conn.execute("""
+        SELECT p.id, p.nome, p.email, 1 AS incluido FROM horario_coleta_inclusoes i
+        JOIN professores p ON p.id = i.professor_id
+        WHERE i.coleta_id = ? ORDER BY p.nome COLLATE NOCASE
+    """, (coleta["id"],)).fetchall()
+    incluidos_ids = {p["id"] for p in incluidos}
+    esperados = {p["id"]: p for p in docentes}
+    for p in incluidos:
+        esperados[p["id"]] = p
+    pendentes = sorted((p for p in esperados.values() if p["id"] not in respondidos_ids and p["id"] not in dispensados_ids),
+                       key=lambda p: (p["nome"] or "").lower())
     contagem = {c: sum(1 for r in respostas if r[c]) for c in CAMPOS_TURNO}
-    return {"respostas": respostas, "pendentes": pendentes, "dispensados": dispensados, "contagem": contagem}
+    originais = _originais(conn, coleta["id"])
+    return {"respostas": respostas, "pendentes": pendentes, "dispensados": dispensados, "contagem": contagem,
+            "originais": originais, "incluidos_ids": incluidos_ids}
 
 
 @router.get("/horarios/disponibilidade/painel", response_class=HTMLResponse)
@@ -990,6 +1091,12 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
         "criada": "Nova coleta criada.",
         "erro_datas": "Datas inválidas: confira se o fim não é antes do início.",
         "erro_ano": "Já existe uma coleta para esse ano letivo.",
+        "incluido": "Professor incluído na coleta. Preencha a disponibilidade dele(a) abaixo.",
+        "erro_incluir": "Para incluir, escolha um usuário da lista OU digite o nome do professor novo.",
+        "erro_email": "E-mail inválido para o professor novo.",
+        "restaurada": "Disponibilidade original do professor restaurada.",
+        "restauradas": "Disponibilidades originais restauradas.",
+        "sem_original": "Este professor não tem resposta original guardada.",
     }
     msg_html = ""
     if msg in msgs:
@@ -1090,6 +1197,7 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
             <td style="padding:8px; text-align:center;">{alerta}</td>
             <td style="padding:8px; font-size:12px; max-width:260px;">{obs or '<span style="color:var(--text-muted);">—</span>'}</td>
             <td style="padding:8px; font-size:11px; white-space:nowrap;">{_ts_br(r["atualizado_em"])}{por_gestao}</td>
+            <td style="padding:8px; font-size:11px;">{_celula_original_html(r, dp["originais"].get(r["professor_id"]), cid)}</td>
             <td style="padding:8px; white-space:nowrap;">
                 <a href="/horarios/disponibilidade/professor/{r["professor_id"]}?coleta_id={cid}" class="btn" style="padding:2px 8px; font-size:11px;" title="Editar">✏️</a>
                 <form method="post" action="/horarios/disponibilidade/professor/{r["professor_id"]}/excluir?coleta_id={cid}" style="display:inline;"
@@ -1099,7 +1207,7 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
             </td>
         </tr>"""
     if not linhas_resp:
-        linhas_resp = '<tr><td colspan="10" style="padding:16px; text-align:center; color:var(--text-muted);">Ninguém respondeu ainda.</td></tr>'
+        linhas_resp = '<tr><td colspan="11" style="padding:16px; text-align:center; color:var(--text-muted);">Ninguém respondeu ainda.</td></tr>'
     tabela_resp = f"""
         <div class="card" style="padding:14px 16px; margin-bottom:16px;">
             <h2 style="margin:0 0 8px; font-size:15px;">✅ Responderam ({respondidos})</h2>
@@ -1111,7 +1219,8 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
                     <th style="padding:8px; text-align:left;">Disciplina</th><th style="padding:8px;">Dupla</th>
                     <th style="padding:8px; text-align:left;">Disponibilidade</th><th style="padding:8px;" title="Blocos de matrícula (+ blocos de dupla regência)">Blocos</th>
                     <th style="padding:8px;">Diretrizes</th><th style="padding:8px; text-align:left;">Observações</th>
-                    <th style="padding:8px; text-align:left;">Atualizado</th><th style="padding:8px;"></th>
+                    <th style="padding:8px; text-align:left;">Atualizado</th>
+                    <th style="padding:8px; text-align:left;" title="Resposta original do professor (cópia de segurança)">Original</th><th style="padding:8px;"></th>
                 </tr></thead>
                 <tbody>{linhas_resp}</tbody>
             </table>
@@ -1121,11 +1230,19 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
     # Pendentes
     linhas_pend = ""
     for p in dp["pendentes"]:
+        selo_incl = (' <span style="font-size:10px; background:#e0e7ff; color:#3730a3; padding:1px 6px; border-radius:8px;">incluído pela gestão</span>'
+                     if p["incluido"] else "")
+        email_txt = "" if str(p["email"] or "").endswith("@horario.local") else _e(p["email"])
+        btn_rest = ""
+        if p["id"] in dp["originais"]:
+            btn_rest = (f'<form method="post" action="/horarios/disponibilidade/professor/{p["id"]}/restaurar-original?coleta_id={cid}" style="display:inline;" '
+                        f'onsubmit="return confirm(\'Restaurar a resposta original deste professor?\');">'
+                        f'<button type="submit" class="btn" style="padding:2px 8px; font-size:11px;">↩️ Restaurar resposta original</button></form> ')
         linhas_pend += f"""<tr style="border-top:1px solid var(--border);">
-            <td style="padding:8px;">{_e(p["nome"])}</td>
-            <td style="padding:8px; font-size:12px; color:var(--text-muted);">{_e(p["email"])}</td>
+            <td style="padding:8px;">{_e(p["nome"])}{selo_incl}</td>
+            <td style="padding:8px; font-size:12px; color:var(--text-muted);">{email_txt}</td>
             <td style="padding:8px; white-space:nowrap;">
-                <a href="/horarios/disponibilidade/professor/{p["id"]}?coleta_id={cid}" class="btn" style="padding:2px 8px; font-size:11px;">📝 Preencher por ele(a)</a>
+                {btn_rest}<a href="/horarios/disponibilidade/professor/{p["id"]}?coleta_id={cid}" class="btn" style="padding:2px 8px; font-size:11px;">📝 Preencher por ele(a)</a>
                 <form method="post" action="/horarios/disponibilidade/professor/{p["id"]}/dispensar?coleta_id={cid}" style="display:inline;">
                     <button type="submit" class="btn" style="padding:2px 8px; font-size:11px;" title="Não precisa responder (ex.: não estará na escola no próximo ano)">Dispensar</button>
                 </form>
@@ -1136,7 +1253,7 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
     tabela_pend = f"""
         <div class="card" style="padding:14px 16px; margin-bottom:16px;">
             <h2 style="margin:0 0 4px; font-size:15px;">⏳ Pendentes ({pendentes})</h2>
-            <p style="margin:0 0 8px; font-size:12px; color:var(--text-muted);">Docentes ativos no sistema que ainda não responderam. "Dispensar" tira da lista quem não precisa responder.</p>
+            <p style="margin:0 0 8px; font-size:12px; color:var(--text-muted);">Docentes ativos no sistema (e os incluídos pela gestão) que ainda não responderam. "Dispensar" tira da lista quem não precisa responder.</p>
             <div style="overflow-x:auto;">
             <table style="width:100%; border-collapse:collapse; font-size:13px;"><tbody>{linhas_pend}</tbody></table>
             </div>
@@ -1155,8 +1272,184 @@ def painel_disponibilidade(request: Request, coleta_id: str = "", msg: str = "")
             <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:8px;"><tbody>{linhas_disp}</tbody></table>
         </details>"""
 
-    conteudo = cabecalho + quadro_turnos + tabela_resp + tabela_pend + tabela_disp + _form_nova_coleta_html()
+    conteudo = (cabecalho + _card_seguranca_html(dp, coleta, status) + quadro_turnos + tabela_resp + tabela_pend
+                + _form_incluir_professor_html(_opcoes_incluir(coleta, dp), cid) + tabela_disp + _form_nova_coleta_html())
     return _pagina(request, "Painel de disponibilidade", conteudo, "horarios-painel")
+
+
+# ---------- cópia de segurança (original do professor) e inclusão manual — 12/11/2026 ----------
+
+def _celula_original_html(resp, orig, coleta_id: int) -> str:
+    """Coluna 'Original' do painel: igual / ajustada pela gestão (ver e restaurar) / sem original."""
+    if not orig:
+        return '<span style="color:var(--text-muted);" title="Preenchida pela gestão: não há resposta do professor guardada.">— sem original</span>'
+    if not _difere_da_original(resp, orig):
+        return '<span style="color:#16a34a;" title="A disponibilidade atual é exatamente a que o professor enviou.">✓ igual à original</span>'
+    pid = dict(resp)["professor_id"]
+    n_mat, n_dup = _contar_blocos(orig)
+    return (f'<span style="color:#b45309; font-weight:600;">✏️ ajustada</span>'
+            f'<details style="margin-top:2px;"><summary style="cursor:pointer; color:#2563eb;">ver original</summary>'
+            f'<div style="margin-top:4px;">{_mini_quadro(orig)}'
+            f'<div style="color:var(--text-muted); margin:2px 0 4px;">{n_mat} bl. matrícula{f" + {n_dup}D" if n_dup else ""} · '
+            f'{ORIGEM_ORIGINAL.get(orig.get("_origem"), "original")} em {_ts_br(orig.get("_salvo_em"))}</div>'
+            f'<form method="post" action="/horarios/disponibilidade/professor/{pid}/restaurar-original?coleta_id={coleta_id}" '
+            f'onsubmit="return confirm(\'Voltar a disponibilidade deste professor para a ORIGINAL que ele enviou? Os ajustes da gestão neste professor serão desfeitos.\');">'
+            f'<button type="submit" class="btn" style="padding:2px 8px; font-size:11px;">↩️ Restaurar original</button></form></div></details>')
+
+
+def _card_seguranca_html(dp: dict, coleta, status: str) -> str:
+    """Explica a cópia de segurança e oferece 'restaurar todas'."""
+    resp_por = {r["professor_id"]: r for r in dp["respostas"]}
+    alterados = [pid for pid, o in dp["originais"].items() if _difere_da_original(resp_por.get(pid), o)]
+    sem_original = sum(1 for r in dp["respostas"] if r["professor_id"] not in dp["originais"])
+    aviso_aberta = ""
+    if status == "aberta":
+        aviso_aberta = ('<div style="margin-top:8px; padding:8px 10px; background:#fff7ed; border:1px solid #fdba74; border-radius:6px; color:#9a3412;">'
+                        '⚠️ A coleta ainda está <strong>aberta</strong>: se um professor reenviar o formulário, a resposta nova dele '
+                        'substitui os ajustes que a gestão fez nele. Quando todos tiverem respondido, <strong>encerre a coleta</strong> '
+                        'antes de começar a ajustar.</div>')
+    botao = ""
+    if alterados:
+        botao = (f'<form method="post" action="/horarios/coletas/{coleta["id"]}/restaurar-originais" style="display:inline;" '
+                 f'onsubmit="return confirm(\'Restaurar a disponibilidade ORIGINAL de {len(alterados)} professor(es)? Todos os ajustes da gestão nesses professores serão desfeitos.\');">'
+                 f'<button type="submit" class="btn" style="padding:3px 10px; font-size:12px;">↩️ Restaurar todas as originais ({len(alterados)})</button></form>')
+    return f"""
+        <div class="card" style="padding:12px 16px; margin-bottom:16px; font-size:13px;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;">
+                <div>🛡️ <strong>Resposta original guardada.</strong> O que cada professor enviou fica salvo à parte. Os ajustes da gestão
+                (aqui ou no painel do gerador) mudam só a disponibilidade usada pelo gerador. A original não muda e pode ser restaurada.
+                <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">{len(dp["originais"])} original(is) guardada(s) ·
+                <strong>{len(alterados)}</strong> ajustada(s) pela gestão{f" · {sem_original} preenchida(s) pela gestão (sem original)" if sem_original else ""}</div></div>
+                {botao}
+            </div>
+            {aviso_aberta}
+        </div>"""
+
+
+def _opcoes_incluir(coleta, dp: dict) -> list:
+    """Usuários do sistema que NÃO estão na lista da coleta (para incluir manualmente)."""
+    conn = _db()
+    ja = {r["professor_id"] for r in dp["respostas"]} | {p["id"] for p in dp["pendentes"]} | {d["id"] for d in dp["dispensados"]}
+    linhas = conn.execute("""SELECT id, nome, email, papel, COALESCE(status, 'ativo') AS status FROM professores
+                             WHERE email NOT LIKE '%@ensaio.local' ORDER BY nome COLLATE NOCASE""").fetchall()
+    conn.close()
+    return [r for r in linhas if r["id"] not in ja]
+
+
+def _form_incluir_professor_html(opcoes: list, coleta_id: int) -> str:
+    rot_papel = {"docente": "docente", "gestao": "gestão", "apoio": "apoio", "orientacao": "orientação"}
+    ops = "".join(
+        f'<option value="{r["id"]}">{_e(r["nome"])}'
+        f'{" — " + _e(r["email"]) if r["email"] and not str(r["email"]).endswith("@horario.local") else ""}'
+        f' ({rot_papel.get(r["papel"] or "", r["papel"] or "sem papel")}{", " + _e(r["status"]) if r["status"] != "ativo" else ""})</option>'
+        for r in opcoes)
+    return f"""
+        <details class="card" style="padding:14px 16px; margin-bottom:16px;">
+            <summary style="cursor:pointer; font-weight:600;">➕ Incluir professor manualmente na coleta</summary>
+            <p style="font-size:12px; color:var(--text-muted); margin:8px 0;">Para quem não aparece na lista: professor novo que ainda não tem acesso ao
+            sistema, gestor ou outro usuário que também dá aula etc. Depois de incluir, abre o formulário para você preencher a disponibilidade dele(a).</p>
+            <form method="post" action="/horarios/coletas/{coleta_id}/incluir-professor" style="display:flex; flex-direction:column; gap:10px; max-width:560px;">
+                <label style="margin:0;">Usuário que já existe no sistema
+                    <select name="professor_id" style="width:100%;"><option value="">— escolher —</option>{ops}</select>
+                </label>
+                <div style="font-size:12px; font-weight:600; color:var(--text-muted);">— ou — professor novo (ainda sem acesso ao sistema)</div>
+                <label style="margin:0;">Nome completo<input type="text" name="nome" placeholder="Ex.: Maria da Silva Souza"></label>
+                <label style="margin:0;">E-mail institucional (opcional)<input type="email" name="email" placeholder="nome@smevr.com.br">
+                    <span style="font-size:11px; color:var(--text-muted);">Com e-mail: quando ele(a) entrar no sistema com esse e-mail, já cai neste cadastro
+                    (aprovar em Usuários). Sem e-mail: cadastro só para o horário, sem acesso ao sistema.</span></label>
+                <div><button type="submit" class="btn btn-primary">➕ Incluir e preencher disponibilidade</button></div>
+            </form>
+        </details>"""
+
+
+@router.post("/horarios/coletas/{coleta_id}/incluir-professor")
+async def gestao_incluir_professor(request: Request, coleta_id: int):
+    prof = _ctx["get_prof"](request)
+    if not _eh_gestao(prof):
+        return _acesso_negado(request, "Apenas a gestão inclui professores na coleta.")
+    form = await request.form()
+    conn = _db()
+    coleta = _coleta_por_id(conn, coleta_id)
+    if not coleta:
+        conn.close()
+        return RedirectResponse("/horarios/disponibilidade/painel", status_code=303)
+    painel = f"/horarios/disponibilidade/painel?coleta_id={coleta_id}"
+    pid = None
+    escolhido = str(form.get("professor_id") or "").strip()
+    nome = " ".join(str(form.get("nome") or "").split())
+    email = str(form.get("email") or "").strip().lower()
+    if escolhido.isdigit():
+        row = conn.execute("SELECT id FROM professores WHERE id = ?", (int(escolhido),)).fetchone()
+        pid = row["id"] if row else None
+    elif nome:
+        if email:
+            if "@" not in email or " " in email or len(email) > 200:
+                conn.close()
+                return RedirectResponse(painel + "&msg=erro_email", status_code=303)
+            row = conn.execute("SELECT id FROM professores WHERE lower(email) = ?", (email,)).fetchone()
+            if row:
+                pid = row["id"]              # já existia com esse e-mail: usa o cadastro existente
+            else:
+                pid = conn.execute("INSERT INTO professores (email, nome, is_admin, is_gestor, status, papel) VALUES (?, ?, 0, 0, 'pendente', 'docente')",
+                                   (email, nome)).lastrowid
+        else:
+            slug = "".join(c for c in _norm(nome).replace(" ", ".") if c.isalnum() or c == ".")[:40] or "professor"
+            email_fict = f"sem-login.{_uuid.uuid4().hex[:6]}.{slug}@horario.local"
+            pid = conn.execute("INSERT INTO professores (email, nome, is_admin, is_gestor, status, papel) VALUES (?, ?, 0, 0, 'bloqueado', 'docente')",
+                               (email_fict, nome)).lastrowid
+    if not pid:
+        conn.close()
+        return RedirectResponse(painel + "&msg=erro_incluir", status_code=303)
+    conn.execute("INSERT OR IGNORE INTO horario_coleta_inclusoes (coleta_id, professor_id, criado_por) VALUES (?, ?, ?)",
+                 (coleta_id, pid, prof["id"]))
+    conn.execute("DELETE FROM horario_coleta_dispensas WHERE coleta_id = ? AND professor_id = ?", (coleta_id, pid))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/horarios/disponibilidade/professor/{pid}?coleta_id={coleta_id}&incluido=1", status_code=303)
+
+
+def _restaurar_original(conn, coleta_id: int, professor_id: int) -> bool:
+    orig = _originais(conn, coleta_id).get(professor_id)
+    if not orig:
+        return False
+    dados = {c: orig.get(c) for c in COLUNAS_ORIGINAL if c != "atualizado_em"}
+    # Volta exatamente o que o professor enviou; registra como dele (não é ajuste da gestão).
+    _salvar(conn, coleta_id, professor_id, dados, atualizado_por=professor_id, original=False)
+    if orig.get("atualizado_em"):
+        conn.execute("UPDATE horario_disponibilidade SET atualizado_em = ? WHERE coleta_id = ? AND professor_id = ?",
+                     (orig["atualizado_em"], coleta_id, professor_id))
+    conn.execute("DELETE FROM horario_coleta_dispensas WHERE coleta_id = ? AND professor_id = ?", (coleta_id, professor_id))
+    return True
+
+
+@router.post("/horarios/disponibilidade/professor/{professor_id}/restaurar-original")
+def gestao_restaurar_original(request: Request, professor_id: int, coleta_id: str = ""):
+    prof = _ctx["get_prof"](request)
+    if not _eh_gestao(prof):
+        return _acesso_negado(request, "Apenas a gestão pode restaurar respostas.")
+    conn = _db()
+    coleta = _coleta_por_id(conn, coleta_id)
+    ok = bool(coleta) and _restaurar_original(conn, coleta["id"], professor_id)
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/horarios/disponibilidade/painel?coleta_id={coleta_id}&msg={'restaurada' if ok else 'sem_original'}", status_code=303)
+
+
+@router.post("/horarios/coletas/{coleta_id}/restaurar-originais")
+def gestao_restaurar_todas(request: Request, coleta_id: int):
+    prof = _ctx["get_prof"](request)
+    if not _eh_gestao(prof):
+        return _acesso_negado(request, "Apenas a gestão pode restaurar respostas.")
+    conn = _db()
+    coleta = _coleta_por_id(conn, coleta_id)
+    if coleta:
+        atuais = {r["professor_id"]: r for r in conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ?", (coleta_id,)).fetchall()}
+        for pid, orig in _originais(conn, coleta_id).items():
+            if _difere_da_original(atuais.get(pid), orig):
+                _restaurar_original(conn, coleta_id, pid)
+        conn.commit()
+    conn.close()
+    return RedirectResponse(f"/horarios/disponibilidade/painel?coleta_id={coleta_id}&msg=restauradas", status_code=303)
 
 
 def _form_nova_coleta_html() -> str:
@@ -1189,15 +1482,46 @@ def gestao_form_professor(request: Request, professor_id: int, coleta_id: str = 
     resp = conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ? AND professor_id = ?",
                         (coleta["id"], professor_id)).fetchone()
     conn.close()
-    return _render_form_gestao(request, coleta, alvo, dict(resp) if resp else None, [])
+    return _render_form_gestao(request, coleta, alvo, dict(resp) if resp else None, [],
+                               incluido=bool(request.query_params.get("incluido")))
 
 
-def _render_form_gestao(request, coleta, alvo, dados, erros):
+def _caixa_original_html(coleta, alvo, dados) -> str:
+    """No formulário da gestão: mostra a resposta ORIGINAL do professor, se for diferente."""
+    conn = _db()
+    orig = _originais(conn, coleta["id"]).get(alvo["id"])
+    conn.close()
+    if not orig:
+        return ""
+    if dados and not _difere_da_original(dados, orig):
+        return ('<div style="margin-bottom:12px; font-size:12px; color:#16a34a;">🛡️ Esta é exatamente a resposta que o professor enviou. '
+                'Se você mudar e salvar, a original continua guardada e pode ser restaurada no painel.</div>')
+    n_mat, n_dup = _contar_blocos(orig)
+    return f"""
+        <div class="card" style="padding:10px 14px; margin-bottom:14px; font-size:13px; border-left:4px solid #f59e0b;">
+            <strong>🛡️ Resposta original do professor</strong> ({ORIGEM_ORIGINAL.get(orig.get("_origem"), "original")} em {_ts_br(orig.get("_salvo_em"))}):
+            a disponibilidade abaixo já foi ajustada pela gestão.
+            <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin-top:6px;">
+                {_mini_quadro(orig)}
+                <div style="font-size:12px; color:var(--text-muted);">{n_mat} bl. matrícula{f" + {n_dup} dupla" if n_dup else ""} ·
+                    situação: {_e(orig.get("situacao"))} · {_e(orig.get("disciplina"))}</div>
+                <form method="post" action="/horarios/disponibilidade/professor/{alvo["id"]}/restaurar-original?coleta_id={coleta["id"]}"
+                      onsubmit="return confirm('Voltar para a resposta ORIGINAL do professor? Os ajustes da gestão serão desfeitos.');">
+                    <button type="submit" class="btn" style="padding:3px 10px; font-size:12px;">↩️ Restaurar a original</button></form>
+            </div>
+        </div>"""
+
+
+def _render_form_gestao(request, coleta, alvo, dados, erros, incluido: bool = False):
+    aviso_incl = ('<div style="background:#ecfdf5; color:#047857; border:1px solid #10b981; padding:10px 14px; border-radius:6px; margin-bottom:14px; font-size:13px;">'
+                  'Professor incluído na coleta. Preencha a disponibilidade e salve. Ele(a) passa a aparecer no painel e pode receber aulas na configuração do horário.</div>'
+                  if incluido else "")
     conteudo = f"""
         <div class="page-header">
             <h1>✏️ Disponibilidade de {_e(alvo["nome"])}</h1>
             <p class="subtitle">Coleta {coleta["ano_letivo"]} · <a href="/horarios/disponibilidade/painel?coleta_id={coleta["id"]}">← voltar ao painel</a></p>
         </div>
+        {aviso_incl}{_caixa_original_html(coleta, alvo, dados)}
         {_form_html(f'/horarios/disponibilidade/professor/{alvo["id"]}?coleta_id={coleta["id"]}', coleta, dados, erros,
                     alvo["nome"], True, "💾 Salvar disponibilidade")}"""
     return _pagina(request, "Editar disponibilidade", conteudo, "horarios-painel")
@@ -1418,6 +1742,31 @@ def exportar_disponibilidade(request: Request, coleta_id: str = ""):
         c.alignment = Alignment(wrap_text=True, horizontal="center")
     ws4.freeze_panes = "B2"
 
+    # Originais: o que cada professor ENVIOU (cópia de segurança), para comparar com "Por bloco".
+    ws5 = wb.create_sheet("Originais (professores)")
+    ws5.append(["Nome", "Situação", "Enviada em"] + [f"{nome[:3]} {nome_k[0]}{b}º" for d, nome in DIAS for k, nome_k in TURNOS for b in (1, 2, 3)])
+    resp_por = {r["professor_id"]: r for r in dp["respostas"]}
+    conn = _db()
+    nomes_p = {r["id"]: r["nome"] for r in conn.execute("SELECT id, nome FROM professores").fetchall()}
+    conn.close()
+    for pid_o, orig in sorted(dp["originais"].items(), key=lambda kv: (nomes_p.get(kv[0]) or "").lower()):
+        e = _blocos_de(orig)
+        sit = "ajustada pela gestão" if _difere_da_original(resp_por.get(pid_o), orig) else "igual à atual"
+        ws5.append([nomes_p.get(pid_o, "?"), sit, _ts_br(orig.get("_salvo_em"))] + [["", "M", "D"][e[c]] for c in CELULAS])
+        for j, c in enumerate(CELULAS, start=4):
+            if e[c]:
+                ws5.cell(ws5.max_row, j).fill = verde if e[c] == 1 else roxo
+                ws5.cell(ws5.max_row, j).alignment = Alignment(horizontal="center")
+    ws5.column_dimensions["A"].width = 34
+    ws5.column_dimensions["B"].width = 20
+    ws5.column_dimensions["C"].width = 17
+    for j in range(4, len(CELULAS) + 4):
+        ws5.column_dimensions[ws5.cell(1, j).column_letter].width = 7
+    for c in ws5[1]:
+        c.font, c.fill = negrito, fundo
+        c.alignment = Alignment(wrap_text=True, horizontal="center")
+    ws5.freeze_panes = "D2"
+
     ws3 = wb.create_sheet("Pendentes")
     ws3.append(["Nome", "E-mail"])
     for p in dp["pendentes"]:
@@ -1552,6 +1901,10 @@ def _professores_opcoes(conn, ano: int) -> list:
     ano e quem já tem aula atribuída. Cada um com a disciplina informada na coleta."""
     disp = _disponibilidades(conn, ano)
     ids_extra = set(disp.keys()) | set(_atribuicoes(conn, ano).values()) | set(_ed_professores(conn, ano).values())
+    coleta_ano = _coleta_do_ano(conn, ano)
+    if coleta_ano:     # incluídos manualmente na coleta (12/11/2026), mesmo antes de preencher
+        ids_extra |= {r["professor_id"] for r in conn.execute(
+            "SELECT professor_id FROM horario_coleta_inclusoes WHERE coleta_id = ?", (coleta_ano["id"],)).fetchall()}
     linhas = conn.execute("""SELECT id, nome FROM professores
                              WHERE (COALESCE(status, 'ativo') = 'ativo' AND papel = 'docente')""").fetchall()
     profs = {r["id"]: r["nome"] for r in linhas}
@@ -3493,7 +3846,7 @@ def _pendencias_da_versao(conn, versao_id) -> dict:
 
 
 def _cartao_professor_html(alvo, resp, ano: int, horas: dict, rotulos: dict, pendentes: set,
-                           destaque: set, foco: bool) -> str:
+                           destaque: set, foco: bool, orig: Optional[dict] = None) -> str:
     """Um professor no painel de disponibilidade: quadro de blocos editável (com as turmas da
     versão escritas dentro dos blocos) e botão de salvar."""
     pid = alvo["id"]
@@ -3507,6 +3860,9 @@ def _cartao_professor_html(alvo, resp, ano: int, horas: dict, rotulos: dict, pen
     else:
         info = '<span style="color:#b45309;">sem resposta na coleta — ao salvar, a gestão cadastra</span>'
         obs_html = ""
+    if orig and _difere_da_original(resp, orig):
+        info += (' · <span style="color:#b45309;" title="A resposta que o professor enviou está guardada; '
+                 'restaure pelo Painel de disponibilidade.">✏️ ajustada pela gestão (original guardada)</span>')
     n_pend = len(pendentes)
     selo = f'<span class="hp-selo">⚠️ {n_pend} pendência{"s" if n_pend != 1 else ""}</span>' if n_pend else ""
     grade = _grade_blocos_html(_blocos_de(resp) if resp else {}, horas, editavel=True, dupla=dupla, compacta=True,
@@ -3529,9 +3885,10 @@ def _painel_disponibilidade_html(conn, ano: int, versao: str, foco: Optional[int
     """Painel com a disponibilidade de TODOS os professores que têm aula no ano (o da sugestão
     aparece primeiro, destacado). Mudar outro professor às vezes resolve a pendência."""
     coleta = _coleta_do_ano(conn, ano)
-    resp_por = {}
+    resp_por, orig_por = {}, {}
     if coleta:
         resp_por = {r["professor_id"]: r for r in conn.execute("SELECT * FROM horario_disponibilidade WHERE coleta_id = ?", (coleta["id"],)).fetchall()}
+        orig_por = _originais(conn, coleta["id"])
     ids = set(_atribuicoes(conn, ano).values()) | {p for p in _ed_professores(conn, ano).values() if p}
     if foco:
         ids.add(foco)
@@ -3560,7 +3917,8 @@ def _painel_disponibilidade_html(conn, ano: int, versao: str, foco: Optional[int
             destaque = {(sug[0], sug[1], b) for b in (1, 2, 3)}
             blocos_sug = {c for c in pend.get(pid, set()) if c[0] == sug[0] and c[1] == sug[1]}
             destaque = blocos_sug or destaque
-        cartoes += _cartao_professor_html(p, resp_por.get(pid), ano, horas, rotulos.get(pid, {}), pend.get(pid, set()), destaque, pid == foco)
+        cartoes += _cartao_professor_html(p, resp_por.get(pid), ano, horas, rotulos.get(pid, {}), pend.get(pid, set()), destaque, pid == foco,
+                                          orig=orig_por.get(pid))
     n_pend_prof = sum(1 for p in profs if pend.get(p["id"]))
     dica_foco = ""
     if foco and sug:
@@ -3584,6 +3942,7 @@ def _painel_disponibilidade_html(conn, ano: int, versao: str, foco: Optional[int
         {filtros}
         <div class="hp-lista">{cartoes}</div>
         <p style="font-size:11px; color:var(--text-muted); margin:10px 0 0;">As mudanças valem para a coleta de {ano} (fica registrado que foi a gestão).
+        A resposta original de cada professor continua guardada e pode ser restaurada no Painel de disponibilidade.
         Depois de ajustar, clique em <strong>Gerar horário de novo</strong> para o gerador usar a nova disponibilidade.</p>"""
 
 
@@ -4660,7 +5019,7 @@ async def importar_confirmar(request: Request):
                  "dupla_tempos": resp["tempos"] if resp["dupla"] else 0, "observacoes": resp["observacoes"]}
             for c in CAMPOS_TURNO:
                 d[c] = resp.get(c, 0)
-            _salvar(conn, coleta_id, pid, d, atualizado_por=prof["id"])
+            _salvar(conn, coleta_id, pid, d, atualizado_por=prof["id"], original=True, origem="forms")
 
     # turmas e atribuições (professor mais frequente de cada componente na turma)
     for t in dados["turmas"]:
