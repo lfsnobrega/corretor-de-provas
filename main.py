@@ -1878,8 +1878,22 @@ _JS_MATH_BUTTONS = r"""
             }
             var btnTab = toolbar.querySelector(".btn-insert-tab");
             if (btnTab) {
+                // As perguntas (linhas/colunas) tiram o foco do editor e a tabela ia parar no
+                // COMEÇO do texto, antes do enunciado. Agora guarda onde o cursor estava e
+                // insere ali; sem cursor no editor, insere no FIM do texto (19/11/2026).
+                var _rngTab = null;
+                btnTab.addEventListener("mousedown", function() {
+                    var sel = window.getSelection();
+                    _rngTab = (sel && sel.rangeCount && editor.contains(sel.getRangeAt(0).commonAncestorContainer))
+                        ? sel.getRangeAt(0).cloneRange() : null;
+                });
                 btnTab.addEventListener("click", function(e) {
                     e.preventDefault();
+                    var rngGuardado = _rngTab;
+                    if (!rngGuardado) {
+                        var sel0 = window.getSelection();
+                        if (sel0 && sel0.rangeCount && editor.contains(sel0.getRangeAt(0).commonAncestorContainer)) rngGuardado = sel0.getRangeAt(0).cloneRange();
+                    }
                     var nlin = parseInt(prompt("Número de linhas:", "3"));
                     if (!nlin || nlin < 1) return;
                     var ncol = parseInt(prompt("Número de colunas:", "3"));
@@ -1897,8 +1911,19 @@ _JS_MATH_BUTTONS = r"""
                         }
                         tbl += "</tr>";
                     }
-                    tbl += "</tbody></table><p></p>";
+                    tbl += "</tbody></table><p><br></p>";
+                    editor.focus();
+                    var sel = window.getSelection();
+                    var rng = rngGuardado;
+                    if (!rng) {
+                        rng = document.createRange();
+                        rng.selectNodeContents(editor);
+                        rng.collapse(false);
+                    }
+                    sel.removeAllRanges();
+                    sel.addRange(rng);
                     document.execCommand("insertHTML", false, tbl);
+                    _rngTab = null;
                     sync();
                 });
             }
@@ -8720,9 +8745,12 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
         textos_html = _html_texto_compartilhado(conn, q["id"], numero, ctx_texto)
     else:
         textos_html = _html_texto_compartilhado_card(conn, q)
+    # Ordem da questão (19/11/2026, Felipe): ENUNCIADO → recursos (texto de apoio, imagem, tabela) → alternativas.
+    # Só o texto COMPARTILHADO entre várias questões continua antes, como cabeçalho do conjunto.
+    apoio_html = ""
     for t in textos:
         fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
-        textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
+        apoio_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
 
     imagens_html = ""
     for img in imagens:
@@ -8850,15 +8878,16 @@ def render_questao_card(conn, q, numero=None, mostrar_acoes=False, compact=False
             f'</div>'
             f'</div>'
             f'<div id="q-detalhes-{q["id"]}" style="display:none; margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">'
-            f'{textos_html}{imagens_html}'
+            f'{textos_html}'
             f'<div class="enunciado">{q["enunciado"]}</div>'
+            f'{apoio_html}{imagens_html}'
             f'<ul class="alternativas">{alts_html}</ul>'
             f'{habilidades_html}{acoes_html}'
             f'</div>'
             f'</div>'
         )
 
-    return f'<div class="question questao-card-preview"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}{anulada_badge}</div>{textos_html}{imagens_html}<div class="enunciado">{q["enunciado"]}</div><ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
+    return f'<div class="question questao-card-preview"><div class="question-header">{cabecalho}{ano_badge}{tipo_badge}{anulada_badge}</div>{textos_html}<div class="enunciado">{q["enunciado"]}</div>{apoio_html}{imagens_html}<ul class="alternativas">{alts_html}</ul>{habilidades_html}{acoes_html}</div>'
 
 
 @app.get("/painel-rapido", response_class=HTMLResponse)
@@ -10251,6 +10280,8 @@ def form_nova_questao_passo2(
             </style>
             <script>function toggleColl(el){{el.closest('.coll-sec').classList.toggle('open');}}</script>
 
+            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar.", detectar_alternativas=enunciado_detecta_alts)}
+
             <div class="coll-sec">
                 <div class="coll-hdr" onclick="toggleColl(this)">
                     <span>📝 Textos de apoio (opcionais)</span><span class="coll-arrow">▼</span>
@@ -10276,8 +10307,6 @@ def form_nova_questao_passo2(
                     <label>Fonte da imagem 2<input type="text" name="imagem2_fonte"></label>
                 </div>
             </div>
-
-            {_editor_enunciado_html(name="enunciado", valor_inicial="", required=True, label="Enunciado", placeholder="Digite o enunciado da questão. Use a barra abaixo para formatar.", detectar_alternativas=enunciado_detecta_alts)}
 
             {fieldset_alternativas}
 
@@ -17933,9 +17962,12 @@ def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
         imagens = conn.execute("SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
 
         textos_html = _html_texto_compartilhado(conn, q["id"], idx, _ctx_tc)
+        # Ordem da questão (19/11/2026, Felipe): ENUNCIADO → recursos (texto de apoio, imagem, tabela) → alternativas.
+        # Só o texto COMPARTILHADO entre várias questões continua antes, como cabeçalho do conjunto.
+        apoio_html = ""
         for t in textos:
             fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
-            textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
+            apoio_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
 
         imagens_html = ""
         for img in imagens:
@@ -17967,7 +17999,7 @@ def pagina_resposta_aluno(codigo: str, aplicacao_id: int):
                 )
 
         bncc_pref = _bncc_prefix(conn, q["id"])
-        questoes_html += f'<div class="question"><div class="question-header">Questão {idx} · {q["disciplina_nome"]}</div>{textos_html}{imagens_html}<div class="enunciado">{bncc_pref}{q["enunciado"]}</div>{alts_html}</div>'
+        questoes_html += f'<div class="question"><div class="question-header">Questão {idx} · {q["disciplina_nome"]}</div>{textos_html}<div class="enunciado">{bncc_pref}{q["enunciado"]}</div>{apoio_html}{imagens_html}{alts_html}</div>'
 
     conn.close()
 
@@ -18963,6 +18995,8 @@ def form_editar_questao(id: int, request: Request):
             </div>
             {link_catalogo}
 
+            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão.", detectar_alternativas=(tipo_q == "multipla_escolha"))}
+
             <fieldset>
                 <legend>Adicionar novos textos de apoio (opcional)</legend>
                 {_editor_enunciado_html(name="texto1_conteudo", valor_inicial="", required=False, label="Texto novo — conteúdo", min_height=80, placeholder="Cole ou digite o texto de apoio")}
@@ -18980,8 +19014,6 @@ def form_editar_questao(id: int, request: Request):
                 <label>Legenda<input type="text" name="imagem2_legenda"></label>
                 <label>Fonte<input type="text" name="imagem2_fonte"></label>
             </fieldset>
-
-            {_editor_enunciado_html(name="enunciado", valor_inicial=enunciado_safe or "", required=True, label="Enunciado", placeholder="Digite o enunciado da questão.", detectar_alternativas=(tipo_q == "multipla_escolha"))}
 
             {fieldset_alts}
 
@@ -20220,9 +20252,12 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         imagens = conn.execute("SELECT caminho, legenda, fonte FROM imagens WHERE questao_id = ? ORDER BY ordem", (q["id"],)).fetchall()
 
         textos_html = _html_texto_compartilhado(conn, q["id"], idx, _ctx_tc)
+        # Ordem da questão (19/11/2026, Felipe): ENUNCIADO → recursos (texto de apoio, imagem, tabela) → alternativas.
+        # Só o texto COMPARTILHADO entre várias questões continua antes, como cabeçalho do conjunto.
+        apoio_html = ""
         for t in textos:
             fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
-            textos_html += f'<blockquote>{_limpar_vazios_impressao(t["conteudo"])}{fonte_html}</blockquote>'
+            apoio_html += f'<blockquote>{_limpar_vazios_impressao(t["conteudo"])}{fonte_html}</blockquote>'
 
         imagens_html = ""
         for img in imagens:
@@ -20277,14 +20312,15 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         # Questão curta fica inteira na mesma página; questão grande (mais de ~meia página)
         # pode continuar na página seguinte — antes TODA questão era empurrada inteira
         # para a página seguinte e sobrava meia página em branco (19/11/2026).
-        n_img = len(imagens) + len(re.findall(r"<img\b", (q["enunciado"] or "") + textos_html, re.I))
-        altura = _altura_estimada_cm(textos_html, enun_limpo, corpo_resposta, n_imagens=n_img,
+        n_img = len(imagens) + len(re.findall(r"<img\b", (q["enunciado"] or "") + textos_html + apoio_html, re.I))
+        altura = _altura_estimada_cm(textos_html, apoio_html, enun_limpo, corpo_resposta, n_imagens=n_img,
                                      extra_cm=(5 if tipo_q == "discursiva" else 0))
         questoes_html += f"""
         <div class="q-print{' q-longa' if altura > 12 else ''}">
             <div class="q-head">Questão {idx} · {q['disciplina_nome']}</div>
-            {textos_html}{imagens_html}
+            {textos_html}
             <div class="q-enunciado">{bncc_pref}{enun_limpo}</div>
+            {apoio_html}{imagens_html}
             {corpo_resposta}
         </div>
         """
@@ -25902,11 +25938,13 @@ def imprimir_simulado(sim_id: int, caixa_alta: Optional[int] = None):
                 (q["id"],)
             ).fetchall()
             textos_html = _html_texto_compartilhado(conn, q["id"], num_global, _ctx_tc)
+            # Ordem: enunciado → texto de apoio/imagem → alternativas (19/11/2026).
+            apoio_html = ""
             for t in textos:
-                textos_html += f'<blockquote>{t["conteudo"]}'
+                apoio_html += f'<blockquote>{t["conteudo"]}'
                 if t["fonte"]:
-                    textos_html += f'<footer>{t["fonte"]}</footer>'
-                textos_html += '</blockquote>'
+                    apoio_html += f'<footer>{t["fonte"]}</footer>'
+                apoio_html += '</blockquote>'
             # Imagens
             imgs = conn.execute(
                 "SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem",
@@ -25933,8 +25971,9 @@ def imprimir_simulado(sim_id: int, caixa_alta: Optional[int] = None):
             <div class="q-sim">
                 <div class="q-num">{num_global}.</div>
                 <div class="q-body">
-                    {textos_html}{imgs_html}
+                    {textos_html}
                     <div class="q-enunciado">{q['enunciado']}</div>
+                    {apoio_html}{imgs_html}
                     <div class="q-alts">{alts_html}</div>
                     {habs_html_print}
                 </div>
@@ -26416,11 +26455,13 @@ def preview_simulado(sim_id: int, caixa_alta: Optional[int] = None):
                 (q["id"],)
             ).fetchall()
             textos_html = _html_texto_compartilhado(conn, q["id"], num_global, _ctx_tc)
+            # Ordem: enunciado → texto de apoio/imagem → alternativas (19/11/2026).
+            apoio_html = ""
             for t in textos:
-                textos_html += f'<blockquote style="border-left:3px solid #aaa;padding:6px 12px;margin:0 0 8px;color:#333;font-style:italic;font-size:12px;background:#fafafa;">{t["conteudo"]}'
+                apoio_html += f'<blockquote style="border-left:3px solid #aaa;padding:6px 12px;margin:0 0 8px;color:#333;font-style:italic;font-size:12px;background:#fafafa;">{t["conteudo"]}'
                 if t["fonte"]:
-                    textos_html += f'<footer style="font-size:10px;font-style:normal;margin-top:3px;">{t["fonte"]}</footer>'
-                textos_html += "</blockquote>"
+                    apoio_html += f'<footer style="font-size:10px;font-style:normal;margin-top:3px;">{t["fonte"]}</footer>'
+                apoio_html += "</blockquote>"
             # Imagens
             imgs = conn.execute(
                 "SELECT caminho, legenda FROM imagens WHERE questao_id = ? ORDER BY ordem",
@@ -26446,8 +26487,9 @@ def preview_simulado(sim_id: int, caixa_alta: Optional[int] = None):
             questoes_html += f"""
             <div style="margin-bottom:16px; padding:12px; border:1px solid #eee; border-radius:6px; page-break-inside:avoid;">
                 <div style="font-weight:700; color:#2563eb; margin-bottom:6px;">Q{num_global}.</div>
-                {textos_html}{imgs_html}
+                {textos_html}
                 <div style="margin-bottom:8px; line-height:1.5;">{q['enunciado']}</div>
+                {apoio_html}{imgs_html}
                 <div style="padding-left:12px;">{alts_html}</div>
                 {habs_html}
             </div>"""
