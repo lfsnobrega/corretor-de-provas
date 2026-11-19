@@ -20175,6 +20175,41 @@ def previa_prova_nao_salva(titulo: str = Form(""), descricao: str = Form(""), qu
     return resp
 
 
+_RE_BLOCO_VAZIO = re.compile(r"<(p|div)\b[^>]*>(?:\s|&nbsp;|&#160;|\u00a0|<br\s*/?>)*</\1>", re.I)
+
+
+def _limpar_vazios_impressao(h: str) -> str:
+    """Só para a IMPRESSÃO (não altera o que está salvo): parágrafos vazios e quebras de
+    linha repetidas que vêm do editor viravam buracos enormes na prova (19/11/2026).
+    Vários vazios seguidos viram um espaço pequeno; vazios no começo/fim somem."""
+    if not h:
+        return h or ""
+    marca = "\x00"
+    t = h
+    for _ in range(3):                       # pega <div><p><br></p></div> etc.
+        t = _RE_BLOCO_VAZIO.sub(marca, t)
+    t = re.sub(r"(?:<br\s*/?>\s*){3,}", "<br><br>", t, flags=re.I)
+    t = re.sub(r"(?:\s*\x00\s*)+", marca, t)
+    t = re.sub(r"^(?:\s|\x00|<br\s*/?>)+", "", t, flags=re.I)
+    t = re.sub(r"(?:\s|\x00|<br\s*/?>)+$", "", t, flags=re.I)
+    return t.replace(marca, '<div class="q-esp"></div>')
+
+
+def _altura_estimada_cm(*trechos_html, n_imagens: int = 0, extra_cm: float = 0) -> float:
+    """Estimativa grosseira da altura de uma questão impressa (A4, fonte 12px):
+    ~105 caracteres por linha, ~0,55 cm por linha, ~7 cm por imagem."""
+    linhas = 0
+    for h in trechos_html:
+        txt = re.sub(r"<[^>]+>", " ", h or "")
+        txt = html.unescape(txt)
+        for par in re.split(r"\n|(?<=[.!?:])\s{2,}", txt):
+            par = par.strip()
+            if par:
+                linhas += max(1, math.ceil(len(par) / 105))
+    blocos = len(re.findall(r"<(?:p|div|li|br)\b", " ".join(t or "" for t in trechos_html), re.I))
+    return (linhas + blocos * 0.3) * 0.55 + n_imagens * 7 + extra_cm
+
+
 def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, caixa_alta=None, previa=False):
     """Monta a página de impressão da prova. 'previa=True' = prova ainda não salva (sem botão de imprimir)."""
     questoes_html = ""
@@ -20187,7 +20222,7 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         textos_html = _html_texto_compartilhado(conn, q["id"], idx, _ctx_tc)
         for t in textos:
             fonte_html = f'<footer>Fonte: {t["fonte"]}</footer>' if t["fonte"] else ""
-            textos_html += f'<blockquote>{t["conteudo"]}{fonte_html}</blockquote>'
+            textos_html += f'<blockquote>{_limpar_vazios_impressao(t["conteudo"])}{fonte_html}</blockquote>'
 
         imagens_html = ""
         for img in imagens:
@@ -20198,7 +20233,7 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         # Conteúdo específico do tipo
         if tipo_q == "multipla_escolha":
             alts = conn.execute("SELECT letra, texto FROM alternativas WHERE questao_id = ? ORDER BY letra", (q["id"],)).fetchall()
-            corpo_resposta = "<ul class=\"q-alts\">" + "".join(f'<li><strong>{a["letra"]})</strong> {a["texto"]}</li>' for a in alts) + "</ul>"
+            corpo_resposta = "<ul class=\"q-alts\">" + "".join(f'<li><strong>{a["letra"]})</strong> {_limpar_vazios_impressao(a["texto"])}</li>' for a in alts) + "</ul>"
         elif tipo_q == "discursiva":
             # Linhas em branco pra resposta manuscrita
             linhas = "".join('<div style="border-bottom: 1px solid #999; height: 22px; margin-bottom: 4px;"></div>' for _ in range(6))
@@ -20238,11 +20273,18 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
             corpo_resposta = ""
 
         bncc_pref = _bncc_prefix(conn, q["id"])
+        enun_limpo = _limpar_vazios_impressao(q["enunciado"])
+        # Questão curta fica inteira na mesma página; questão grande (mais de ~meia página)
+        # pode continuar na página seguinte — antes TODA questão era empurrada inteira
+        # para a página seguinte e sobrava meia página em branco (19/11/2026).
+        n_img = len(imagens) + len(re.findall(r"<img\b", (q["enunciado"] or "") + textos_html, re.I))
+        altura = _altura_estimada_cm(textos_html, enun_limpo, corpo_resposta, n_imagens=n_img,
+                                     extra_cm=(5 if tipo_q == "discursiva" else 0))
         questoes_html += f"""
-        <div class="q-print{' q-longa' if len(textos_html) > 1200 else ''}">
+        <div class="q-print{' q-longa' if altura > 12 else ''}">
             <div class="q-head">Questão {idx} · {q['disciplina_nome']}</div>
             {textos_html}{imagens_html}
-            <div class="q-enunciado">{bncc_pref}{q['enunciado']}</div>
+            <div class="q-enunciado">{bncc_pref}{enun_limpo}</div>
             {corpo_resposta}
         </div>
         """
@@ -20298,18 +20340,30 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         .desc-prova ul, .desc-prova ol {{ margin: 4px 0 4px 22px; padding: 0; }}
         .student-info {{ display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; margin-top: 14px; font-size: 10px; color:#555; }}
         .student-info > div {{ border-bottom: 1px solid #555; padding-bottom: 6px; min-height: 24px; }}
-        .q-print {{ margin-bottom: 18px; page-break-inside: avoid; break-inside: avoid; }}
+        /* Impressão compacta (19/11/2026): questão curta inteira na página; questão grande
+           pode continuar na seguinte, mas o título fica com a imagem e as alternativas juntas. */
+        .q-print {{ margin-bottom: 14px; padding-top: 8px; border-top: 1px solid #e5e5e5; page-break-inside: avoid; break-inside: avoid; }}
+        .q-print:first-child {{ border-top: none; padding-top: 0; }}
         .q-print.q-longa {{ page-break-inside: auto; break-inside: auto; }}
-        .q-print.q-longa .q-head, .q-print.q-longa .q-enunciado {{ break-after: avoid; }}
-        .q-head {{ font-size: 10px; color: #555; margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }}
-        blockquote {{ border-left: 3px solid #aaa; padding: 6px 12px; margin: 8px 0; color: #333; font-style: italic; background: #fafafa; font-size: 11px; }}
-        blockquote footer {{ font-size: 9px; margin-top: 4px; font-style: normal; }}
-        figure {{ margin: 8px 0; }}
-        figure img {{ width: 10cm; max-width: 100%; height: auto; max-height: 10cm; object-fit: contain; display: block; }}
+        .q-head {{ font-size: 10px; color: #555; margin-bottom: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; break-after: avoid; page-break-after: avoid; }}
+        blockquote {{ border-left: 3px solid #aaa; padding: 4px 10px; margin: 5px 0; color: #333; font-style: italic; background: #fafafa; font-size: 11px; line-height: 1.4; }}
+        blockquote footer {{ font-size: 9px; margin-top: 3px; font-style: normal; }}
+        blockquote p, .q-enunciado p {{ margin: 0 0 4px; }}
+        blockquote p:last-child, .q-enunciado p:last-child {{ margin-bottom: 0; }}
+        figure {{ margin: 5px 0; max-width: 9cm; break-inside: avoid; page-break-inside: avoid; break-after: avoid; page-break-after: avoid; }}
+        figure img, .q-enunciado img, blockquote img {{ display: block; width: auto; height: auto; max-width: 100%; max-height: 6cm; object-fit: contain; }}
+        .q-enunciado img, blockquote img {{ max-width: 9cm; }}
         figcaption {{ font-size: 9px; color: #666; margin-top: 2px; }}
-        .q-enunciado {{ margin: 6px 0 8px; line-height: 1.5; }}
-        .q-alts {{ list-style: none; padding-left: 8px; margin: 6px 0; }}
-        .q-alts li {{ padding: 3px 0; line-height: 1.5; }}
+        .q-enunciado {{ margin: 4px 0 6px; line-height: 1.45; orphans: 3; widows: 3; }}
+        .q-esp {{ height: 5px; }}
+        .q-alts {{ list-style: none; padding-left: 6px; margin: 4px 0 0; break-inside: avoid; page-break-inside: avoid; break-before: avoid; page-break-before: avoid; }}
+        .q-alts li {{ padding: 2px 0; line-height: 1.4; break-inside: avoid; }}
+        .q-alts li > p, .q-alts li > div {{ display: inline; margin: 0; }}
+        /* Opção "duas colunas" (economiza papel) */
+        body.duas-colunas .q-lista {{ column-count: 2; column-gap: 0.8cm; column-rule: 1px solid #ddd; }}
+        body.duas-colunas figure {{ max-width: 100%; }}
+        body.duas-colunas .q-enunciado img, body.duas-colunas blockquote img {{ max-width: 100%; }}
+        body.duas-colunas .q-print {{ font-size: 11px; }}
         table {{ border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 11px; }}
         th, td {{ border: 1px solid #999; padding: 5px 8px; text-align: left; }}
         th {{ background: #f0f0f0; font-weight: 600; }}
@@ -20327,6 +20381,9 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         {botao_imprimir}
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
             <input type="checkbox" id="chk-caixa-alta" onchange="alternarCaixaAlta(this.checked)" {'checked' if caixa_alta else ''}> 🔠 Tudo em CAIXA ALTA
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;" title="Coloca as questões em duas colunas, como nas provas impressas tradicionais — gasta menos folhas.">
+            <input type="checkbox" id="chk-duas-colunas" onchange="document.body.classList.toggle('duas-colunas', this.checked)"> 📰 Duas colunas (economiza papel)
         </label>
         {botao_voltar}
     </div>
@@ -20348,7 +20405,7 @@ def _montar_prova_impressa(conn, titulo, descricao, questoes, prova_id=None, cai
         </div>
         {desc_html}
     </div>
-    {questoes_html}
+    <div class="q-lista">{questoes_html}</div>
 <script>{CAIXA_ALTA_JS}</script>
 </body>
 </html>""")
