@@ -2170,6 +2170,38 @@ def get_db():
     return conn
 
 
+
+def _nome_comparavel(nome) -> str:
+    """Nome sem acento, minúsculo e com espaços simples — para comparar nomes."""
+    t = unicodedata.normalize("NFKD", str(nome or "")).encode("ascii", "ignore").decode("ascii")
+    return " ".join(t.lower().split())
+
+
+def _renomear_profissional(conn, professor_id: int, nome_antigo: str, nome_novo: str):
+    """Troca o nome do profissional no cadastro (e trava contra o nome do Google) e também
+    nas assinaturas das ocorrências/atendimentos já registrados (24/11/2026)."""
+    conn.execute("UPDATE professores SET nome = ?, nome_editado = 1 WHERE id = ?", (nome_novo, professor_id))
+    alvo = _nome_comparavel(nome_antigo)
+    if not alvo or alvo == _nome_comparavel(nome_novo):
+        return
+    try:
+        linhas = conn.execute("SELECT id, assinantes_json FROM ocorrencias_alunos WHERE assinantes_json IS NOT NULL").fetchall()
+    except sqlite3.OperationalError:
+        return
+    for r in linhas:
+        try:
+            lista = json.loads(r["assinantes_json"] or "[]")
+        except Exception:
+            continue
+        mudou = False
+        for x in lista:
+            if isinstance(x, dict) and _nome_comparavel(x.get("nome")) == alvo:
+                x["nome"] = nome_novo
+                mudou = True
+        if mudou:
+            conn.execute("UPDATE ocorrencias_alunos SET assinantes_json = ? WHERE id = ?",
+                         (json.dumps(lista, ensure_ascii=False), r["id"]))
+
 def init_db():
     conn = get_db()
     conn.executescript("""
@@ -2409,6 +2441,21 @@ def init_db():
     if "assinantes_json" not in cols_ocorr:
         # Profissionais que assinam o documento (lista de {nome, cargo}) — 22/10/2026.
         conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN assinantes_json TEXT")
+    if "assinatura_aluno" not in cols_ocorr:
+        # Linha de assinatura do(a) aluno(a) no documento passa a ser OPCIONAL (24/11/2026,
+        # Felipe). Padrão 0 = sem a linha (vale também para os registros antigos).
+        conn.execute("ALTER TABLE ocorrencias_alunos ADD COLUMN assinatura_aluno INTEGER NOT NULL DEFAULT 0")
+
+    # Nome corrigido pelo administrador (✏️ Nome em Usuários) não pode ser sobrescrito pelo
+    # nome da conta Google a cada login — antes a correção "sumia" no login seguinte (24/11/2026).
+    cols_prof_nome = {row[1] for row in conn.execute("PRAGMA table_info(professores)").fetchall()}
+    if "nome_editado" not in cols_prof_nome:
+        conn.execute("ALTER TABLE professores ADD COLUMN nome_editado INTEGER NOT NULL DEFAULT 0")
+    # Correção pedida por Felipe em 24/11/2026: "Felipe Nobrega" (nome da conta Google) →
+    # nome completo, no cadastro e nos documentos de ocorrência já registrados.
+    for _p in conn.execute("SELECT id, nome FROM professores WHERE COALESCE(nome_editado,0) = 0").fetchall():
+        if _nome_comparavel(_p["nome"]) == "felipe nobrega":
+            _renomear_profissional(conn, _p["id"], _p["nome"], "Luis Felipe da Silva Nóbrega")
 
     # ============ DOCUMENTO NORTEADOR (planejamento bimestral/trimestral) — 04/09/2026 ============
     # Referencial Curricular: disciplina → ano → trimestre → unidade temática, com objetos
@@ -3079,8 +3126,10 @@ def _upsert_professor(email: str, nome: str, foto_url: Optional[str] = None) -> 
     conn = get_db()
     existing = conn.execute("SELECT * FROM professores WHERE email = ?", (email,)).fetchone()
     if existing:
+        # Nome corrigido pelo administrador fica valendo (não volta para o nome do Google).
+        nome_editado = bool(existing["nome_editado"]) if "nome_editado" in existing.keys() else False
         conn.execute("UPDATE professores SET nome = ?, foto_url = ?, ultimo_acesso = CURRENT_TIMESTAMP WHERE id = ?",
-                     (nome, foto_url, existing["id"]))
+                     (existing["nome"] if nome_editado else nome, foto_url, existing["id"]))
         prof_id = existing["id"]
         is_admin = bool(existing["is_admin"])
         is_gestor = bool(existing["is_gestor"] if "is_gestor" in existing.keys() else 0)
@@ -5924,6 +5973,9 @@ def form_nova_ocorrencia(request: Request, aluno_id: Optional[str] = None):
                 <textarea name="encaminhamento" rows="3" placeholder="Providências tomadas, conversa com responsáveis, etc."></textarea>
             </label>
             {assinantes_html}
+            <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-weight:400;">
+                <input type="checkbox" name="assinatura_aluno" value="1" style="width:auto; margin:0;"> Incluir linha de assinatura do(a) aluno(a) no documento <span style="color:var(--text-muted); font-size:12px;">(opcional)</span>
+            </label>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Registrar</button>
                 <a href="/orientacao/ocorrencias" class="btn">Ver registros anteriores</a>
@@ -5987,7 +6039,7 @@ async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: st
                             data_ocorrencia: str = Form(...), descricao: str = Form(...),
                             encaminhamento: str = Form(""), natureza_registro: str = Form("ocorrencia"),
                             outro_aluno_envolvido: str = Form(""), natureza_ato: str = Form(""),
-                            medida_disciplinar: str = Form(""),
+                            medida_disciplinar: str = Form(""), assinatura_aluno: str = Form(""),
                             assin_nome: List[str] = Form([]), assin_cargo: List[str] = Form([])):
     prof = get_current_professor(request)
     if not _pode_ver_ocorrencias(prof):
@@ -6009,11 +6061,11 @@ async def criar_ocorrencia(request: Request, aluno_id: int = Form(...), tipo: st
         return HTMLResponse(render_page("Erro", '<div class="page-header"><h1>Erro</h1></div><p>Aluno não encontrado.</p><a href="/orientacao/ocorrencias/novo" class="btn">Voltar</a>', active="ocorrencias-novo"))
 
     cursor = conn.execute("""
-        INSERT INTO ocorrencias_alunos (aluno_id, tipo, data_ocorrencia, descricao, encaminhamento, criado_por_professor_id, natureza_registro, outro_aluno_envolvido, natureza_ato, medida_disciplinar, assinantes_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ocorrencias_alunos (aluno_id, tipo, data_ocorrencia, descricao, encaminhamento, criado_por_professor_id, natureza_registro, outro_aluno_envolvido, natureza_ato, medida_disciplinar, assinantes_json, assinatura_aluno)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (aluno_id, tipo, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None, prof["id"],
           natureza_registro, outro_aluno_envolvido.strip() or None, natureza_ato.strip() or None, medida_disciplinar.strip() or None,
-          json.dumps(_assinantes_normalizar(assin_nome, assin_cargo), ensure_ascii=False)))
+          json.dumps(_assinantes_normalizar(assin_nome, assin_cargo), ensure_ascii=False), 1 if assinatura_aluno else 0))
     ocorrencia_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -6225,6 +6277,12 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
     else:
         blocos_prof = f'<div style="border-top:1px solid #333; padding-top:4px; width:200px;">{nome_assinatura}{cargo_assinatura_html}</div>'
 
+    # Assinatura do(a) aluno(a): opcional, marcada no formulário (24/11/2026).
+    linha_aluno = ""
+    if "assinatura_aluno" in r.keys() and r["assinatura_aluno"]:
+        linha_aluno = (f'<div style="border-top:1px solid #333; padding-top:4px; width:200px;">{html.escape(r["aluno_nome"])}'
+                       f'<div style="font-size:10px; color:#666; margin-top:2px;">Aluno(a)</div></div>')
+
     html_completo = f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <title>{titulo_doc} · {r["aluno_nome"]}</title>
@@ -6253,7 +6311,7 @@ def documento_ocorrencia(request: Request, ocorrencia_id: int):
 
     <div style="margin-top:60px; display:flex; justify-content:space-around; text-align:center; font-size:11px; flex-wrap:wrap; gap:28px 16px;">
         {blocos_prof}
-        <div style="border-top:1px solid #333; padding-top:4px; width:200px;">{r["aluno_nome"]}<div style="font-size:10px; color:#666; margin-top:2px;">Aluno(a)</div></div>
+        {linha_aluno}
     </div>
 
     <div style="font-size:9px; color:#888; border-top:1px solid #ddd; padding-top:5px; margin-top:30px; text-align:center;">
@@ -6309,6 +6367,9 @@ def form_editar_ocorrencia(request: Request, ocorrencia_id: int):
             <label>Descrição<textarea name="descricao" rows="6" required>{r["descricao"]}</textarea></label>
             <label>Encaminhamento<textarea name="encaminhamento" rows="3">{r["encaminhamento"] or ""}</textarea></label>
             {assinantes_html}
+            <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-weight:400;">
+                <input type="checkbox" name="assinatura_aluno" value="1" style="width:auto; margin:0;"{" checked" if ("assinatura_aluno" in r.keys() and r["assinatura_aluno"]) else ""}> Incluir linha de assinatura do(a) aluno(a) no documento <span style="color:var(--text-muted); font-size:12px;">(opcional)</span>
+            </label>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar alterações</button>
                 <a href="/orientacao/ocorrencias" class="btn">Cancelar</a>
@@ -6323,7 +6384,7 @@ async def salvar_edicao_ocorrencia(request: Request, ocorrencia_id: int, tipo: s
                                     data_ocorrencia: str = Form(...), descricao: str = Form(...),
                                     encaminhamento: str = Form(""), natureza_registro: str = Form("ocorrencia"),
                                     outro_aluno_envolvido: str = Form(""), natureza_ato: str = Form(""),
-                                    medida_disciplinar: str = Form(""),
+                                    medida_disciplinar: str = Form(""), assinatura_aluno: str = Form(""),
                                     assin_nome: List[str] = Form([]), assin_cargo: List[str] = Form([])):
     prof = get_current_professor(request)
     if not _pode_editar_ocorrencias(prof):
@@ -6335,11 +6396,12 @@ async def salvar_edicao_ocorrencia(request: Request, ocorrencia_id: int, tipo: s
     conn = get_db()
     conn.execute("""UPDATE ocorrencias_alunos SET tipo=?, data_ocorrencia=?, descricao=?, encaminhamento=?,
                      natureza_registro=?, outro_aluno_envolvido=?, natureza_ato=?, medida_disciplinar=?,
-                     assinantes_json=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
+                     assinantes_json=?, assinatura_aluno=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?""",
                  (tipo_final, data_ocorrencia, descricao.strip(), encaminhamento.strip() or None,
                   natureza_registro, outro_aluno_envolvido.strip() or None, natureza_ato_final,
                   medida_disciplinar.strip() or None,
-                  json.dumps(_assinantes_normalizar(assin_nome, assin_cargo), ensure_ascii=False), ocorrencia_id))
+                  json.dumps(_assinantes_normalizar(assin_nome, assin_cargo), ensure_ascii=False),
+                  1 if assinatura_aluno else 0, ocorrencia_id))
     conn.commit()
     conn.close()
     return RedirectResponse("/orientacao/ocorrencias", status_code=303)
@@ -17210,7 +17272,9 @@ def form_editar_nome_usuario(request: Request, usuario_id: int):
             <p class="subtitle">{u["email"] or "sem e-mail (login local)"}</p>
         </div>
         <form method="post" action="/admin/usuarios/{usuario_id}/editar-nome">
-            <label>Nome<input type="text" name="nome" required value="{u["nome"]}"></label>
+            <label>Nome<input type="text" name="nome" required value="{html.escape(u["nome"] or "", quote=True)}"></label>
+            <div class="tip">O nome salvo aqui fica valendo mesmo depois de a pessoa entrar com a conta Google (não volta para o nome do Google)
+            e também é corrigido nas assinaturas das ocorrências/atendimentos já registrados.</div>
             <div class="page-actions">
                 <button type="submit" class="btn btn-primary">Salvar</button>
                 <a href="/admin/usuarios" class="btn">Cancelar</a>
@@ -17229,7 +17293,9 @@ def salvar_edicao_nome_usuario(request: Request, usuario_id: int, nome: str = Fo
     if not nome:
         return RedirectResponse(f"/admin/usuarios/{usuario_id}/editar-nome", status_code=303)
     conn = get_db()
-    conn.execute("UPDATE professores SET nome = ? WHERE id = ?", (nome, usuario_id))
+    antigo = conn.execute("SELECT nome FROM professores WHERE id = ?", (usuario_id,)).fetchone()
+    if antigo:
+        _renomear_profissional(conn, usuario_id, antigo["nome"], nome)
     conn.commit()
     conn.close()
     return RedirectResponse("/admin/usuarios", status_code=303)
