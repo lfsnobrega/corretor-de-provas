@@ -3089,6 +3089,7 @@ async def auth_middleware(request: Request, call_next):
         rotas_permitidas_apoio = {
             "/", "/administrativo/afastamentos/novo", "/administrativo/afastamentos", "/trocar-senha",
             "/administrativo/atestados-alunos/novo", "/administrativo/atestados-alunos",
+            "/administrativo/atestados-alunos/relatorio",
         }
         eh_dispensar_aviso = path.startswith("/avisos/") and path.endswith("/dispensar")
         if path not in rotas_permitidas_apoio and not eh_dispensar_aviso and path not in ONBOARDING_ISENTAS:
@@ -5646,45 +5647,91 @@ async def criar_atestado_aluno(request: Request, aluno_id: int = Form(...), data
     return HTMLResponse(render_page("Atestado registrado", content, active="atestados-alunos-novo"))
 
 
+def _atestados_dias(r) -> tuple:
+    """(dias corridos, dias úteis seg-sex) de um atestado; (None, None) se a data for inválida."""
+    try:
+        ini, fim = date.fromisoformat(r["data_inicio"]), date.fromisoformat(r["data_fim"])
+    except (ValueError, TypeError):
+        return None, None
+    if fim < ini:
+        return None, None
+    corridos = (fim - ini).days + 1
+    uteis = sum(1 for i in range(corridos) if (ini + timedelta(days=i)).weekday() < 5)
+    return corridos, uteis
+
+
+def _atestados_filtrar(conn, nome: str = "", turma_id: Optional[int] = None, de: str = "", ate: str = "",
+                       aluno_id: Optional[int] = None) -> list:
+    """Atestados de alunos com os filtros da tela (24/11/2026): nome (parte do nome, sem
+    ligar para acentos/maiúsculas), turma, período (atestados que tocam o período) e aluno."""
+    cond, params = [], []
+    if turma_id:
+        cond.append("al.turma_id = ?"); params.append(turma_id)
+    if aluno_id:
+        cond.append("al.id = ?"); params.append(aluno_id)
+    if de:
+        cond.append("at.data_fim >= ?"); params.append(de)
+    if ate:
+        cond.append("at.data_inicio <= ?"); params.append(ate)
+    where = (" AND " + " AND ".join(cond)) if cond else ""
+    linhas = conn.execute(f"""
+        SELECT at.*, al.nome AS aluno_nome, al.id AS aluno_id_, t.nome AS turma_nome, t.ano_letivo AS ano_letivo
+        FROM atestados_alunos at
+        JOIN alunos al ON al.id = at.aluno_id
+        JOIN turmas t ON t.id = al.turma_id
+        WHERE 1=1 {where}
+        ORDER BY at.data_inicio DESC
+    """, params).fetchall()
+    busca = _nome_comparavel(nome)
+    if busca:
+        linhas = [r for r in linhas if busca in _nome_comparavel(r["aluno_nome"])]
+    return linhas
+
+
+def _data_iso_ou_vazio(v) -> str:
+    v = (v or "").strip()
+    try:
+        return date.fromisoformat(v).isoformat()
+    except ValueError:
+        return ""
+
+
 @app.get("/administrativo/atestados-alunos", response_class=HTMLResponse)
-def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
+def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None, nome: str = "", de: str = "", ate: str = ""):
     prof = get_current_professor(request)
     if not _pode_ver_atestados_alunos(prof):
         return RedirectResponse("/", status_code=303)
     turma_id_int = int(turma_id) if turma_id and turma_id.strip().isdigit() else None
     pode_editar = _pode_editar_atestados_alunos(prof)
+    nome = (nome or "").strip()[:80]
+    de, ate = _data_iso_ou_vazio(de), _data_iso_ou_vazio(ate)
 
     conn = get_db()
     turmas = conn.execute("SELECT id, nome FROM turmas ORDER BY nome").fetchall()
-    where_turma = "AND al.turma_id = ?" if turma_id_int else ""
-    params = [turma_id_int] if turma_id_int else []
-    registros = conn.execute(f"""
-        SELECT at.*, al.nome AS aluno_nome, t.nome AS turma_nome
-        FROM atestados_alunos at
-        JOIN alunos al ON al.id = at.aluno_id
-        JOIN turmas t ON t.id = al.turma_id
-        WHERE 1=1 {where_turma}
-        ORDER BY at.data_inicio DESC
-    """, params).fetchall()
+    registros = _atestados_filtrar(conn, nome, turma_id_int, de, ate)
+    nomes_alunos = sorted({r["aluno_nome"] for r in conn.execute(
+        "SELECT DISTINCT al.nome AS aluno_nome FROM atestados_alunos at JOIN alunos al ON al.id = at.aluno_id").fetchall()})
     conn.close()
 
     opts_turmas = '<option value="">— todas as turmas —</option>' + "".join(
-        f'<option value="{t["id"]}"{" selected" if turma_id_int == t["id"] else ""}>{t["nome"]}</option>' for t in turmas
+        f'<option value="{t["id"]}"{" selected" if turma_id_int == t["id"] else ""}>{html.escape(t["nome"])}</option>' for t in turmas
     )
+    tem_filtro = bool(nome or turma_id_int or de or ate)
+    qs = urllib.parse.urlencode({k: v for k, v in (("nome", nome), ("turma_id", turma_id_int or ""), ("de", de), ("ate", ate)) if v})
 
+    total_corridos = total_uteis = 0
     if not registros:
-        linhas = f'<tr><td colspan="{6 if pode_editar else 5}" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhum atestado registrado ainda.</td></tr>'
+        msg_vazio = "Nenhum atestado encontrado com esses filtros." if tem_filtro else "Nenhum atestado registrado ainda."
+        linhas = f'<tr><td colspan="{7 if pode_editar else 6}" style="padding:16px; text-align:center; color:var(--text-muted);">{msg_vazio}</td></tr>'
     else:
         linhas = ""
         for r in registros:
             # Um único registro com data ausente/mal formada não pode derrubar a página
             # inteira pra todo mundo — 12/09/2026, corrigindo o erro relatado por Felipe
             # (a tela toda ficava fora do ar por causa de 1 registro incompleto).
-            try:
-                dias = (date.fromisoformat(r["data_fim"]) - date.fromisoformat(r["data_inicio"])).days + 1
-                dias_str = str(dias)
-            except (ValueError, TypeError):
-                dias_str = "—"
+            corridos, uteis = _atestados_dias(r)
+            total_corridos += corridos or 0
+            total_uteis += uteis or 0
             acoes_html = ""
             if pode_editar:
                 acoes_html = (
@@ -5692,38 +5739,197 @@ def listar_atestados_alunos(request: Request, turma_id: Optional[str] = None):
                     f'<form method="post" action="/administrativo/atestados-alunos/{r["id"]}/excluir" style="display:inline;" onsubmit="return confirm(\'Excluir esse atestado?\');">'
                     f'<button type="submit" class="btn" style="padding:3px 8px; font-size:11px; color:var(--red); border-color:var(--red);">🗑️</button></form>'
                 )
+            link_aluno = (f'<a href="/administrativo/atestados-alunos/relatorio?aluno_id={r["aluno_id_"]}" target="_blank" '
+                          f'title="Imprimir / PDF das faltas deste aluno" style="text-decoration:none;">🖨️</a>')
             linhas += f"""<tr>
-                <td style="padding:8px;">{r["aluno_nome"]}</td>
-                <td style="padding:8px;">{r["turma_nome"]}</td>
+                <td style="padding:8px;">{html.escape(r["aluno_nome"])} {link_aluno}</td>
+                <td style="padding:8px;">{html.escape(r["turma_nome"])}</td>
                 <td style="padding:8px;">{_fmt_data_br(r["data_inicio"])} a {_fmt_data_br(r["data_fim"])}</td>
-                <td style="padding:8px; text-align:center;">{dias_str}</td>
-                <td style="padding:8px; font-size:12px; color:var(--text-muted);">{r["observacao"] or "—"}</td>
+                <td style="padding:8px; text-align:center;">{corridos if corridos is not None else "—"}</td>
+                <td style="padding:8px; text-align:center;">{uteis if uteis is not None else "—"}</td>
+                <td style="padding:8px; font-size:12px; color:var(--text-muted);">{html.escape(r["observacao"] or "—")}</td>
                 {f'<td style="padding:8px; white-space:nowrap;">{acoes_html}</td>' if pode_editar else ""}
             </tr>"""
+
+    opts_nomes = "".join(f'<option value="{html.escape(n, quote=True)}"></option>' for n in nomes_alunos)
+    resumo = ""
+    if registros:
+        n_alunos = len({r["aluno_id_"] for r in registros})
+        resumo = (f'<div style="font-size:13px; color:var(--text-muted); margin:0 0 8px;">{len(registros)} atestado(s) · '
+                  f'{n_alunos} aluno(s) · <strong>{total_corridos}</strong> dia(s) corrido(s) · <strong>{total_uteis}</strong> dia(s) útil(eis) (seg. a sex.)</div>')
 
     content = f"""
         <div class="page-header">
             <h1>🩺 Atestados Médicos de Alunos</h1>
         </div>
-        <div style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
             <a href="/administrativo/atestados-alunos/novo" class="btn btn-primary">+ Novo atestado</a>
-            <form method="get" style="margin:0;">
-                <label style="margin:0;">Turma <select name="turma_id" onchange="this.form.submit();">{opts_turmas}</select></label>
-            </form>
         </div>
+        <form method="get" class="card" style="padding:12px 14px; margin-bottom:12px; display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+            <label style="margin:0; flex:2 1 240px;">🔎 Pesquisar por nome
+                <input type="search" name="nome" value="{html.escape(nome, quote=True)}" list="atest-nomes" placeholder="Digite parte do nome do aluno" autocomplete="off">
+                <datalist id="atest-nomes">{opts_nomes}</datalist>
+            </label>
+            <label style="margin:0; flex:1 1 160px;">Turma <select name="turma_id">{opts_turmas}</select></label>
+            <label style="margin:0; flex:1 1 140px;">De <input type="date" name="de" value="{de}"></label>
+            <label style="margin:0; flex:1 1 140px;">Até <input type="date" name="ate" value="{ate}"></label>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button type="submit" class="btn btn-primary">Buscar</button>
+                {'<a href="/administrativo/atestados-alunos" class="btn">Limpar</a>' if tem_filtro else ""}
+                <a href="/administrativo/atestados-alunos/relatorio{("?" + qs) if qs else ""}" target="_blank" class="btn">🖨️ Imprimir / PDF</a>
+            </div>
+        </form>
+        <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px;">O botão <strong>Imprimir / PDF</strong> gera o relatório das faltas justificadas com o que está filtrado acima
+        (para salvar em PDF, escolha "Salvar como PDF" na janela de impressão). O 🖨️ ao lado do nome gera o relatório só daquele aluno.</p>
+        {resumo}
+        <div style="overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
             <thead><tr style="background:var(--bg-subtle);">
                 <th style="padding:8px; text-align:left;">Aluno</th>
                 <th style="padding:8px; text-align:left;">Turma</th>
                 <th style="padding:8px; text-align:left;">Período</th>
-                <th style="padding:8px;">Dias</th>
+                <th style="padding:8px;" title="Dias corridos (inclui sábado e domingo)">Dias</th>
+                <th style="padding:8px;" title="Dias de segunda a sexta dentro do período">Dias úteis</th>
                 <th style="padding:8px; text-align:left;">Observação</th>
                 {'<th style="padding:8px;">Ações</th>' if pode_editar else ""}
             </tr></thead>
             <tbody>{linhas}</tbody>
         </table>
+        </div>
     """
     return HTMLResponse(render_page("Atestados de Alunos", content, active="atestados-alunos"))
+
+
+@app.get("/administrativo/atestados-alunos/relatorio", response_class=HTMLResponse)
+def relatorio_atestados_alunos(request: Request, turma_id: Optional[str] = None, nome: str = "", de: str = "", ate: str = "",
+                              aluno_id: Optional[str] = None):
+    """Relatório para imprimir / salvar em PDF das faltas justificadas por atestado médico
+    (24/11/2026, a pedido de Felipe). Agrupa por aluno, com subtotal de dias e, quando houver,
+    as faltas lançadas no boletim por trimestre (para conferência)."""
+    prof = get_current_professor(request)
+    if not _pode_ver_atestados_alunos(prof):
+        return RedirectResponse("/", status_code=303)
+    turma_id_int = int(turma_id) if turma_id and str(turma_id).strip().isdigit() else None
+    aluno_id_int = int(aluno_id) if aluno_id and str(aluno_id).strip().isdigit() else None
+    nome = (nome or "").strip()[:80]
+    de, ate = _data_iso_ou_vazio(de), _data_iso_ou_vazio(ate)
+
+    conn = get_db()
+    registros = _atestados_filtrar(conn, nome, turma_id_int, de, ate, aluno_id_int)
+    turma_nome = ""
+    if turma_id_int:
+        t = conn.execute("SELECT nome FROM turmas WHERE id = ?", (turma_id_int,)).fetchone()
+        turma_nome = t["nome"] if t else ""
+    por_aluno = {}
+    for r in registros:
+        por_aluno.setdefault(r["aluno_id_"], {"nome": r["aluno_nome"], "turma": r["turma_nome"], "ano": r["ano_letivo"], "itens": []})["itens"].append(r)
+    # Faltas lançadas no boletim (soma de todas as disciplinas) por trimestre — conferência.
+    faltas_boletim = {}
+    for aid, info in por_aluno.items():
+        linhas_f = conn.execute("""SELECT trimestre, SUM(faltas) AS total FROM boletim_faltas
+                                   WHERE aluno_id = ? AND ano = ? GROUP BY trimestre ORDER BY trimestre""",
+                                (aid, info["ano"])).fetchall()
+        faltas_boletim[aid] = {f["trimestre"]: f["total"] or 0 for f in linhas_f}
+    conn.close()
+
+    filtros = []
+    if aluno_id_int and por_aluno:
+        filtros.append(f"Aluno: {html.escape(next(iter(por_aluno.values()))['nome'])}")
+    if nome:
+        filtros.append(f"Nome contém: “{html.escape(nome)}”")
+    if turma_nome:
+        filtros.append(f"Turma: {html.escape(turma_nome)}")
+    if de or ate:
+        filtros.append(f"Período: {_fmt_data_br(de) if de else 'início'} a {_fmt_data_br(ate) if ate else 'hoje'}")
+    filtros_html = " · ".join(filtros) if filtros else "Todos os atestados registrados"
+
+    blocos = ""
+    tot_c = tot_u = tot_n = 0
+    for aid, info in sorted(por_aluno.items(), key=lambda kv: (_nome_comparavel(kv[1]["turma"]), _nome_comparavel(kv[1]["nome"]))):
+        itens = sorted(info["itens"], key=lambda r: r["data_inicio"] or "")
+        linhas = ""
+        sub_c = sub_u = 0
+        for r in itens:
+            c_, u_ = _atestados_dias(r)
+            sub_c += c_ or 0
+            sub_u += u_ or 0
+            linhas += (f'<tr><td>{_fmt_data_br(r["data_inicio"])}</td><td>{_fmt_data_br(r["data_fim"])}</td>'
+                       f'<td class="c">{c_ if c_ is not None else "—"}</td><td class="c">{u_ if u_ is not None else "—"}</td>'
+                       f'<td>{html.escape(r["observacao"] or "")}</td></tr>')
+        tot_c += sub_c; tot_u += sub_u; tot_n += len(itens)
+        fb = faltas_boletim.get(aid) or {}
+        linha_boletim = ""
+        if fb:
+            partes = " · ".join(f"{t}º tri: {fb[t]}" for t in sorted(fb))
+            linha_boletim = (f'<div class="fb">Faltas lançadas no boletim {info["ano"]} (aulas, todas as disciplinas): {partes} '
+                             f'· total {sum(fb.values())}</div>')
+        blocos += f"""
+        <div class="aluno">
+            <div class="aluno-cab"><strong>{html.escape(info["nome"])}</strong> <span>— Turma {html.escape(info["turma"])}</span></div>
+            <table>
+                <thead><tr><th>Início</th><th>Término</th><th class="c">Dias</th><th class="c">Dias úteis</th><th>Observação</th></tr></thead>
+                <tbody>{linhas}</tbody>
+                <tfoot><tr><td colspan="2">Total do aluno ({len(itens)} atestado{"s" if len(itens) != 1 else ""})</td>
+                    <td class="c">{sub_c}</td><td class="c">{sub_u}</td><td></td></tr></tfoot>
+            </table>
+            {linha_boletim}
+        </div>"""
+    if not blocos:
+        blocos = '<p style="text-align:center; color:#666; margin:30px 0;">Nenhum atestado encontrado com esses filtros.</p>'
+    resumo_geral = (f'<div class="resumo">{tot_n} atestado(s) · {len(por_aluno)} aluno(s) · {tot_c} dia(s) corrido(s) · '
+                    f'{tot_u} dia(s) útil(eis) de segunda a sexta</div>') if por_aluno else ""
+    meses = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+    hoje = date.today()
+    gerado = f"{hoje.day} de {meses[hoje.month - 1]} de {hoje.year}"
+
+    pagina = f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Atestados médicos — faltas justificadas</title>
+<style>
+    @media print {{ @page {{ size: A4; margin: 14mm; }} .no-print {{ display: none !important; }}
+                   body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
+    body {{ margin: 0; background: #fff; font-family: Helvetica, Arial, sans-serif; color: #222; }}
+    .pag {{ padding: 14px 20px; max-width: 780px; margin: 0 auto; font-size: 12px; }}
+    .cab {{ display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 4px; }}
+    h2 {{ text-align: center; margin: 10px 0 4px; font-size: 16px; }}
+    .filtros {{ text-align: center; color: #555; font-size: 11px; margin-bottom: 12px; }}
+    .resumo {{ background: #f3f4f6; border-radius: 4px; padding: 6px 10px; margin-bottom: 12px; font-size: 12px; }}
+    .aluno {{ margin-bottom: 14px; break-inside: avoid; page-break-inside: avoid; }}
+    .aluno-cab {{ font-size: 13px; border-bottom: 2px solid #333; padding-bottom: 3px; margin-bottom: 4px; }}
+    .aluno-cab span {{ color: #555; font-weight: 400; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 11.5px; }}
+    th, td {{ border: 1px solid #bbb; padding: 4px 6px; text-align: left; vertical-align: top; }}
+    th {{ background: #eee; }}
+    td.c, th.c {{ text-align: center; width: 70px; }}
+    tfoot td {{ font-weight: 700; background: #fafafa; }}
+    .fb {{ font-size: 11px; color: #444; margin-top: 4px; }}
+    .rodape {{ font-size: 9px; color: #888; border-top: 1px solid #ddd; padding-top: 5px; margin-top: 24px; text-align: center; }}
+    .acoes {{ text-align: center; margin: 10px 0 16px; }}
+    .acoes button, .acoes a {{ font-size: 13px; padding: 7px 14px; margin: 0 4px; cursor: pointer; }}
+</style>
+</head><body>
+<div class="pag">
+    <div class="acoes no-print">
+        <button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+        <a href="javascript:window.close()">Fechar</a>
+    </div>
+    <div class="cab">
+        <img src="/static/imagens/logo_walmir.png" alt="" style="height:44px; width:auto;">
+        <div style="text-align:center;">
+            <div style="font-weight:700; font-size:15px;">E.M Walmir de Freitas Monteiro</div>
+            <div style="font-size:12px; color:#555;">Volta Redonda — RJ</div>
+        </div>
+    </div>
+    <h2>ATESTADOS MÉDICOS — FALTAS JUSTIFICADAS</h2>
+    <div class="filtros">{filtros_html}</div>
+    {resumo_geral}
+    {blocos}
+    <div class="rodape">Dias = dias corridos do atestado (inclui sábado e domingo) · Dias úteis = segunda a sexta dentro do período
+    (feriados e recessos não são descontados).<br>Gerado pelo Sistema Pedagógico — E.M Walmir de Freitas Monteiro · {gerado}</div>
+</div>
+<script>window.onload = function() {{ setTimeout(function() {{ window.print(); }}, 400); }};</script>
+</body></html>"""
+    return HTMLResponse(pagina)
 
 
 @app.get("/administrativo/atestados-alunos/{atestado_id}/editar", response_class=HTMLResponse)
