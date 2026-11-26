@@ -8770,6 +8770,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + nav_item("/administrativo/contingencia", "administrativo-contingencia", "🛟", "Contingência do Ponto") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") + nav_item("/administrativo/conferencia-ponto", "administrativo-conferencia", "🔎", "Conferência com o Ponto") + nav_item("/administrativo/tre", "administrativo-tre", "🗳️", "Folgas e Abonos TRE") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {('<div class="sidebar-section">Atestados de Alunos</div>' + nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado") + nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")) if _pode_ver_atestados_alunos(professor) else ""}
                 {('<div class="sidebar-section">Ocorrências Disciplinares</div>' + nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência") + nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")) if _pode_ver_ocorrencias(professor) else ""}
+                {('<div class="sidebar-section">Patrimônio</div>' + nav_item("/patrimonio", "patrimonio", "🏷️", "Patrimônio da escola")) if _pode_patrimonio(professor) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
         """
 
@@ -29017,6 +29018,1919 @@ async def confirmar_lote_universal(request: Request):
         <div style="margin-top:20px;"><a href="/escanear" class="btn btn-primary">📷 Escanear mais</a></div>
     """
     return HTMLResponse(render_page("Lote salvo", content, active="aplicacoes"))
+
+
+
+
+# ============ PATRIMÔNIO DA ESCOLA (26/11/2026) ============
+# Tela de gestão do patrimônio (pedido de Felipe): consulta com pesquisa e filtros,
+# inclusão (um item ou vários de uma vez), edição, baixa (sem apagar — fica no
+# histórico), exclusão para erro de cadastro, planilha Excel e relatório para imprimir/PDF
+# com o cabeçalho da escola. A carga inicial é a planilha "2026 LEVANTAMENTO DE
+# PATRIMÔNIO" enviada por Felipe (816 linhas), gravada UMA vez, na primeira subida.
+# Acesso: Gestão e Administrador. Importar nova planilha: só Administrador.
+
+PATRIMONIO_ESTADOS = ["Bom", "Regular", "Ruim", "Não avaliado"]
+PATRIMONIO_SITUACOES = ["Ativo", "Aguardando tombamento", "Indicado para baixa", "Aguardando retirada", "Baixado"]
+PATRIMONIO_PROCEDENCIAS = ["SME", "PDDE", "SMA", "MEC/FNDE", "FME"]
+PATRIMONIO_CATEGORIAS = ["Mobiliário", "Informática", "Audiovisual e telefonia", "Climatização", "Eletrodomésticos e cozinha",
+                         "Laboratório de Ciências", "Esporte e lazer", "Livros e material pedagógico", "Escritório", "Outros"]
+_PATR_MOBILIARIO_INICIO = ("mesa", "mesas", "cadeira", "cadeiras", "armario", "armarios", "arquivo", "arquivos", "estante", "estantes",
+                           "quadro", "quadros", "roupeiro", "sofa", "maca", "macas", "conjunto", "banqueta", "banquetas", "racker", "rack de ferro")
+_PATR_PALAVRAS = [
+    ("Informática", ("chromebook", "cpu", "monitor", "computador", "notebook", "impressora", "scanner", "switch", "routerboard",
+                     "roteador", "nobreak", "tablet", "rack")),
+    ("Climatização", ("ar condicionado", "ventilador")),
+    ("Audiovisual e telefonia", ("tv ", "tv'", "tv”", "data show", "caixa de som", "caixas de som", "microfone", "telefone",
+                                 "tela de projecao", "suporte para tv", "xbox")),
+    ("Eletrodomésticos e cozinha", ("geladeira", "fogao", "microondas", "frigobar", "bebedouro", "maquina de lavar", "refeitorio", "cozinha")),
+    ("Laboratório de Ciências", ("microscopio", "lamina", "esqueleto", "dorso", "higiene bucal", "bancada", "laboratorio de ciencias")),
+    ("Esporte e lazer", ("tenis de mesa", "xadrez", "ed. fisica", "bola")),
+    ("Livros e material pedagógico", ("livro", "braille")),
+    ("Escritório", ("encadernadora", "guilhotina", "furador")),
+]
+
+
+def _patrimonio_categoria(descricao: str) -> str:
+    """Sugere a categoria pelo nome do item (dá para corrigir depois na tela)."""
+    n = " " + _nome_comparavel(descricao) + " "
+    pal = n.strip()
+    if pal.startswith("mesa para impressora") or pal.startswith("mesas para computador"):
+        return "Mobiliário"
+    if "vaso sanitario" in pal:
+        return "Outros"
+    if "impressora braille" in pal:
+        return "Livros e material pedagógico"
+    for cat, chaves in _PATR_PALAVRAS[:1]:
+        if any(c in n for c in ("chromebook", "cpu", "computador", "notebook", "computadores")) and not pal.startswith("mesa"):
+            return cat
+    if pal.startswith(_PATR_MOBILIARIO_INICIO) and "tenis de mesa" not in pal and "laboratorio de ciencias" not in pal:
+        return "Mobiliário"
+    for cat, chaves in _PATR_PALAVRAS:
+        if any(c in n for c in chaves):
+            return cat
+    return "Outros"
+
+
+def _patrimonio_situacao_da_obs(obs: str) -> str:
+    o = _nome_comparavel(obs)
+    if "retirada" in o:
+        return "Aguardando retirada"
+    if "baixa" in o:
+        return "Indicado para baixa"
+    if "tombamento" in o:
+        return "Aguardando tombamento"
+    return "Ativo"
+
+
+def _patrimonio_data_da_obs(obs: str):
+    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", str(obs or ""))
+    if not m:
+        return None
+    try:
+        return date(int(m.group(3)), int(m.group(2)), int(m.group(1))).isoformat()
+    except ValueError:
+        return None
+
+
+def _patrimonio_ler_planilha(conteudo: bytes) -> tuple:
+    """Lê a planilha de levantamento no formato da escola: Nome | Nº de Patrimônio |
+    Procedência | Bom | x | Regular | x | Ruim | x | Observação (o cabeçalho é achado
+    sozinho). Devolve (itens, avisos). Linhas-lote ("19 estantes…") viram quantidade."""
+    from openpyxl import load_workbook
+    wb = load_workbook(BytesIO(conteudo), data_only=True, read_only=True)
+    ws = wb.worksheets[0]
+    linhas = [list(r) + [None] * 10 for r in ws.iter_rows(values_only=True)]
+    wb.close()
+    ini = 0
+    for i, r in enumerate(linhas[:15]):
+        if _nome_comparavel(r[0]) == "nome" or "patrimonio" in _nome_comparavel(r[1]):
+            ini = i + 1
+            break
+    itens, avisos = [], []
+    for i, r in enumerate(linhas[ini:], start=ini + 1):
+        nome = " ".join(str(r[0] or "").split())
+        num_raw, proc_raw, obs_raw = r[1], r[2], r[9]
+        marcas = {"Bom": r[4], "Regular": r[6], "Ruim": r[8]}
+        marcados = [k for k, v in marcas.items() if v not in (None, "") and str(v).strip()]
+        if not nome:
+            continue
+        if num_raw in (None, "") and proc_raw in (None, "") and not marcados and obs_raw in (None, ""):
+            avisos.append(f"Linha {i}: “{nome}” parece um título de grupo (sem número, procedência e estado) — não importada.")
+            continue
+        numero = None
+        if isinstance(num_raw, (int, float)):
+            numero = str(int(num_raw))
+        elif num_raw not in (None, ""):
+            s = str(num_raw).strip()
+            if s and s not in ("-", "—", "–"):
+                numero = s[:40]
+        quantidade, descricao = 1, nome
+        m = re.match(r"^(\d{1,4})\s+(.+)$", nome)
+        if m:
+            quantidade, descricao = max(1, int(m.group(1))), m.group(2).strip()
+        descricao = descricao[:1].upper() + descricao[1:]
+        if len(marcados) > 1:
+            estado = "Ruim" if "Ruim" in marcados else "Regular"
+            avisos.append(f"Linha {i}: “{nome}” com mais de um estado marcado ({', '.join(marcados)}) — ficou “{estado}”.")
+        elif marcados:
+            estado = marcados[0]
+        else:
+            estado = "Não avaliado"
+        obs = " ".join(str(obs_raw or "").split()) or None
+        proc = " ".join(str(proc_raw or "").split()) or None
+        itens.append({"descricao": descricao[:200], "numero": numero, "quantidade": quantidade, "procedencia": proc,
+                      "estado": estado, "situacao": _patrimonio_situacao_da_obs(obs), "categoria": _patrimonio_categoria(descricao),
+                      "data_recebimento": _patrimonio_data_da_obs(obs), "observacao": obs, "linha": i})
+    return itens, avisos
+
+
+def _pode_patrimonio(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor") or prof.get("papel") == "gestao"))
+
+
+_PATRIMONIO_CARGA_INICIAL = r'''[
+["Cadeira aluno verde","120288",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","11796",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","18629",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","89184",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","208814",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","18412",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","117292",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","209872",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","208722",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","208808",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","88089",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","110506",1,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Cadeira aluno verde","67427",1,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Cadeira aluno verde","65610",1,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Cadeira aluno verde","38818",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","118282",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","65627",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","37744",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","104807",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","118668",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","42023",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","117620",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","209911",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","18413",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","88060",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","113920",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","208778",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","111692",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","89069",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","104148",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","47835",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","65243",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","41407",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","90386",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","119526",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","53440",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","17513",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","39343",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","48974",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira aluno verde","53019",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78402",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78555",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78438",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78527",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78478",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78508",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78494",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78450",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78407",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78140",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78408",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78509",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78365",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78585",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78583",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78420",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78571",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78474",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78316",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78358",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78323",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78529",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78566",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78578",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78568",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78552",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78584",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78502",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78537",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78436",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78349",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78387",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78360",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78543",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78479",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78442",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78402",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78555",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78527",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78478",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78508",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78494",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78407",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78140",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78408",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78365",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78585",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78583",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78420",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78571",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78474",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78316",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78358",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78323",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78529",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78566",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78578",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78568",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78552",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78584",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78502",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78537",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78436",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78349",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78387",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78360",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78543",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78479",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78442",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78443",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78495",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78549",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78437",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78138",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78542",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78139",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78330",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78357",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78535",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78343",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78351",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78403",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78394",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78446",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78524",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78339",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78490",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78517",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78389",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78498",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78380",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78442",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78400",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","78410",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira estofada preta","73540",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Ventilador","20049",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","20050",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","20062",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","205419",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","3555",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","3702",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","3650",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","205560",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","8483",1,"SME","Regular","Ativo","Climatização",null,null],
+["Ventilador","3907",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3972",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","214400",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","214401",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3512",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","35221",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3861",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3525",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","216580",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","8489",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","214408",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3541",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3530",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3537",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","3517",1,"SME","Ruim","Ativo","Climatização",null,null],
+["Ventilador","214402",1,"SME","Ruim","Indicado para baixa","Climatização",null,"Baixa de patrimônio"],
+["Mesa de professor","62244",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa de professor","62794",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa de professor","209636",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa de professor","62240",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa de professor","66099",1,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Mesa de professor","62248",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa de professor","62252",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa de professor","62251",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa de professor","62791",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesas de professor",null,11,"SME","Regular","Ativo","Mobiliário",null,"Placa caiu"],
+["Mesa de professor",null,9,"PDDE","Bom","Ativo","Mobiliário","2025-08-11","Recebemos em 11/08/2025"],
+["Mesa de aluno verde","85130",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","84462",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","88963",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","88852",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","84426",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesas de aluno verde",null,46,"SME","Regular","Ativo","Mobiliário",null,"Placa caiu"],
+["Mesa de aluno verde","113020",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","209613",1,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Mesa de aluno verde","240360",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","66126",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","138136",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","54406",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","118183",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","118840",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","78290",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","84395",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","56514",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","72880",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","88753",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","209587",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","73145",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","84467",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","73278",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","81436",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","73203",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","120120",1,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Mesa de aluno verde","88434",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","63047",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","52237",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","209633",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","84477",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","120177",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","82532",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","209594",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","45100",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","209617",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","35310",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Mesa de aluno verde","209596",1,"SME","Não avaliado","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16674",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16675",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16676",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16677",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16678",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16679",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16680",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16681",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16682",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16683",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16684",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16685",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16686",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16687",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16688",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16689",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16690",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16691",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16692",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16693",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16694",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16695",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16696",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16697",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16698",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16699",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16701",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16702",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16703",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16704",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16705",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16706",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16707",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16708",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16709",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16710",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16711",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16712",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16713",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16714",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16716",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16717",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16718",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16719",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16720",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16721",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16722",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul","16723",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto Mesa e Cadeira de aluno azul",null,1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Impressora Braille",null,1,"SME","Bom","Ativo","Livros e material pedagógico",null,null],
+["Arquivo de gaveta","30",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Arquivo de gaveta","32",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Arquivo de gaveta","31",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Arquivo de gaveta","235061",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Arquivo de gaveta","235062",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Arquivos de gavetas",null,6,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Mesa grande sala dos prof.",null,1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa grande sala dos prof.",null,1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Switch 32 portas",null,1,"PDDE","Bom","Ativo","Informática",null,null],
+["Tela de projeção",null,1,"PDDE","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Rack",null,1,"PDDE","Bom","Ativo","Informática",null,null],
+["Routerboard",null,1,"PDDE","Bom","Ativo","Informática",null,null],
+["Nobreak",null,1,"PDDE","Bom","Ativo","Informática",null,null],
+["Roteadores tipo AP -310",null,5,"PDDE","Bom","Ativo","Informática",null,null],
+["Armário de MDF duas portas",null,1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Furador de ferro",null,1,"SME","Regular","Ativo","Escritório",null,null],
+["Estantes de ferro grandes",null,19,"SME","Regular","Ativo","Mobiliário",null,null],
+["Estantes de ferro pequena",null,2,null,"Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Estantes de ferro pequena",null,1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Scanner",null,1,"PDDE","Ruim","Indicado para baixa","Informática",null,"Baixa de patrimônio"],
+["Macas de ferro",null,2,"SME","Regular","Ativo","Mobiliário",null,null],
+["Impressora jato de tinta Epson L4160",null,1,"PDDE","Bom","Ativo","Informática",null,null],
+["Impressora jato de tinta Epson L1250",null,1,"PDDE","Bom","Ativo","Informática","2025-06-21","Recebemos em 21/06/2025"],
+["Impressora jato de tinta Epson L1250",null,1,"PDDE","Bom","Ativo","Informática","2025-06-21","Recebemos em 21/06/2025"],
+["Armário pequeno de MDF",null,2,"SME","Regular","Ativo","Mobiliário",null,null],
+["Data show diebold",null,1,"SME","Não avaliado","Ativo","Audiovisual e telefonia",null,null],
+["Bebedouro grande","26650",1,"SME","Ruim","Ativo","Eletrodomésticos e cozinha",null,null],
+["Bebedouro grande","3213",1,"SME","Regular","Ativo","Eletrodomésticos e cozinha",null,null],
+["Bebedouro grande","24447",1,"SME","Bom","Ativo","Eletrodomésticos e cozinha",null,null],
+["Bebedouro grande",null,2,"SME","Bom","Ativo","Eletrodomésticos e cozinha",null,null],
+["Bebedouro BBL","157435",1,"SME","Bom","Ativo","Eletrodomésticos e cozinha",null,null],
+["Armário aéreo de 3 portas",null,1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Geladeira","31920",1,"SME","Bom","Ativo","Eletrodomésticos e cozinha","2025-06-02","Recebemos em 02/06/2025"],
+["Geladeira","31921",1,"SME","Bom","Ativo","Eletrodomésticos e cozinha","2025-06-02","Recebemos em 02/06/2025"],
+["Geladeira",null,1,"SME","Ruim","Ativo","Eletrodomésticos e cozinha",null,null],
+["Frigobar modelo anatômico",null,1,"SME","Regular","Ativo","Eletrodomésticos e cozinha",null,null],
+["Fogão",null,1,"SME","Regular","Ativo","Eletrodomésticos e cozinha",null,null],
+["Extintor",null,10,"SME","Bom","Ativo","Outros",null,null],
+["Microondas",null,1,"SME","Bom","Ativo","Eletrodomésticos e cozinha",null,null],
+["Máquina de lavar",null,1,"SME","Bom","Ativo","Eletrodomésticos e cozinha",null,null],
+["Mesas de madeira tipo colméia",null,2,"SME","Regular","Ativo","Mobiliário",null,null],
+["Conjunto com 3 Cadeiras longarinas",null,2,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Conjunto com 3 Cadeiras longarinas",null,4,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Sofá de ferro",null,2,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Ar condicionado 24.000 evaporadora","31287",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 24.000 evaporadora","31173",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 24.000 evaporadora","31290",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 24.000 cond.","30819",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 24.000 cond.","30821",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 24.000 cond.","30822",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 30.000 evaporadora","29725",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 30.000 evaporadora","29749",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 30.000 cond.","29676",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 30.000 cond.","29677",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 60.000 evaporadora","31913",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 60.000 evaporadora","31900",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 60.000 evaporadora","31903",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 60.000 cond.","31911",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 60.000 cond.","31895",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado 60.000 cond.","31898",1,"SME","Bom","Ativo","Climatização","2025-07-16","chegou 16/07/2025"],
+["Ar condicionado da sala 1",null,1,"SME","Regular","Ativo","Climatização",null,null],
+["Ar condicionado da sala 1","31287",1,"SME","Bom","Ativo","Climatização",null,null],
+["Ar condicionado da sala de informática","216579",1,"SME","Bom","Ativo","Climatização",null,null],
+["Ar condicionado da sala 5",null,1,"SME","Bom","Ativo","Climatização",null,null],
+["Ar condicionado da sala 8",null,1,"SME","Bom","Ativo","Climatização",null,null],
+["Ar condicionado da sala 7",null,1,"SME","Bom","Ativo","Climatização",null,null],
+["Caixa de som",null,1,"SME","Regular","Ativo","Audiovisual e telefonia",null,null],
+["Caixa de som da Ed. Física","6333",1,"SME","Regular","Ativo","Audiovisual e telefonia",null,null],
+["Caixa de som",null,1,"PDDE","Bom","Ativo","Audiovisual e telefonia","2024-07-21","recebemos 21/07/2024"],
+["Caixas de som",null,1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Mesa de tênis de Mesa",null,1,"PDDE","Bom","Ativo","Esporte e lazer","2024-12-19","Recebemos em 19/12/2024"],
+["Jogo de xadrez 16 peças brancas",null,1,"SME","Bom","Ativo","Esporte e lazer",null,null],
+["Jogo de xadrez 16 peças pretas",null,1,"SME","Bom","Ativo","Esporte e lazer",null,null],
+["Mesa redonda cozinha",null,1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Conjuntos de vaso sanitário caixa acoplada",null,2,"SME","Bom","Ativo","Outros",null,null],
+["Telefone sem fio com dois ramais",null,1,"SME","Regular","Ativo","Audiovisual e telefonia",null,null],
+["Banquetas de aço",null,36,"SME","Bom","Aguardando tombamento","Mobiliário",null,"Aguardando tombamento"],
+["Bancadas sextavadas",null,6,"SME","Bom","Aguardando tombamento","Laboratório de Ciências",null,"Aguardando tombamento"],
+["Armário multiuso do laboratório de Ciências",null,1,"SME","Bom","Aguardando tombamento","Laboratório de Ciências",null,"Aguardando tombamento"],
+["Mesa de granito",null,1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Lixeira de pé",null,1,"SME","Bom","Ativo","Outros",null,null],
+["Lixeira de pé",null,2,"SME","Bom","Ativo","Outros",null,null],
+["Armário de ferro","62224",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","61818",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62236",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62232",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62235",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62229",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","66930",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62227",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62237",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","66939",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62225",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62228",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62234",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Armário de ferro","62233",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Armário de ferro","62230",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Armários de ferro",null,3,"SME","Regular","Ativo","Mobiliário",null,null],
+["Armário de ferro","66920",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Armário de ferro","66919",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Armário de ferro","66940",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Armário de ferro","161818",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Quadro branco","116010",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Quadro branco","218416",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Quadro branco","218417",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Quadro branco","218519",1,"SME","Bom","Ativo","Mobiliário","2025-02-18","Recebemos em 18/02/2025"],
+["Quadro branco","116009",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Quadros brancos",null,12,"SME","Regular","Ativo","Mobiliário",null,null],
+["Conjunto de Mesa de refeitório anos finais","16669",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto de Mesa de refeitório anos finais","116670",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto de Mesa de refeitório anos finais","116671",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto de Mesa de refeitório anos finais","116672",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Conjunto de Mesa de refeitório anos finais","116673",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Computador de Mesa completo","206070",1,"SME","Regular","Ativo","Informática",null,null],
+["Computadores de Mesa completo",null,2,"MEC/FNDE","Regular","Ativo","Informática",null,null],
+["Computador de Mesa completo","206363",1,"SME","Regular","Ativo","Informática",null,null],
+["Computador de Mesa completo","1745",1,"SME","Regular","Ativo","Informática",null,null],
+["Computador de Mesa completo","1784",1,"FME","Regular","Ativo","Informática",null,null],
+["Computador de Mesa completo","1792",1,"SME","Regular","Ativo","Informática",null,null],
+["Computador de Mesa completo","1786",1,"SME","Regular","Ativo","Informática",null,null],
+["Computador de Mesa completo","1795",1,"SME","Regular","Ativo","Informática",null,null],
+["Microscópio","139275",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Microscópio","139039",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Microscópio","139025",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Microscópio","139033",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Microscópio","139000",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Microscópio",null,1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Microscópio","19379",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Microscópio","19380",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Higiene Bucal ampliado","32119",1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Lamina para microscópio - Slected 100 pcc for Higher Educatino",null,1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["XBox Series S","19403",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Esqueleto",null,1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Racker U de ferro(caixas)",null,4,"SME","Bom","Ativo","Mobiliário",null,null],
+["Guilhotina de papel",null,1,"SME","Regular","Ativo","Escritório",null,null],
+["Dorso humano anatômico",null,1,"SME","Bom","Ativo","Laboratório de Ciências",null,null],
+["Bandeira do Brasil",null,1,"SME","Bom","Ativo","Outros",null,null],
+["Bandeira do Estado do Rio",null,1,"SME","Bom","Ativo","Outros",null,null],
+["Bandeira de Volta Redonda",null,1,"SME","Bom","Ativo","Outros",null,null],
+["Carrinho de recarga de Chromebook","10044",1,"SME","Bom","Ativo","Informática",null,null],
+["Carrinho de recarga de Chromebook","32198",1,"SME","Bom","Ativo","Informática",null,null],
+["Carrinho de recarga de Chromebook","32199",1,"SME","Bom","Ativo","Informática",null,null],
+["Carrinho de recarga de Chromebook","17963",1,"SME","Bom","Ativo","Informática",null,null],
+["Cadeira tipo secretária","110506",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110178",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110248",1,"SME","Ruim","Indicado para baixa","Mobiliário",null,"Baixa de patrimônio"],
+["Cadeira tipo secretária","110587",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110281",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110260",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110253",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110515",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110541",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110522",1,"SME","Ruim","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110604",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110547",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110411",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","102404",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110528",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110588",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110512",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110503",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110129",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária","110604",1,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira tipo secretária preta",null,1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira de braço",null,6,"SME","Regular","Ativo","Mobiliário",null,null],
+["Cadeira de braço",null,2,"SME","Ruim","Aguardando retirada","Mobiliário",null,"Aguardando retirada"],
+["Tablets multilaser",null,10,"PDDE","Ruim","Ativo","Informática",null,null],
+["Mesa de secretária","125105",1,"SME","Regular","Ativo","Mobiliário","2025-07-29","Recebemos em 29/07/2025"],
+["Mesa para impressora",null,1,"SME","Regular","Ativo","Mobiliário","2025-07-29","Recebemos em 29/07/2025"],
+["Microfone Dylan",null,1,"PDDE","Bom","Ativo","Audiovisual e telefonia","2025-06-21","Recebemo em 21/06/2025"],
+["Telefone intelbras com fio","18966",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Telefone intelbras com fio","18957",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Armário roupeiro sala dos professores","16822",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Armário roupeiro sala dos professores","16823",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Armário roupeiro sala dos professores","16824",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Armário roupeiro sala dos professores","16825",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Armário roupeiro de 16 portas",null,1,"SME","Bom","Aguardando tombamento","Mobiliário",null,"Aguardando tombamento"],
+["Armário roupeiro de 16 portas",null,1,"SME","Bom","Aguardando tombamento","Mobiliário",null,"Aguardando tombamento"],
+["Roupeiro de açõ - 3 portas","18039",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Livro auto da compadecida","106408",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106402",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106510",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106419",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106512",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106493",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106496",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106414",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106422",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106406",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106418",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106511",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106403",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106412",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106415",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106417",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","106416",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Livro auto da compadecida","109503",1,"SMA","Regular","Ativo","Livros e material pedagógico",null,null],
+["Segredos de seis corações","231468",1,"SMA","Regular","Ativo","Outros",null,null],
+["Computadores Chromebook","13780",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","18764",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13765",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13762",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13797",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13794",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9961",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13788",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13793",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13796",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9957",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9984",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13787",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9956",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9974",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9967",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13763",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13789",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13792",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9970",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13791",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13774",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9980",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13771",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13781",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9966",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13779",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9978",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13785",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9975",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9976",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13784",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13768",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9981",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13766",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9983",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9982",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13767",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9963",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9972",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9960",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9971",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9985",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9964",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13795",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9977",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9979",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13777",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9959",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9954",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13786",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9987",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9986",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9958",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13775",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9973",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13783",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13773",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13782",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9955",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13770",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9962",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9965",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9969",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13778",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13776",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9952",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13772",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","13769",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9968",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook","9953",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook robótica","20632",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook robótica","20630",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook robótica","20631",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook robótica","20633",1,"SME","Bom","Ativo","Informática",null,null],
+["Computadores Chromebook robótica","20629",1,"SME","Bom","Ativo","Informática",null,null],
+["TV Samsung 65'","16779",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'",null,1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8272",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8270",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8278",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8280",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8275",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8271",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8279",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8274",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8277",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8273",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV Samsung 65'","8301",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,"Recebemos em 2025"],
+["TV Samsung 65'","8300",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,"Recebemos em 2025"],
+["TV 50” phillips laboratório de ciências",null,1,"PDDE","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV de 32” samsung",null,1,"PDDE","Regular","Ativo","Audiovisual e telefonia",null,null],
+["TV de 42” lg","248115",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["TV de 42 “ phillips",null,1,"SME","Ruim","Aguardando retirada","Audiovisual e telefonia",null,"Aguardando retirada"],
+["TV de 32” samsung",null,1,"PDDE","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Data show epson",null,1,"PDDE","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Encadernadora","185869",1,"SME","Bom","Ativo","Escritório",null,null],
+["Mesas para computador",null,18,"SME","Regular","Ativo","Mobiliário",null,null],
+["CPU","253180",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253448",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253175",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253200",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253174",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253169",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253201",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253153",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253257",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253927",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253245",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253924",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253898",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253897",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253925",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253152",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253918",1,"SME","Bom","Ativo","Informática",null,null],
+["CPU","253203",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254244",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254320",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254296",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254254",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254322",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254257",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254246",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254261",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254198",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254032",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254249",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254252",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254259",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254323",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254321",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254263",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254324",1,"SME","Bom","Ativo","Informática",null,null],
+["Monitor","254262",1,"SME","Bom","Ativo","Informática",null,null],
+["Notebooks Sala da Supervisão","21525",1,"SME","Bom","Ativo","Informática",null,null],
+["Notebooks Sala da Supervisão","21691",1,"SME","Bom","Ativo","Informática",null,null],
+["Notebooks Sala da Supervisão","21523",1,"SME","Bom","Ativo","Informática",null,null],
+["Notebooks Sala da Supervisão","21524",1,"SME","Bom","Ativo","Informática",null,null],
+["Notebooks Sala da Supervisão","21448",1,"SME","Bom","Ativo","Informática",null,null],
+["Mesa azul de aluno","25051",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25052",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25042",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25045",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25024",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25025",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25015",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25016",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24757",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24758",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24763",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24755",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24924",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24949",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24928",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24937",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24923",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24925",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24932",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24935",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25059",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25060",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25034",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25038",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25049",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25065",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25075",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25036",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25001",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25003",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24784",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24785",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25357",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25358",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25355",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25354",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24733",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24734",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24735",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24747",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24930",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24946",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24940",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24936",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25054",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25056",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25055",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25057",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25046",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25043",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25044",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25048",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25382",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25383",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25035",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25037",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24778",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24788",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24786",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24787",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24752",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24760",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24761",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24754",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24748",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24746",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24750",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24749",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24686",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24687",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24684",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24685",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25109",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25110",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25112",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25111",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25066",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25064",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25105",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25107",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25108",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25101",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25102",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25103",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25104",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25014",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25016",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25019",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","25018",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24774",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24798",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24797",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24796",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24715",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno",null,1,"SME","Ruim","Aguardando retirada","Mobiliário",null,"Aguardando Retirada"],
+["Mesa azul de aluno","24705",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24711",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24717",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24938",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24945",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24941",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Mesa azul de aluno","24942",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25388",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25387",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25041",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25042",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25489",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25485",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25484",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25483",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25362",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25363",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","24712",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","24713",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25232",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25250",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25240",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25241",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25234",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25249",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25237",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25238",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25507",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25508",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25381",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25393",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25392",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25384",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25481",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25482",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25478",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25479",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","24764",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","24762",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","24704",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","24714",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25321",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25322",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25323",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25324",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25257",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25258",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25264",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25259",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25391",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25501",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25503",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25503",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25385",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25386",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25389",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25390",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25039",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25040",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25380",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25379",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25453",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25454",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25498",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25500",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25397",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25396",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25395",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25356",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25301",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25302",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25325",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25350",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25297",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25298",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25253",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25260",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25609",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25610",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25611",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25612",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25505",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25506",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25605",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25606",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25607",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25608",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25603",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25604",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25601",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25602",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25491",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25492",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25493",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25494",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25354",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25374",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25352",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25353",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25314",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25400",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25398",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25399",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25244",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25248",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25243",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno","25245",1,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira azul de aluno",null,44,"SME","Bom","Ativo","Mobiliário",null,null],
+["Cadeira de aluno cinza",null,4,"SME","Bom","Ativo","Mobiliário",null,null],
+["Computador destops CPU","27552",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops CPU","27915",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops CPU","27550",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops CPU","27562",1,"SME","Bom","Ativo","Informática",null,null],
+["Computador destops CPU","27470",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops CPU","27582",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops Monitor","28534",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops Monitor","28541",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops Monitor","28544",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops Monitor","28537",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops Monitor","28661",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Computador destops Monitor","28606",1,"SME","Bom","Ativo","Informática","2025-02-11","Recebemos em 11/02/2025"],
+["Telefone de mesa secretaria","260760",1,"SME","Bom","Ativo","Audiovisual e telefonia",null,null],
+["Suporte para TV","33375",1,"SME","Bom","Ativo","Audiovisual e telefonia","2025-11-03","Recebemos em 03/11/2025"],
+["Suporte para TV","33372",1,"SME","Bom","Ativo","Audiovisual e telefonia","2025-11-03","Recebemos em 03/11/2025"],
+["Impressora Bambu Lab 1 AMS Bambu Lab 1",null,1,"SME","Bom","Ativo","Informática","2025-10-01","Recebemos em 01/10/2025"]
+]'''
+
+_PATR_COLS = ["descricao", "numero", "quantidade", "procedencia", "estado", "situacao", "categoria", "data_recebimento", "observacao"]
+PATRIMONIO_TMP_DIR = "tmp_importacoes_patrimonio"
+
+
+def _patr_inserir_itens(conn, itens, prof_id, origem: str) -> int:
+    """Grava uma lista de itens (dicts com as chaves de _PATR_COLS) e registra no histórico."""
+    n = 0
+    for it in itens:
+        cur = conn.execute(f"""INSERT INTO patrimonio_itens ({", ".join(_PATR_COLS)}, local, criado_por, atualizado_por)
+                               VALUES ({", ".join("?" * len(_PATR_COLS))}, ?, ?, ?)""",
+                           [it.get(c) for c in _PATR_COLS] + [it.get("local"), prof_id, prof_id])
+        _patr_hist(conn, cur.lastrowid, "inclusão", origem, prof_id, it.get("descricao"), it.get("numero"))
+        n += 1
+    return n
+
+
+def _patr_hist(conn, item_id, acao, detalhe, prof_id, descricao=None, numero=None):
+    conn.execute("""INSERT INTO patrimonio_historico (item_id, acao, detalhe, professor_id, descricao, numero)
+                    VALUES (?, ?, ?, ?, ?, ?)""", (item_id, acao, detalhe, prof_id, descricao, numero))
+
+
+def _patrimonio_init():
+    """Cria as tabelas e faz a carga inicial (só uma vez, com a tabela vazia)."""
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS patrimonio_itens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        descricao TEXT NOT NULL,
+        numero TEXT,
+        quantidade INTEGER NOT NULL DEFAULT 1,
+        procedencia TEXT,
+        estado TEXT NOT NULL DEFAULT 'Não avaliado',
+        situacao TEXT NOT NULL DEFAULT 'Ativo',
+        local TEXT,
+        categoria TEXT,
+        data_recebimento TEXT,
+        observacao TEXT,
+        data_baixa TEXT,
+        motivo_baixa TEXT,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        criado_por INTEGER,
+        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_por INTEGER
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_patrimonio_numero ON patrimonio_itens(numero)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS patrimonio_historico (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER,
+        acao TEXT NOT NULL,
+        detalhe TEXT,
+        professor_id INTEGER,
+        descricao TEXT,
+        numero TEXT,
+        em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("CREATE TABLE IF NOT EXISTS patrimonio_config (chave TEXT PRIMARY KEY, valor TEXT)")
+    feita = conn.execute("SELECT valor FROM patrimonio_config WHERE chave = 'carga_inicial'").fetchone()
+    vazia = conn.execute("SELECT COUNT(*) AS c FROM patrimonio_itens").fetchone()["c"] == 0
+    if not feita:
+        if vazia:
+            itens = [dict(zip(_PATR_COLS, r)) for r in json.loads(_PATRIMONIO_CARGA_INICIAL)]
+            _patr_inserir_itens(conn, itens, None, "carga inicial — planilha 2026 LEVANTAMENTO DE PATRIMÔNIO")
+        conn.execute("INSERT OR REPLACE INTO patrimonio_config (chave, valor) VALUES ('carga_inicial', ?)",
+                     (datetime.now().strftime("%Y-%m-%d %H:%M"),))
+    conn.commit()
+    conn.close()
+
+
+_patrimonio_init()
+
+
+# ---------- consulta ----------
+
+def _patr_filtros(params) -> dict:
+    g = lambda k: (params.get(k) or "").strip()[:120]
+    return {"q": g("q"), "procedencia": g("procedencia"), "estado": g("estado"), "situacao": g("situacao"),
+            "local": g("local"), "categoria": g("categoria"), "revisar": "1" if g("revisar") else "",
+            "sem_numero": "1" if g("sem_numero") else ""}
+
+
+def _patr_qs(f: dict, **extra) -> str:
+    d = {k: v for k, v in f.items() if v}
+    d.update({k: v for k, v in extra.items() if v})
+    return urllib.parse.urlencode(d)
+
+
+def _patr_numeros_repetidos(conn) -> set:
+    return {r["numero"] for r in conn.execute(
+        "SELECT numero FROM patrimonio_itens WHERE numero IS NOT NULL AND numero != '' GROUP BY numero HAVING COUNT(*) > 1").fetchall()}
+
+
+def _patr_buscar(conn, f: dict) -> list:
+    cond, params = [], []
+    sit = f.get("situacao")
+    if sit == "todos":
+        pass
+    elif sit in PATRIMONIO_SITUACOES:
+        cond.append("situacao = ?"); params.append(sit)
+    else:                                   # padrão: tudo que ainda está na escola
+        cond.append("situacao != 'Baixado'")
+    for campo in ("procedencia", "estado", "local", "categoria"):
+        v = f.get(campo)
+        if v == "(em branco)":
+            cond.append(f"COALESCE({campo}, '') = ''")
+        elif v:
+            cond.append(f"{campo} = ?"); params.append(v)
+    if f.get("sem_numero"):
+        cond.append("COALESCE(numero, '') = ''")
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    linhas = conn.execute(f"SELECT * FROM patrimonio_itens{where} ORDER BY descricao COLLATE NOCASE, CAST(numero AS INTEGER), numero, id",
+                          params).fetchall()
+    repetidos = _patr_numeros_repetidos(conn)
+    busca = _nome_comparavel(f.get("q"))
+    saida = []
+    for r in linhas:
+        d = dict(r)
+        d["_repetido"] = bool(d["numero"]) and d["numero"] in repetidos
+        if busca:
+            alvo = _nome_comparavel(" ".join(str(d.get(c) or "") for c in ("descricao", "numero", "observacao", "local", "categoria")))
+            if busca not in alvo:
+                continue
+        if f.get("revisar") and not (d["_repetido"] or d["estado"] == "Não avaliado"):
+            continue
+        saida.append(d)
+    return saida
+
+
+def _patr_descrever_filtros(f: dict) -> str:
+    partes = []
+    if f.get("q"):
+        partes.append(f"Pesquisa: “{f['q']}”")
+    rot = {"procedencia": "Procedência", "estado": "Estado", "local": "Local", "categoria": "Categoria"}
+    for k, nome in rot.items():
+        if f.get(k):
+            partes.append(f"{nome}: {f[k]}")
+    sit = f.get("situacao")
+    partes.append("Situação: todas (inclui baixados)" if sit == "todos" else (f"Situação: {sit}" if sit else "Itens em uso (sem os baixados)"))
+    if f.get("revisar"):
+        partes.append("Só itens para revisar")
+    if f.get("sem_numero"):
+        partes.append("Só itens sem nº de patrimônio")
+    return " · ".join(partes)
+
+
+def _patr_resumo(itens: list) -> dict:
+    res = {"itens": len(itens), "unidades": sum(int(i["quantidade"] or 1) for i in itens),
+           "estado": {e: 0 for e in PATRIMONIO_ESTADOS}, "situacao": {s: 0 for s in PATRIMONIO_SITUACOES},
+           "procedencia": {}, "repetidos": sum(1 for i in itens if i["_repetido"])}
+    for i in itens:
+        q = int(i["quantidade"] or 1)
+        res["estado"][i["estado"] if i["estado"] in res["estado"] else "Não avaliado"] += q
+        res["situacao"][i["situacao"] if i["situacao"] in res["situacao"] else "Ativo"] += q
+        p = i["procedencia"] or "(sem procedência)"
+        res["procedencia"][p] = res["procedencia"].get(p, 0) + q
+    return res
+
+
+def _patr_agrupar(itens: list) -> list:
+    """Resumo por descrição: [{descricao, categoria, total, Bom, Regular, Ruim, Não avaliado}]."""
+    grupos = {}
+    for i in itens:
+        chave = _nome_comparavel(i["descricao"])
+        g = grupos.setdefault(chave, {"descricao": i["descricao"], "categoria": i["categoria"] or "", "total": 0,
+                                      **{e: 0 for e in PATRIMONIO_ESTADOS}})
+        q = int(i["quantidade"] or 1)
+        g["total"] += q
+        g[i["estado"] if i["estado"] in PATRIMONIO_ESTADOS else "Não avaliado"] += q
+    return sorted(grupos.values(), key=lambda g: (_nome_comparavel(g["categoria"]), _nome_comparavel(g["descricao"])))
+
+
+_PATR_COR_ESTADO = {"Bom": ("#dcfce7", "#166534"), "Regular": ("#fef3c7", "#92400e"), "Ruim": ("#fee2e2", "#991b1b"),
+                    "Não avaliado": ("#f1f5f9", "#475569")}
+_PATR_COR_SITUACAO = {"Ativo": ("transparent", "inherit"), "Aguardando tombamento": ("#e0e7ff", "#3730a3"),
+                      "Indicado para baixa": ("#ffedd5", "#9a3412"), "Aguardando retirada": ("#fef3c7", "#92400e"),
+                      "Baixado": ("#e5e7eb", "#374151")}
+
+
+def _patr_selo(texto, cores) -> str:
+    fundo, cor = cores.get(texto, ("#f1f5f9", "#475569"))
+    return (f'<span style="background:{fundo}; color:{cor}; padding:1px 8px; border-radius:10px; font-size:11px; '
+            f'font-weight:600; white-space:nowrap;">{html.escape(texto or "—")}</span>')
+
+
+def _patr_opcoes(valores, atual, vazio_rotulo=None, incluir_em_branco=False) -> str:
+    ops = f'<option value="">{vazio_rotulo}</option>' if vazio_rotulo is not None else ""
+    for v in valores:
+        ops += f'<option value="{html.escape(v, quote=True)}"{" selected" if v == atual else ""}>{html.escape(v)}</option>'
+    if incluir_em_branco:
+        ops += f'<option value="(em branco)"{" selected" if atual == "(em branco)" else ""}>(em branco)</option>'
+    return ops
+
+
+def _patr_listas(conn) -> dict:
+    """Valores existentes no banco + as listas padrão (para filtros e sugestões)."""
+    def distintos(campo):
+        return [r[0] for r in conn.execute(f"SELECT DISTINCT {campo} FROM patrimonio_itens WHERE COALESCE({campo}, '') != ''").fetchall()]
+    proc = list(PATRIMONIO_PROCEDENCIAS) + sorted(p for p in distintos("procedencia") if p not in PATRIMONIO_PROCEDENCIAS)
+    cats = list(PATRIMONIO_CATEGORIAS) + sorted(c for c in distintos("categoria") if c not in PATRIMONIO_CATEGORIAS)
+    locais = sorted(distintos("local"), key=_nome_comparavel)
+    descricoes = sorted(distintos("descricao"), key=_nome_comparavel)
+    return {"procedencias": proc, "categorias": cats, "locais": locais, "descricoes": descricoes}
+
+
+@app.get("/patrimonio", response_class=HTMLResponse)
+def patrimonio_lista(request: Request, msg: str = ""):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    f = _patr_filtros(request.query_params)
+    conn = get_db()
+    itens = _patr_buscar(conn, f)
+    listas = _patr_listas(conn)
+    conn.close()
+    res = _patr_resumo(itens)
+    qs = _patr_qs(f)
+
+    msgs = {"salvo": "Item salvo.", "incluidos": "Itens incluídos.", "baixa": "Baixa registrada — o item continua no histórico.",
+            "reativado": "Item reativado.", "excluido": "Item excluído.", "importado": "Planilha importada."}
+    msg_html = (f'<div style="background:#ecfdf5; color:#047857; border:1px solid #10b981; padding:10px 14px; border-radius:6px; '
+                f'margin-bottom:12px; font-size:13px;">{html.escape(request.query_params.get("detalhe") or msgs[msg])}</div>') if msg in msgs else ""
+
+    def cartao(titulo, valor, sub=""):
+        return (f'<div class="card" style="padding:10px 14px; flex:1 1 140px; margin:0;"><div style="font-size:11px; color:var(--text-muted); '
+                f'text-transform:uppercase; letter-spacing:.4px;">{titulo}</div><div style="font-size:22px; font-weight:800;">{valor}</div>'
+                f'<div style="font-size:11px; color:var(--text-muted);">{sub}</div></div>')
+    cartoes = (cartao("Itens", res["itens"], f'{res["unidades"]} unidade(s)')
+               + cartao("Bom", res["estado"]["Bom"], "unidades")
+               + cartao("Regular", res["estado"]["Regular"], "unidades")
+               + cartao("Ruim", res["estado"]["Ruim"], "unidades")
+               + cartao("Não avaliado", res["estado"]["Não avaliado"], "unidades")
+               + cartao("Pendências", res["situacao"]["Aguardando tombamento"] + res["situacao"]["Indicado para baixa"] + res["situacao"]["Aguardando retirada"],
+                        "tombamento / baixa / retirada"))
+
+    opts_sit = ('<option value="">Em uso (sem os baixados)</option>'
+                + "".join(f'<option value="{s}"{" selected" if f["situacao"] == s else ""}>{s}</option>' for s in PATRIMONIO_SITUACOES)
+                + f'<option value="todos"{" selected" if f["situacao"] == "todos" else ""}>Todas (inclui baixados)</option>')
+    pode_importar = bool(prof.get("is_admin"))
+
+    linhas = ""
+    for i in itens:
+        num = html.escape(i["numero"] or "")
+        if i["_repetido"]:
+            num += ' <span title="Este número aparece em mais de um item — conferir" style="color:#b45309; cursor:help;">⚠️</span>'
+        elif not i["numero"]:
+            num = '<span style="color:var(--text-muted);">s/ nº</span>'
+        qtd = int(i["quantidade"] or 1)
+        acoes = (f'<a href="/patrimonio/{i["id"]}/editar?{qs}" class="btn" style="padding:2px 8px; font-size:11px;" title="Editar">✏️</a> ')
+        if i["situacao"] == "Baixado":
+            acoes += (f'<form method="post" action="/patrimonio/{i["id"]}/reativar?{qs}" style="display:inline;" '
+                      f'onsubmit="return confirm(\'Reativar este item (desfazer a baixa)?\');"><button type="submit" class="btn" '
+                      f'style="padding:2px 8px; font-size:11px;" title="Desfazer a baixa">↩️</button></form> ')
+        else:
+            acoes += f'<a href="/patrimonio/{i["id"]}/baixa?{qs}" class="btn" style="padding:2px 8px; font-size:11px;" title="Dar baixa">⬇️ Baixa</a> '
+        acoes += (f'<form method="post" action="/patrimonio/{i["id"]}/excluir?{qs}" style="display:inline;" '
+                  f'onsubmit="return confirm(\'Excluir este item? Use só para ERRO DE CADASTRO — para item que saiu da escola, use Baixa.\');">'
+                  f'<button type="submit" class="btn" style="padding:2px 8px; font-size:11px; color:var(--red);" title="Excluir (erro de cadastro)">🗑️</button></form>')
+        obs = html.escape(i["observacao"] or "")
+        if i["situacao"] == "Baixado":
+            obs = (f'Baixa em {_fmt_data_br(i["data_baixa"])}' + (f' — {html.escape(i["motivo_baixa"])}' if i["motivo_baixa"] else "")
+                   + (f'<br>{obs}' if obs else ""))
+        linhas += f"""<tr style="border-top:1px solid var(--border);{' opacity:.65;' if i['situacao'] == 'Baixado' else ''}">
+            <td style="padding:6px 8px; white-space:nowrap;">{num}</td>
+            <td style="padding:6px 8px;"><strong>{html.escape(i["descricao"])}</strong></td>
+            <td style="padding:6px 8px; text-align:center;">{qtd}</td>
+            <td style="padding:6px 8px; font-size:12px;">{html.escape(i["categoria"] or "—")}</td>
+            <td style="padding:6px 8px; font-size:12px;">{html.escape(i["local"] or "—")}</td>
+            <td style="padding:6px 8px; font-size:12px;">{html.escape(i["procedencia"] or "—")}</td>
+            <td style="padding:6px 8px;">{_patr_selo(i["estado"], _PATR_COR_ESTADO)}</td>
+            <td style="padding:6px 8px;">{_patr_selo(i["situacao"], _PATR_COR_SITUACAO) if i["situacao"] != "Ativo" else '<span style="font-size:12px;">Ativo</span>'}</td>
+            <td style="padding:6px 8px; font-size:12px; color:var(--text-muted); min-width:120px; max-width:200px;">{obs}</td>
+            <td style="padding:6px 8px; white-space:nowrap;">{acoes}</td>
+        </tr>"""
+    if not linhas:
+        linhas = '<tr><td colspan="10" style="padding:18px; text-align:center; color:var(--text-muted);">Nenhum item encontrado com esses filtros.</td></tr>'
+
+    tem_filtro = any(f.values())
+    opts_desc = "".join(f'<option value="{html.escape(d, quote=True)}"></option>' for d in listas["descricoes"])
+    content = f"""
+        <div class="page-header">
+            <h1>🏷️ Patrimônio</h1>
+            <p class="subtitle">Bens da E.M. Walmir de Freitas Monteiro — pesquisa, inclusão, baixa e relatórios.</p>
+        </div>
+        {msg_html}
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+            <a href="/patrimonio/novo?{qs}" class="btn btn-primary">+ Novo item</a>
+            <a href="/patrimonio/novo-lote?{qs}" class="btn">+ Vários itens de uma vez</a>
+            <a href="/patrimonio/exportar?{qs}" class="btn">📥 Planilha Excel</a>
+            <a href="/patrimonio/relatorio?{qs}" target="_blank" class="btn">🖨️ Relatório (lista)</a>
+            <a href="/patrimonio/relatorio?{_patr_qs(f, modo='resumo')}" target="_blank" class="btn">🖨️ Relatório (resumo)</a>
+            <a href="/patrimonio/historico" class="btn">🕓 Histórico</a>
+            {'<a href="/patrimonio/importar" class="btn">📤 Importar planilha</a>' if pode_importar else ""}
+        </div>
+        <form method="get" class="card" style="padding:12px 14px; margin-bottom:12px;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+                <label style="margin:0; flex:3 1 260px;">🔎 Pesquisar (descrição, nº de patrimônio, observação, local)
+                    <input type="search" name="q" value="{html.escape(f["q"], quote=True)}" list="patr-desc" placeholder="Ex.: cadeira, 253180, chromebook" autocomplete="off">
+                    <datalist id="patr-desc">{opts_desc}</datalist>
+                </label>
+                <label style="margin:0; flex:1 1 150px;">Categoria<select name="categoria">{_patr_opcoes(listas["categorias"], f["categoria"], "— todas —", True)}</select></label>
+                <label style="margin:0; flex:1 1 150px;">Local<select name="local">{_patr_opcoes(listas["locais"], f["local"], "— todos —", True)}</select></label>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-top:8px;">
+                <label style="margin:0; flex:1 1 140px;">Procedência<select name="procedencia">{_patr_opcoes(listas["procedencias"], f["procedencia"], "— todas —", True)}</select></label>
+                <label style="margin:0; flex:1 1 140px;">Estado<select name="estado">{_patr_opcoes(PATRIMONIO_ESTADOS, f["estado"], "— todos —")}</select></label>
+                <label style="margin:0; flex:1 1 190px;">Situação<select name="situacao">{opts_sit}</select></label>
+                <label style="margin:0; display:flex; gap:6px; align-items:center; font-weight:400;"><input type="checkbox" name="revisar" value="1" style="width:auto; margin:0;"{" checked" if f["revisar"] else ""}> ⚠️ Só para revisar</label>
+                <label style="margin:0; display:flex; gap:6px; align-items:center; font-weight:400;"><input type="checkbox" name="sem_numero" value="1" style="width:auto; margin:0;"{" checked" if f["sem_numero"] else ""}> Sem nº</label>
+                <button type="submit" class="btn btn-primary">Buscar</button>
+                {'<a href="/patrimonio" class="btn">Limpar</a>' if tem_filtro else ""}
+            </div>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:6px;">“Só para revisar” = nº de patrimônio repetido (⚠️) ou estado não avaliado.
+            A planilha e os relatórios saem exatamente com o que está filtrado aqui.</div>
+        </form>
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">{cartoes}</div>
+        <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);">
+                <th style="padding:8px; text-align:left; white-space:nowrap;">Nº patrimônio</th><th style="padding:8px; text-align:left; min-width:230px;">Descrição</th>
+                <th style="padding:8px;">Qtd</th><th style="padding:8px; text-align:left;">Categoria</th><th style="padding:8px; text-align:left;">Local</th>
+                <th style="padding:8px; text-align:left;">Procedência</th><th style="padding:8px; text-align:left;">Estado</th>
+                <th style="padding:8px; text-align:left;">Situação</th><th style="padding:8px; text-align:left;">Observação</th><th style="padding:8px;"></th>
+            </tr></thead>
+            <tbody>{linhas}</tbody>
+        </table>
+        </div>
+    """
+    return HTMLResponse(render_page("Patrimônio", content, active="patrimonio"))
+
+
+# ---------- incluir / editar ----------
+
+def _patr_form_campos(it: dict, listas: dict, com_numero: bool = True) -> str:
+    v = lambda k: html.escape(str(it.get(k) or ""), quote=True)
+    opts_proc = "".join(f'<option value="{html.escape(p, quote=True)}"></option>' for p in listas["procedencias"])
+    opts_local = "".join(f'<option value="{html.escape(p, quote=True)}"></option>' for p in listas["locais"])
+    opts_desc = "".join(f'<option value="{html.escape(p, quote=True)}"></option>' for p in listas["descricoes"])
+    numero_html = (f'<label style="flex:1 1 160px; margin:0;">Nº de patrimônio <span style="font-weight:400; color:var(--text-muted);">(se tiver)</span>'
+                   f'<input type="text" name="numero" value="{v("numero")}" maxlength="40"></label>') if com_numero else ""
+    situacoes = [s for s in PATRIMONIO_SITUACOES if s != "Baixado"] + (["Baixado"] if it.get("situacao") == "Baixado" else [])
+    return f"""
+        <label>Descrição<input type="text" name="descricao" value="{v("descricao")}" required maxlength="200" list="patr-desc-f"
+            placeholder="Ex.: Cadeira azul de aluno"><datalist id="patr-desc-f">{opts_desc}</datalist></label>
+        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            {numero_html}
+            <label style="flex:0 1 110px; margin:0;">Quantidade<input type="number" name="quantidade" min="1" max="9999" value="{v("quantidade") or 1}"></label>
+            <label style="flex:1 1 180px; margin:0;">Categoria<select name="categoria">{_patr_opcoes(listas["categorias"], it.get("categoria") or "", "— escolher —")}</select></label>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; margin-top:8px;">
+            <label style="flex:1 1 150px; margin:0;">Procedência<input type="text" name="procedencia" value="{v("procedencia")}" list="patr-proc" maxlength="60">
+                <datalist id="patr-proc">{opts_proc}</datalist></label>
+            <label style="flex:1 1 140px; margin:0;">Estado<select name="estado">{_patr_opcoes(PATRIMONIO_ESTADOS, it.get("estado") or "Bom")}</select></label>
+            <label style="flex:1 1 190px; margin:0;">Situação<select name="situacao">{_patr_opcoes(situacoes, it.get("situacao") or "Ativo")}</select></label>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; margin-top:8px;">
+            <label style="flex:2 1 220px; margin:0;">Local / setor<input type="text" name="local" value="{v("local")}" list="patr-local" maxlength="80"
+                placeholder="Ex.: Sala 5, Laboratório de Ciências, Secretaria"><datalist id="patr-local">{opts_local}</datalist></label>
+            <label style="flex:1 1 160px; margin:0;">Data de recebimento<input type="date" name="data_recebimento" value="{v("data_recebimento")}"></label>
+        </div>
+        <label style="margin-top:8px;">Observação<textarea name="observacao" rows="2" maxlength="500">{html.escape(it.get("observacao") or "")}</textarea></label>"""
+
+
+def _patr_ler_form(form) -> dict:
+    g = lambda k: " ".join(str(form.get(k) or "").split())
+    try:
+        qtd = max(1, min(9999, int(form.get("quantidade") or 1)))
+    except ValueError:
+        qtd = 1
+    estado = g("estado") if g("estado") in PATRIMONIO_ESTADOS else "Não avaliado"
+    situacao = g("situacao") if g("situacao") in PATRIMONIO_SITUACOES else "Ativo"
+    data_rec = g("data_recebimento")
+    try:
+        data_rec = date.fromisoformat(data_rec).isoformat() if data_rec else None
+    except ValueError:
+        data_rec = None
+    numero = g("numero")[:40] or None
+    if numero and re.fullmatch(r"\d+\.0", numero):
+        numero = numero[:-2]
+    return {"descricao": g("descricao")[:200], "numero": numero, "quantidade": qtd, "procedencia": g("procedencia")[:60] or None,
+            "estado": estado, "situacao": situacao, "categoria": g("categoria")[:60] or None, "local": g("local")[:80] or None,
+            "data_recebimento": data_rec, "observacao": " ".join(str(form.get("observacao") or "").split())[:500] or None}
+
+
+def _patr_pagina_form(request, titulo, acao, it, listas, erro="", aviso_dup="", extra_html=""):
+    erro_html = f'<div style="background:#fef2f2; color:#b91c1c; border:1px solid #fca5a5; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:13px;">{erro}</div>' if erro else ""
+    dup_html = ""
+    if aviso_dup:
+        dup_html = (f'<div style="background:#fff7ed; color:#9a3412; border:1px solid #fdba74; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:13px;">'
+                    f'⚠️ {aviso_dup}<label style="display:flex; gap:6px; align-items:center; margin:8px 0 0; font-weight:600;">'
+                    f'<input type="checkbox" name="confirmar_dup" value="1" style="width:auto; margin:0;"> Salvar mesmo assim</label></div>')
+    voltar = "/patrimonio?" + _patr_qs(_patr_filtros(request.query_params))
+    content = f"""
+        <div class="page-header"><h1>{titulo}</h1><p class="subtitle"><a href="{voltar}">← voltar ao patrimônio</a></p></div>
+        {erro_html}
+        <form method="post" action="{acao}" class="card" style="padding:16px; max-width:820px;">
+            {dup_html}
+            {_patr_form_campos(it, listas)}
+            <div class="page-actions" style="margin-top:12px;"><button type="submit" class="btn btn-primary">💾 Salvar</button>
+                <a href="{voltar}" class="btn">Cancelar</a></div>
+        </form>
+        {extra_html}"""
+    return HTMLResponse(render_page(titulo, content, active="patrimonio"))
+
+
+def _patr_dup_aviso(conn, numero, ignorar_id=None) -> str:
+    if not numero:
+        return ""
+    outros = conn.execute("SELECT id, descricao, situacao FROM patrimonio_itens WHERE numero = ? AND id != ?",
+                          (numero, ignorar_id or 0)).fetchall()
+    if not outros:
+        return ""
+    lista = "; ".join(f'{html.escape(o["descricao"])} ({html.escape(o["situacao"])})' for o in outros[:5])
+    return f"O nº <strong>{html.escape(numero)}</strong> já está cadastrado em: {lista}."
+
+
+@app.get("/patrimonio/novo", response_class=HTMLResponse)
+def patrimonio_novo_form(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db(); listas = _patr_listas(conn); conn.close()
+    return _patr_pagina_form(request, "➕ Novo item de patrimônio", f"/patrimonio/novo?{request.url.query}",
+                             {"estado": "Bom", "situacao": "Ativo", "quantidade": 1, "procedencia": "SME"}, listas)
+
+
+@app.post("/patrimonio/novo", response_class=HTMLResponse)
+async def patrimonio_novo_salvar(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    form = await request.form()
+    it = _patr_ler_form(form)
+    conn = get_db()
+    listas = _patr_listas(conn)
+    if not it["descricao"]:
+        conn.close()
+        return _patr_pagina_form(request, "➕ Novo item de patrimônio", f"/patrimonio/novo?{request.url.query}", it, listas, erro="Preencha a descrição.")
+    dup = _patr_dup_aviso(conn, it["numero"])
+    if dup and not form.get("confirmar_dup"):
+        conn.close()
+        return _patr_pagina_form(request, "➕ Novo item de patrimônio", f"/patrimonio/novo?{request.url.query}", it, listas, aviso_dup=dup)
+    _patr_inserir_itens(conn, [it], prof["id"], "incluído na tela")
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/patrimonio?{request.url.query}{'&' if request.url.query else ''}msg=salvo", status_code=303)
+
+
+@app.get("/patrimonio/novo-lote", response_class=HTMLResponse)
+def patrimonio_lote_form(request: Request, erro: str = ""):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db(); listas = _patr_listas(conn); conn.close()
+    voltar = "/patrimonio?" + _patr_qs(_patr_filtros(request.query_params))
+    erro_html = f'<div style="background:#fef2f2; color:#b91c1c; border:1px solid #fca5a5; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:13px;">{html.escape(erro)}</div>' if erro else ""
+    campos = _patr_form_campos({"estado": "Bom", "situacao": "Ativo", "quantidade": 1, "procedencia": "SME"}, listas, com_numero=False)
+    content = f"""
+        <div class="page-header"><h1>➕ Vários itens de uma vez</h1>
+            <p class="subtitle">Ex.: chegaram 16 Chromebooks — preencha a descrição uma vez e cole os números de patrimônio. <a href="{voltar}">← voltar</a></p></div>
+        {erro_html}
+        <form method="post" action="/patrimonio/novo-lote?{request.url.query}" class="card" style="padding:16px; max-width:820px;">
+            <label>Números de patrimônio <span style="font-weight:400; color:var(--text-muted);">(um por linha, ou separados por vírgula/espaço — cada número vira um item)</span>
+                <textarea name="numeros" rows="6" placeholder="253180&#10;253181&#10;253182"></textarea></label>
+            <div style="font-size:12px; color:var(--text-muted); margin:-4px 0 10px;">Sem números? Deixe em branco e use o campo <strong>Quantidade</strong>: vira um único item com essa quantidade (ex.: “10 extintores”).
+            Com números, cada item fica com quantidade 1.</div>
+            {campos}
+            <label style="display:flex; gap:6px; align-items:center; margin-top:10px; font-weight:400;"><input type="checkbox" name="incluir_repetidos" value="1" style="width:auto; margin:0;">
+                Incluir também números que já existem no cadastro (normalmente eles são ignorados)</label>
+            <div class="page-actions" style="margin-top:12px;"><button type="submit" class="btn btn-primary">💾 Incluir itens</button>
+                <a href="{voltar}" class="btn">Cancelar</a></div>
+        </form>"""
+    return HTMLResponse(render_page("Vários itens", content, active="patrimonio"))
+
+
+@app.post("/patrimonio/novo-lote", response_class=HTMLResponse)
+async def patrimonio_lote_salvar(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    form = await request.form()
+    base = _patr_ler_form(form)
+    qs_volta = request.url.query
+    if not base["descricao"]:
+        return RedirectResponse(f"/patrimonio/novo-lote?{qs_volta}{'&' if qs_volta else ''}erro=" + urllib.parse.quote("Preencha a descrição."), status_code=303)
+    numeros, vistos = [], set()
+    for n in re.split(r"[\s,;]+", str(form.get("numeros") or "")):
+        n = n.strip()
+        if re.fullmatch(r"\d+\.0", n):
+            n = n[:-2]
+        if n and n not in vistos:
+            vistos.add(n); numeros.append(n[:40])
+    conn = get_db()
+    ignorados = []
+    if numeros:
+        existentes = {r["numero"] for r in conn.execute(
+            f"SELECT numero FROM patrimonio_itens WHERE numero IN ({','.join('?' * len(numeros))})", numeros).fetchall()}
+        if not form.get("incluir_repetidos"):
+            ignorados = [n for n in numeros if n in existentes]
+            numeros = [n for n in numeros if n not in existentes]
+        itens = [dict(base, numero=n, quantidade=1) for n in numeros]
+    else:
+        itens = [dict(base, numero=None)]
+    n = _patr_inserir_itens(conn, itens, prof["id"], "incluído em lote")
+    conn.commit(); conn.close()
+    detalhe = f"{n} item(ns) incluído(s)." + (f" Ignorados por já existirem: {', '.join(ignorados[:30])}{'…' if len(ignorados) > 30 else ''}." if ignorados else "")
+    return RedirectResponse(f"/patrimonio?{qs_volta}{'&' if qs_volta else ''}msg=incluidos&detalhe=" + urllib.parse.quote(detalhe), status_code=303)
+
+
+def _patr_historico_item_html(conn, item_id) -> str:
+    hs = conn.execute("""SELECT h.*, p.nome AS quem FROM patrimonio_historico h LEFT JOIN professores p ON p.id = h.professor_id
+                         WHERE h.item_id = ? ORDER BY h.id DESC""", (item_id,)).fetchall()
+    if not hs:
+        return ""
+    linhas = "".join(f'<tr><td style="padding:4px 8px; white-space:nowrap;">{html.escape(str(h["em"])[:16])}</td>'
+                     f'<td style="padding:4px 8px;">{html.escape(h["acao"])}</td><td style="padding:4px 8px;">{html.escape(h["detalhe"] or "")}</td>'
+                     f'<td style="padding:4px 8px;">{html.escape(h["quem"] or "sistema")}</td></tr>' for h in hs)
+    return (f'<div class="card" style="padding:12px 16px; max-width:820px; margin-top:14px;"><h3 style="margin:0 0 8px; font-size:14px;">🕓 Histórico deste item</h3>'
+            f'<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:var(--bg-subtle);"><th style="padding:4px 8px; text-align:left;">Quando (UTC)</th>'
+            f'<th style="padding:4px 8px; text-align:left;">Ação</th><th style="padding:4px 8px; text-align:left;">Detalhe</th><th style="padding:4px 8px; text-align:left;">Quem</th></tr></thead>'
+            f'<tbody>{linhas}</tbody></table></div>')
+
+
+@app.get("/patrimonio/{item_id}/editar", response_class=HTMLResponse)
+def patrimonio_editar_form(request: Request, item_id: int):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    it = conn.execute("SELECT * FROM patrimonio_itens WHERE id = ?", (item_id,)).fetchone()
+    if not it:
+        conn.close()
+        return RedirectResponse("/patrimonio", status_code=303)
+    listas = _patr_listas(conn)
+    hist = _patr_historico_item_html(conn, item_id)
+    conn.close()
+    return _patr_pagina_form(request, f"✏️ Editar — {html.escape(it['descricao'])}", f"/patrimonio/{item_id}/editar?{request.url.query}",
+                             dict(it), listas, extra_html=hist)
+
+
+_PATR_ROTULOS = {"descricao": "descrição", "numero": "nº", "quantidade": "quantidade", "procedencia": "procedência", "estado": "estado",
+                 "situacao": "situação", "categoria": "categoria", "local": "local", "data_recebimento": "data de recebimento", "observacao": "observação"}
+
+
+@app.post("/patrimonio/{item_id}/editar", response_class=HTMLResponse)
+async def patrimonio_editar_salvar(request: Request, item_id: int):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    form = await request.form()
+    novo = _patr_ler_form(form)
+    conn = get_db()
+    atual = conn.execute("SELECT * FROM patrimonio_itens WHERE id = ?", (item_id,)).fetchone()
+    if not atual:
+        conn.close()
+        return RedirectResponse("/patrimonio", status_code=303)
+    listas = _patr_listas(conn)
+    titulo = f"✏️ Editar — {html.escape(atual['descricao'])}"
+    acao = f"/patrimonio/{item_id}/editar?{request.url.query}"
+    if not novo["descricao"]:
+        conn.close()
+        return _patr_pagina_form(request, titulo, acao, dict(atual, **novo), listas, erro="Preencha a descrição.")
+    dup = _patr_dup_aviso(conn, novo["numero"], item_id) if novo["numero"] != atual["numero"] else ""
+    if dup and not form.get("confirmar_dup"):
+        conn.close()
+        return _patr_pagina_form(request, titulo, acao, dict(atual, **novo), listas, aviso_dup=dup)
+    mudancas = []
+    for k, rot in _PATR_ROTULOS.items():
+        a, b = atual[k], novo[k]
+        if (a or "") != (b or "") and str(a or "") != str(b or ""):
+            mudancas.append(f"{rot}: “{a or '—'}” → “{b or '—'}”")
+    extra = {}
+    if novo["situacao"] == "Baixado" and atual["situacao"] != "Baixado":
+        extra["data_baixa"] = date.today().isoformat()
+    sets = ", ".join(f"{k} = ?" for k in list(novo) + list(extra))
+    conn.execute(f"UPDATE patrimonio_itens SET {sets}, atualizado_em = CURRENT_TIMESTAMP, atualizado_por = ? WHERE id = ?",
+                 list(novo.values()) + list(extra.values()) + [prof["id"], item_id])
+    if mudancas:
+        _patr_hist(conn, item_id, "alteração", "; ".join(mudancas)[:1000], prof["id"], novo["descricao"], novo["numero"])
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/patrimonio?{request.url.query}{'&' if request.url.query else ''}msg=salvo", status_code=303)
+
+
+# ---------- baixa / reativar / excluir ----------
+
+@app.get("/patrimonio/{item_id}/baixa", response_class=HTMLResponse)
+def patrimonio_baixa_form(request: Request, item_id: int):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    it = conn.execute("SELECT * FROM patrimonio_itens WHERE id = ?", (item_id,)).fetchone()
+    conn.close()
+    if not it:
+        return RedirectResponse("/patrimonio", status_code=303)
+    voltar = "/patrimonio?" + _patr_qs(_patr_filtros(request.query_params))
+    content = f"""
+        <div class="page-header"><h1>⬇️ Dar baixa</h1><p class="subtitle"><a href="{voltar}">← voltar</a></p></div>
+        <div class="card" style="padding:16px; max-width:640px;">
+            <p style="margin:0 0 10px;"><strong>{html.escape(it["descricao"])}</strong>
+               {('— nº ' + html.escape(it["numero"])) if it["numero"] else "(sem nº de patrimônio)"} · quantidade {int(it["quantidade"] or 1)}</p>
+            <p style="font-size:12px; color:var(--text-muted); margin:0 0 12px;">A baixa <strong>não apaga</strong> o item: ele sai da lista “em uso”,
+            mas continua no sistema (filtro Situação → Baixado/Todas) e no histórico, com a data e o motivo.</p>
+            <form method="post" action="/patrimonio/{item_id}/baixa?{request.url.query}">
+                <label>Data da baixa<input type="date" name="data_baixa" value="{date.today().isoformat()}" required></label>
+                <label>Motivo<input type="text" name="motivo_baixa" maxlength="200" placeholder="Ex.: inservível — recolhido pela SME em 26/11/2026" value="{html.escape(it["observacao"] or "", quote=True)}"></label>
+                <div class="page-actions"><button type="submit" class="btn btn-primary">Confirmar baixa</button><a href="{voltar}" class="btn">Cancelar</a></div>
+            </form>
+        </div>"""
+    return HTMLResponse(render_page("Dar baixa", content, active="patrimonio"))
+
+
+@app.post("/patrimonio/{item_id}/baixa")
+async def patrimonio_baixa_salvar(request: Request, item_id: int):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    form = await request.form()
+    try:
+        data_b = date.fromisoformat(str(form.get("data_baixa") or "")).isoformat()
+    except ValueError:
+        data_b = date.today().isoformat()
+    motivo = " ".join(str(form.get("motivo_baixa") or "").split())[:200] or None
+    conn = get_db()
+    it = conn.execute("SELECT descricao, numero FROM patrimonio_itens WHERE id = ?", (item_id,)).fetchone()
+    if it:
+        conn.execute("""UPDATE patrimonio_itens SET situacao = 'Baixado', data_baixa = ?, motivo_baixa = ?,
+                        atualizado_em = CURRENT_TIMESTAMP, atualizado_por = ? WHERE id = ?""", (data_b, motivo, prof["id"], item_id))
+        _patr_hist(conn, item_id, "baixa", f"em {_fmt_data_br(data_b)}" + (f" — {motivo}" if motivo else ""), prof["id"], it["descricao"], it["numero"])
+        conn.commit()
+    conn.close()
+    qs = request.url.query
+    return RedirectResponse(f"/patrimonio?{qs}{'&' if qs else ''}msg=baixa", status_code=303)
+
+
+@app.post("/patrimonio/{item_id}/reativar")
+def patrimonio_reativar(request: Request, item_id: int):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    it = conn.execute("SELECT descricao, numero FROM patrimonio_itens WHERE id = ?", (item_id,)).fetchone()
+    if it:
+        conn.execute("""UPDATE patrimonio_itens SET situacao = 'Ativo', data_baixa = NULL, motivo_baixa = NULL,
+                        atualizado_em = CURRENT_TIMESTAMP, atualizado_por = ? WHERE id = ?""", (prof["id"], item_id))
+        _patr_hist(conn, item_id, "reativação", "baixa desfeita", prof["id"], it["descricao"], it["numero"])
+        conn.commit()
+    conn.close()
+    qs = request.url.query
+    return RedirectResponse(f"/patrimonio?{qs}{'&' if qs else ''}msg=reativado", status_code=303)
+
+
+@app.post("/patrimonio/{item_id}/excluir")
+def patrimonio_excluir(request: Request, item_id: int):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    it = conn.execute("SELECT * FROM patrimonio_itens WHERE id = ?", (item_id,)).fetchone()
+    if it:
+        _patr_hist(conn, item_id, "exclusão", f"{it['descricao']} · qtd {it['quantidade']} · {it['estado']} · {it['situacao']} (erro de cadastro)",
+                   prof["id"], it["descricao"], it["numero"])
+        conn.execute("DELETE FROM patrimonio_itens WHERE id = ?", (item_id,))
+        conn.commit()
+    conn.close()
+    qs = request.url.query
+    return RedirectResponse(f"/patrimonio?{qs}{'&' if qs else ''}msg=excluido", status_code=303)
+
+
+@app.get("/patrimonio/historico", response_class=HTMLResponse)
+def patrimonio_historico(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    hs = conn.execute("""SELECT h.*, p.nome AS quem FROM patrimonio_historico h LEFT JOIN professores p ON p.id = h.professor_id
+                         WHERE NOT (h.acao = 'inclusão' AND h.professor_id IS NULL) ORDER BY h.id DESC LIMIT 500""").fetchall()
+    conn.close()
+    linhas = "".join(f'<tr style="border-top:1px solid var(--border);"><td style="padding:6px 8px; white-space:nowrap;">{html.escape(str(h["em"])[:16])}</td>'
+                     f'<td style="padding:6px 8px;">{html.escape(h["acao"])}</td><td style="padding:6px 8px;">{html.escape(h["descricao"] or "")}'
+                     f'{(" — nº " + html.escape(h["numero"])) if h["numero"] else ""}</td><td style="padding:6px 8px; font-size:12px;">{html.escape(h["detalhe"] or "")}</td>'
+                     f'<td style="padding:6px 8px;">{html.escape(h["quem"] or "sistema")}</td></tr>' for h in hs)
+    if not linhas:
+        linhas = '<tr><td colspan="5" style="padding:16px; text-align:center; color:var(--text-muted);">Nenhuma movimentação ainda (a carga inicial da planilha não aparece aqui).</td></tr>'
+    content = f"""
+        <div class="page-header"><h1>🕓 Histórico do patrimônio</h1><p class="subtitle">Últimas 500 movimentações (inclusões, alterações, baixas e exclusões). <a href="/patrimonio">← voltar</a></p></div>
+        <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:8px; text-align:left;">Quando (UTC)</th><th style="padding:8px; text-align:left;">Ação</th>
+            <th style="padding:8px; text-align:left;">Item</th><th style="padding:8px; text-align:left;">Detalhe</th><th style="padding:8px; text-align:left;">Quem</th></tr></thead>
+            <tbody>{linhas}</tbody></table></div>"""
+    return HTMLResponse(render_page("Histórico do patrimônio", content, active="patrimonio"))
+
+
+# ---------- planilha e relatório ----------
+
+@app.get("/patrimonio/exportar")
+def patrimonio_exportar(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    f = _patr_filtros(request.query_params)
+    conn = get_db()
+    itens = _patr_buscar(conn, f)
+    conn.close()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Patrimônio"
+    cab = ["Nº de patrimônio", "Descrição", "Qtd", "Categoria", "Local", "Procedência", "Estado", "Situação",
+           "Data de recebimento", "Observação", "Data da baixa", "Motivo da baixa", "Conferir"]
+    larg = [16, 44, 6, 22, 22, 13, 12, 20, 13, 40, 12, 30, 16]
+    ncol = len(cab)
+    fino = Side(style="thin", color="999999")
+
+    def cabecalho_escola(planilha, titulo):
+        try:
+            from openpyxl.drawing.image import Image as XLImage
+            caminho_logo = os.path.join(UPLOAD_DIR, "logo_walmir.png")
+            if os.path.exists(caminho_logo):
+                img = XLImage(caminho_logo)
+                prop = 62 / max(1, img.height)
+                img.height, img.width = 62, int(img.width * prop)
+                planilha.add_image(img, "A1")
+        except Exception:
+            pass
+        textos = [("ESTADO DO RIO DE JANEIRO · PREFEITURA DE VOLTA REDONDA · SECRETARIA MUNICIPAL DE EDUCAÇÃO", Font(size=9, color="444444")),
+                  ("E.M. WALMIR DE FREITAS MONTEIRO", Font(size=14, bold=True)),
+                  (titulo, Font(size=12, bold=True)),
+                  (f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')} · {_patr_descrever_filtros(f)}", Font(size=9, italic=True, color="555555"))]
+        for n, (txt, fonte) in enumerate(textos, start=1):
+            planilha.merge_cells(start_row=n, start_column=2, end_row=n, end_column=ncol)
+            c = planilha.cell(n, 2, txt)
+            c.font = fonte
+            c.alignment = Alignment(horizontal="center", vertical="center")
+        planilha.row_dimensions[2].height = 20
+
+    cabecalho_escola(ws, "LEVANTAMENTO DE PATRIMÔNIO")
+    lin0 = 6
+    for j, t in enumerate(cab, start=1):
+        c = ws.cell(lin0, j, t)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F4E78")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = Border(top=fino, bottom=fino, left=fino, right=fino)
+        ws.column_dimensions[c.column_letter].width = larg[j - 1]
+    cores = {"Bom": "DCFCE7", "Regular": "FEF3C7", "Ruim": "FEE2E2"}
+    for k, i in enumerate(itens, start=lin0 + 1):
+        conferir = "nº repetido" if i["_repetido"] else ("estado não avaliado" if i["estado"] == "Não avaliado" else "")
+        num = i["numero"]
+        valores = [int(num) if num and num.isdigit() and not num.startswith("0") and len(num) < 15 else (num or ""), i["descricao"], int(i["quantidade"] or 1),
+                   i["categoria"] or "", i["local"] or "", i["procedencia"] or "", i["estado"], i["situacao"],
+                   _fmt_data_br(i["data_recebimento"]) if i["data_recebimento"] else "", i["observacao"] or "",
+                   _fmt_data_br(i["data_baixa"]) if i["data_baixa"] else "", i["motivo_baixa"] or "", conferir]
+        for j, v in enumerate(valores, start=1):
+            c = ws.cell(k, j, v)
+            c.border = Border(top=fino, bottom=fino, left=fino, right=fino)
+            c.alignment = Alignment(vertical="top", wrap_text=j in (2, 10, 12))
+        if i["estado"] in cores:
+            ws.cell(k, 7).fill = PatternFill("solid", fgColor=cores[i["estado"]])
+    tot = lin0 + len(itens) + 1
+    ws.cell(tot, 2, f"Total: {len(itens)} item(ns) · {sum(int(i['quantidade'] or 1) for i in itens)} unidade(s)").font = Font(bold=True)
+    ws.freeze_panes = ws.cell(lin0 + 1, 3)
+    ws.auto_filter.ref = f"A{lin0}:{ws.cell(lin0, ncol).column_letter}{lin0 + max(1, len(itens))}"
+    ws.print_title_rows = f"{lin0}:{lin0}"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    # Aba de resumo por descrição
+    ws2 = wb.create_sheet("Resumo")
+    cab2 = ["Categoria", "Descrição", "Total"] + PATRIMONIO_ESTADOS
+    ncol = len(cab2)
+    cabecalho_escola(ws2, "PATRIMÔNIO — RESUMO POR DESCRIÇÃO")
+    for j, t in enumerate(cab2, start=1):
+        c = ws2.cell(lin0, j, t)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F4E78")
+        c.alignment = Alignment(horizontal="center")
+        ws2.column_dimensions[c.column_letter].width = [24, 46, 8, 9, 9, 9, 13][j - 1]
+    for k, g in enumerate(_patr_agrupar(itens), start=lin0 + 1):
+        for j, v in enumerate([g["categoria"], g["descricao"], g["total"]] + [g[e] for e in PATRIMONIO_ESTADOS], start=1):
+            ws2.cell(k, j, v).border = Border(top=fino, bottom=fino, left=fino, right=fino)
+    ws2.freeze_panes = ws2.cell(lin0 + 1, 1)
+
+    saida = BytesIO()
+    wb.save(saida)
+    saida.seek(0)
+    nome = f"patrimonio_walmir_{date.today().isoformat()}.xlsx"
+    return StreamingResponse(saida, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="{nome}"'})
+
+
+@app.get("/patrimonio/relatorio", response_class=HTMLResponse)
+def patrimonio_relatorio(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_patrimonio(prof):
+        return RedirectResponse("/", status_code=303)
+    f = _patr_filtros(request.query_params)
+    modo = "resumo" if request.query_params.get("modo") == "resumo" else "lista"
+    conn = get_db()
+    itens = _patr_buscar(conn, f)
+    conn.close()
+    res = _patr_resumo(itens)
+    if modo == "resumo":
+        linhas = "".join(f'<tr><td>{html.escape(g["categoria"])}</td><td>{html.escape(g["descricao"])}</td><td class="c"><strong>{g["total"]}</strong></td>'
+                         + "".join(f'<td class="c">{g[e] or ""}</td>' for e in PATRIMONIO_ESTADOS) + '</tr>' for g in _patr_agrupar(itens))
+        tabela = (f'<table><thead><tr><th>Categoria</th><th>Descrição</th><th class="c">Total</th>'
+                  + "".join(f'<th class="c">{e}</th>' for e in PATRIMONIO_ESTADOS) + f'</tr></thead><tbody>{linhas}</tbody></table>')
+        titulo = "PATRIMÔNIO — RESUMO POR DESCRIÇÃO"
+    else:
+        linhas = ""
+        for i in itens:
+            obs = i["observacao"] or ""
+            if i["situacao"] == "Baixado":
+                obs = f'Baixa em {_fmt_data_br(i["data_baixa"])}' + (f' — {i["motivo_baixa"]}' if i["motivo_baixa"] else "") + (f' · {obs}' if obs else "")
+            linhas += (f'<tr><td class="n">{html.escape(i["numero"] or "s/ nº")}{" ⚠️" if i["_repetido"] else ""}</td><td>{html.escape(i["descricao"])}</td>'
+                       f'<td class="c">{int(i["quantidade"] or 1)}</td><td>{html.escape(i["local"] or "")}</td><td>{html.escape(i["procedencia"] or "")}</td>'
+                       f'<td>{html.escape(i["estado"])}</td><td>{html.escape(i["situacao"])}</td><td class="obs">{html.escape(obs)}</td></tr>')
+        tabela = (f'<table><thead><tr><th>Nº patrimônio</th><th>Descrição</th><th class="c">Qtd</th><th>Local</th><th>Procedência</th>'
+                  f'<th>Estado</th><th>Situação</th><th>Observação</th></tr></thead><tbody>{linhas}</tbody></table>')
+        titulo = "LEVANTAMENTO DE PATRIMÔNIO"
+    if not itens:
+        tabela = '<p style="text-align:center; color:#666; margin:30px 0;">Nenhum item com esses filtros.</p>'
+    est = " · ".join(f"{e}: {res['estado'][e]}" for e in PATRIMONIO_ESTADOS if res["estado"][e])
+    proc = " · ".join(f"{p}: {q}" for p, q in sorted(res["procedencia"].items(), key=lambda kv: -kv[1]))
+    pend = " · ".join(f"{s}: {res['situacao'][s]}" for s in PATRIMONIO_SITUACOES[1:] if res["situacao"][s])
+    meses = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+    hoje = date.today()
+    pagina = f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>{titulo.title()} — E.M. Walmir de Freitas Monteiro</title>
+<style>
+    @media print {{ @page {{ size: A4 {"portrait" if modo == "resumo" else "landscape"}; margin: 12mm; }} .no-print {{ display: none !important; }}
+                   body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} thead {{ display: table-header-group; }} tr {{ break-inside: avoid; }} }}
+    body {{ margin: 0; background: #fff; font-family: Helvetica, Arial, sans-serif; color: #111; }}
+    .pag {{ padding: 14px 20px; max-width: {"780px" if modo == "resumo" else "1100px"}; margin: 0 auto; font-size: 11px; }}
+    .inst {{ display: flex; gap: 14px; align-items: center; border-bottom: 1px solid #888; padding-bottom: 10px; margin-bottom: 10px; }}
+    .inst img {{ width: 56px; height: auto; }}
+    .inst .t {{ font-size: 10px; color: #333; line-height: 1.5; }}
+    .inst .esc {{ font-weight: 700; font-size: 13px; color: #000; }}
+    h2 {{ text-align: center; margin: 8px 0 2px; font-size: 15px; }}
+    .filtros {{ text-align: center; color: #555; font-size: 10px; margin-bottom: 10px; }}
+    .resumo {{ background: #f3f4f6; border-radius: 4px; padding: 6px 10px; margin-bottom: 10px; font-size: 11px; line-height: 1.6; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 10.5px; }}
+    th, td {{ border: 1px solid #aaa; padding: 3px 5px; text-align: left; vertical-align: top; }}
+    th {{ background: #e5e7eb; }}
+    td.c, th.c {{ text-align: center; }}
+    td.n {{ white-space: nowrap; }}
+    td.obs {{ font-size: 9.5px; color: #333; max-width: 220px; }}
+    .assin {{ display: flex; justify-content: space-around; margin-top: 50px; text-align: center; font-size: 11px; gap: 20px; flex-wrap: wrap; break-inside: avoid; }}
+    .assin div {{ border-top: 1px solid #333; padding-top: 4px; width: 240px; }}
+    .rodape {{ font-size: 9px; color: #777; text-align: center; margin-top: 18px; }}
+    .acoes {{ text-align: center; margin: 8px 0 14px; }}
+    .acoes button, .acoes a {{ font-size: 13px; padding: 7px 14px; margin: 0 4px; cursor: pointer; }}
+</style></head><body>
+<div class="pag">
+    <div class="acoes no-print"><button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button> <a href="javascript:window.close()">Fechar</a></div>
+    <div class="inst">
+        <img src="/static/imagens/brasao_vr.png" alt="Brasão Volta Redonda">
+        <div class="t"><div>Estado do Rio de Janeiro</div><div>Prefeitura de Volta Redonda</div><div>Secretaria Municipal de Educação</div>
+            <div class="esc">E.M. WALMIR DE FREITAS MONTEIRO</div></div>
+    </div>
+    <h2>{titulo}</h2>
+    <div class="filtros">{html.escape(_patr_descrever_filtros(f))}</div>
+    <div class="resumo"><strong>{res["itens"]} item(ns) · {res["unidades"]} unidade(s)</strong> · Estado (unidades): {est or "—"}<br>
+        Procedência: {proc or "—"}{(" · Pendências: " + pend) if pend else ""}</div>
+    {tabela}
+    <div class="assin"><div>Direção da Unidade Escolar</div><div>Responsável pelo levantamento</div></div>
+    <div class="rodape">Volta Redonda, {hoje.day} de {meses[hoje.month - 1]} de {hoje.year} · Gerado pelo Sistema Pedagógico do Walmir
+    {" · ⚠️ = nº de patrimônio repetido (conferir)" if res["repetidos"] and modo == "lista" else ""}</div>
+</div>
+<script>window.onload = function() {{ setTimeout(function() {{ window.print(); }}, 500); }};</script>
+</body></html>"""
+    return HTMLResponse(pagina)
+
+
+# ---------- importar planilha (administrador) ----------
+
+@app.get("/patrimonio/importar", response_class=HTMLResponse)
+def patrimonio_importar_form(request: Request, erro: str = ""):
+    prof = get_current_professor(request)
+    if not (prof and prof.get("is_admin")):
+        return RedirectResponse("/patrimonio", status_code=303)
+    erro_html = f'<div style="background:#fef2f2; color:#b91c1c; border:1px solid #fca5a5; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:13px;">{html.escape(erro)}</div>' if erro else ""
+    content = f"""
+        <div class="page-header"><h1>📤 Importar planilha de patrimônio</h1>
+            <p class="subtitle">Mesmo formato do levantamento da escola: Nome · Nº de Patrimônio · Procedência · Bom/x · Regular/x · Ruim/x · Observação.
+            <a href="/patrimonio">← voltar</a></p></div>
+        {erro_html}
+        <div class="tip" style="margin-bottom:12px;">A carga inicial (planilha 2026 LEVANTAMENTO DE PATRIMÔNIO) já foi feita automaticamente.
+        Use esta tela só para trazer um <strong>novo levantamento</strong>: os itens são <strong>acrescentados</strong> ao que já existe.
+        Antes de gravar, aparece uma prévia para conferir.</div>
+        <form method="post" action="/patrimonio/importar" enctype="multipart/form-data" class="card" style="padding:16px; max-width:640px;">
+            <label>Arquivo (.xlsx)<input type="file" name="arquivo" accept=".xlsx" required></label>
+            <div class="page-actions"><button type="submit" class="btn btn-primary">Ver prévia</button><a href="/patrimonio" class="btn">Cancelar</a></div>
+        </form>"""
+    return HTMLResponse(render_page("Importar patrimônio", content, active="patrimonio"))
+
+
+@app.post("/patrimonio/importar", response_class=HTMLResponse)
+async def patrimonio_importar_previa(request: Request, arquivo: UploadFile = File(...)):
+    prof = get_current_professor(request)
+    if not (prof and prof.get("is_admin")):
+        return RedirectResponse("/patrimonio", status_code=303)
+    conteudo = await arquivo.read()
+    try:
+        itens, avisos = _patrimonio_ler_planilha(conteudo)
+    except Exception:
+        return RedirectResponse("/patrimonio/importar?erro=" + urllib.parse.quote("Não consegui ler o arquivo. Confira se é uma planilha .xlsx no formato do levantamento."), status_code=303)
+    if not itens:
+        return RedirectResponse("/patrimonio/importar?erro=" + urllib.parse.quote("Nenhum item encontrado na planilha."), status_code=303)
+    conn = get_db()
+    existentes = {r["numero"] for r in conn.execute("SELECT numero FROM patrimonio_itens WHERE numero IS NOT NULL").fetchall()}
+    conn.close()
+    ja = [i for i in itens if i["numero"] and i["numero"] in existentes]
+    os.makedirs(PATRIMONIO_TMP_DIR, exist_ok=True)
+    token = secrets.token_hex(12)
+    with open(os.path.join(PATRIMONIO_TMP_DIR, f"{token}.json"), "w", encoding="utf-8") as fh:
+        json.dump(itens, fh, ensure_ascii=False)
+    amostra = "".join(f'<tr><td style="padding:3px 6px;">{html.escape(i["numero"] or "s/ nº")}</td><td style="padding:3px 6px;">{html.escape(i["descricao"])}</td>'
+                      f'<td style="padding:3px 6px; text-align:center;">{i["quantidade"]}</td><td style="padding:3px 6px;">{html.escape(i["estado"])}</td>'
+                      f'<td style="padding:3px 6px;">{html.escape(i["categoria"])}</td><td style="padding:3px 6px;">{html.escape(i["situacao"])}</td></tr>' for i in itens[:15])
+    avisos_html = "".join(f"<li>{html.escape(a)}</li>" for a in avisos[:40])
+    content = f"""
+        <div class="page-header"><h1>📤 Prévia da importação</h1><p class="subtitle">{html.escape(arquivo.filename or "")} · <a href="/patrimonio/importar">← escolher outro arquivo</a></p></div>
+        <div class="card" style="padding:14px 16px; margin-bottom:12px;">
+            <p style="margin:0 0 6px;"><strong>{len(itens)}</strong> item(ns) · <strong>{sum(i["quantidade"] for i in itens)}</strong> unidade(s) na planilha.</p>
+            <p style="margin:0 0 6px;">{len(ja)} item(ns) têm nº de patrimônio que <strong>já existe</strong> no cadastro.</p>
+            {f'<details><summary style="cursor:pointer;">Avisos ({len(avisos)})</summary><ul style="font-size:12px;">{avisos_html}</ul></details>' if avisos else ""}
+        </div>
+        <div class="card" style="padding:12px 16px; margin-bottom:12px; overflow-x:auto;"><div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">Primeiros itens:</div>
+            <table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:var(--bg-subtle);"><th style="padding:3px 6px; text-align:left;">Nº</th>
+            <th style="padding:3px 6px; text-align:left;">Descrição</th><th style="padding:3px 6px;">Qtd</th><th style="padding:3px 6px; text-align:left;">Estado</th>
+            <th style="padding:3px 6px; text-align:left;">Categoria</th><th style="padding:3px 6px; text-align:left;">Situação</th></tr></thead><tbody>{amostra}</tbody></table></div>
+        <form method="post" action="/patrimonio/importar/confirmar" class="card" style="padding:14px 16px;">
+            <input type="hidden" name="token" value="{token}">
+            <label style="display:flex; gap:6px; align-items:center; font-weight:400;"><input type="checkbox" name="ignorar_existentes" value="1" checked style="width:auto; margin:0;">
+                Não importar os {len(ja)} item(ns) cujo nº já está cadastrado</label>
+            <div class="page-actions"><button type="submit" class="btn btn-primary">✅ Confirmar importação</button><a href="/patrimonio" class="btn">Cancelar</a></div>
+        </form>"""
+    return HTMLResponse(render_page("Prévia da importação", content, active="patrimonio"))
+
+
+@app.post("/patrimonio/importar/confirmar")
+async def patrimonio_importar_confirmar(request: Request):
+    prof = get_current_professor(request)
+    if not (prof and prof.get("is_admin")):
+        return RedirectResponse("/patrimonio", status_code=303)
+    form = await request.form()
+    token = "".join(c for c in str(form.get("token") or "") if c in "0123456789abcdef")
+    caminho = os.path.join(PATRIMONIO_TMP_DIR, f"{token}.json")
+    if not token or not os.path.exists(caminho):
+        return RedirectResponse("/patrimonio/importar?erro=" + urllib.parse.quote("A prévia expirou. Envie o arquivo de novo."), status_code=303)
+    with open(caminho, encoding="utf-8") as fh:
+        itens = json.load(fh)
+    conn = get_db()
+    if form.get("ignorar_existentes"):
+        existentes = {r["numero"] for r in conn.execute("SELECT numero FROM patrimonio_itens WHERE numero IS NOT NULL").fetchall()}
+        itens = [i for i in itens if not (i.get("numero") and i["numero"] in existentes)]
+    n = _patr_inserir_itens(conn, itens, prof["id"], "importação de planilha")
+    conn.commit(); conn.close()
+    try:
+        os.remove(caminho)
+    except OSError:
+        pass
+    return RedirectResponse("/patrimonio?msg=importado&detalhe=" + urllib.parse.quote(f"Planilha importada: {n} item(ns) incluído(s)."), status_code=303)
+
 
 
 # ==========================================
