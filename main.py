@@ -31131,6 +31131,7 @@ PM_STATUS = {"recebida": "Recebida", "conferida": "Conferida", "efetivada": "Mat
 PM_PARENTESCOS = ["Mãe", "Pai", "Avó", "Avô", "Tia", "Tio", "Irmã", "Irmão", "Madrasta", "Padrasto", "Tutor(a) / guardião(ã)", "Outro"]
 PM_PROGRAMAS = ["Bolsa Família", "BPC (Benefício de Prestação Continuada)", "Outro"]
 PM_CPF_LINK = "https://servicos.receita.fazenda.gov.br/servicos/cpf/inscricaopublica/inscricao.asp"
+PM_ENDERECO_ESCOLA = "Avenida Nossa Senhora do Amparo, nº 4877 - Santa Rita do Zarur - Volta Redonda/RJ - CEP: 27285-450"
 PM_CPF_INFO_LINK = "https://www.gov.br/pt-br/servicos/inscrever-no-cpf"
 
 # Campos guardados (todos TEXT, exceto os marcados como inteiros no CREATE TABLE).
@@ -31243,9 +31244,11 @@ def _pm_fmt_sus(sus) -> str:
 def _pm_config(conn) -> dict:
     cfg = {"aberta": "1", "ano_letivo": str(date.today().year + (1 if date.today().month >= 7 else 0)),
            "periodo": "14/12 (segunda) a 18/12 (sexta)", "horario": "8h00 às 11h00 | 13h00 às 16h30",
-           "endereco_escola": "", "mensagem_extra": ""}
+           "endereco_escola": PM_ENDERECO_ESCOLA, "mensagem_extra": ""}
     for r in conn.execute("SELECT chave, valor FROM prematricula_config").fetchall():
         cfg[r["chave"]] = r["valor"] or ""
+    if not cfg.get("endereco_escola"):
+        cfg["endereco_escola"] = PM_ENDERECO_ESCOLA
     return cfg
 
 
@@ -31777,7 +31780,8 @@ def _pm_pagina_publica(titulo: str, corpo: str) -> HTMLResponse:
 </style></head><body class="pm">
 <div class="pm-topo"><div class="pm-wrap">
   <img src="/static/imagens/logo_walmir.png" alt="Logo da escola" onerror="this.style.display='none'">
-  <div><h1>E.M. Walmir de Freitas Monteiro</h1><p>Secretaria Municipal de Educação · Volta Redonda — RJ</p></div>
+  <div><h1>E.M. Walmir de Freitas Monteiro</h1><p>Secretaria Municipal de Educação · Volta Redonda — RJ</p>
+  <p style="font-size:12px; opacity:.85;">📍 {html.escape(PM_ENDERECO_ESCOLA)}</p></div>
 </div></div>
 <div class="pm-corpo">{corpo}</div>
 <div class="pm-rodape">E.M. Walmir de Freitas Monteiro · Pré-matrícula online</div>
@@ -31975,7 +31979,8 @@ def pre_matricula_enviada(token: str):
         </div>
         <div class="pm-sec">
             <h2>📅 Próximo passo: ir à escola</h2>
-            <div class="pm-aviso azul" style="font-size:15px;"><strong>Período de matrícula:</strong> {html.escape(cfg["periodo"])}<br><strong>Horário:</strong> {html.escape(cfg["horario"])}</div>
+            <div class="pm-aviso azul" style="font-size:15px;"><strong>Período de matrícula:</strong> {html.escape(cfg["periodo"])}<br><strong>Horário:</strong> {html.escape(cfg["horario"])}<br>
+            <strong>Endereço:</strong> {html.escape(cfg["endereco_escola"])}</div>
             <p style="font-size:14px;">Na escola, a equipe confere os dados, recebe os documentos e o responsável <strong>assina a ficha de matrícula</strong>.
             A pré-matrícula não garante a vaga nem o turno de preferência.</p>
             {aviso_cpf}
@@ -32022,9 +32027,67 @@ _PM_FICHA_CSS = """
   .fm-anexo table { width:100%; border-collapse: collapse; font-size: 11px; }
   .fm-anexo td { border: 1px solid #999; padding: 4px 6px; vertical-align: top; }
   .fm-anexo td.k { width: 42mm; background:#f2f2f2; font-weight: 700; }
+  .fm-tab { width:100%; border-collapse:collapse; margin-bottom:8px; font-size:10px; }
+  .fm-tab th, .fm-tab td { border:1px solid #000; padding:3px 4px; text-align:center; }
+  .fm-tab td { height:17px; }
+  .fm-linha-vazia { border-bottom:1px solid #000; height:17px; margin:0 8px; font-size:11px; padding-top:2px; }
+  .fm-linha-vazia:last-child { margin-bottom:6px; }
+  body.sem-anexo .fm-anexo, body.sem-anexo .fm-branca, body.sem-branca .fm-branca { display:none !important; }
+  @media screen { .fm-branca { display:none; } .fm-pag { border-bottom: 2px dashed #bbb; margin-bottom: 8mm; } }
   .fm-acoes { text-align:center; margin: 10px 0; }
   .fm-acoes button, .fm-acoes a { font-size: 14px; padding: 8px 16px; margin: 0 4px; cursor: pointer; }
 </style>"""
+
+
+def _pm_verso_html(r) -> str:
+    """Verso da Ficha de Matrícula da SME (página 2 do modelo), para preencher À MÃO na escola:
+    renovação, alteração de endereço, saúde, autorização de imagem e observações (27/11/2026).
+    Só vêm preenchidos o nome do estudante na autorização e a deficiência informada."""
+    nome = html.escape(r["aluno_nome"] or "")
+    saude = ""
+    if r["deficiencia"] == "sim" and r["deficiencia_desc"]:
+        saude = "Informado na pré-matrícula: " + html.escape(r["deficiencia_desc"])
+    lin_ren = "".join('<tr><td></td><td></td><td class="c">(&nbsp;&nbsp;&nbsp;) Sim &nbsp; (&nbsp;&nbsp;&nbsp;) Não</td><td></td><td></td></tr>' for _ in range(7))
+    def alteracao():
+        return ("""<div class="fm-box"><div class="fm-box-t">ALTERAÇÃO DE ENDEREÇO – Ano: <span class="fm-v" style="display:inline-block; min-width:22mm;">&nbsp;</span></div>"""
+                """<div class="fm-lin"><div style="flex:1;"><span class="fm-r">ENDEREÇO:</span><span class="fm-v">&nbsp;</span></div></div>"""
+                """<div class="fm-lin"><div style="flex:1;"><span class="fm-r">BAIRRO:</span><span class="fm-v">&nbsp;</span></div><div style="flex:1;"><span class="fm-r">MUNICÍPIO:</span><span class="fm-v">&nbsp;</span></div></div>"""
+                """<div class="fm-lin"><div style="flex:0.7;"><span class="fm-r">CEP:</span><span class="fm-v">&nbsp;</span></div><div style="flex:1.3;"><span class="fm-r">TEL:</span><span class="fm-v">&nbsp;</span></div></div>"""
+                """<div class="fm-lin"><div style="flex:0.75;"><span class="fm-r">Assinatura do Responsável:</span><span class="fm-v">&nbsp;</span></div><div style="flex:0.25;"></div></div>"""
+                """<div style="height:6px;"></div></div>""")
+    linhas = lambda n, primeira="": "".join(f'<div class="fm-linha-vazia">{primeira if i == 0 else "&nbsp;"}</div>' for i in range(n))
+    return f"""
+    <div class="fm-pag fm-verso">
+      <table class="fm-tab">
+        <tr><th colspan="5" style="font-size:12px;">RENOVAÇÃO</th></tr>
+        <tr><th style="width:15%;">ANO<br>LETIVO</th><th style="width:17%;">ANO DE<br>ESCOLARIDADE /<br>CICLO</th><th style="width:20%;">MUDANÇA DE<br>ENDEREÇO</th>
+            <th style="width:16%;">DATA DA<br>RENOVAÇÃO</th><th>ASSINATURA DO RESPONSÁVEL</th></tr>
+        {lin_ren}
+      </table>
+      {alteracao()}
+      {alteracao()}
+      <div class="fm-box"><div class="fm-box-t">OBSERVAÇÕES SOBRE A SAÚDE DO ALUNO:</div>{linhas(4, saude)}</div>
+      <div class="fm-box">
+        <div class="fm-box-t">AUTORIZAÇÃO PARA A EXIBIÇÃO DE IMAGENS E VOZ</div>
+        <div style="padding:6px 10px; font-size:11px; line-height:1.7; text-align:justify;">
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;No decorrer do ano letivo, realizamos diversos trabalhos e atividades durante as quais fotografamos e filmamos nossos alunos.
+          Algumas dessas fotos, imagens e voz serão divulgadas em murais, jornais, vídeos, projetos, cartazes e eventos da SME e redes sociais.
+          Você autoriza a divulgação das fotos, imagens e voz de seu filho(a)?<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(&nbsp;&nbsp;&nbsp;) SIM &nbsp;&nbsp; (&nbsp;&nbsp;&nbsp;) NÃO<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Caso concorde, preencha e assine a autorização abaixo:
+        </div>
+        <div style="border-top:1px solid #000; padding:6px 10px; font-size:11px; font-weight:700; line-height:1.6;">
+          AUTORIZO A EXIBIÇÃO DA IMAGEM E DA VOZ DO MEU (MINHA), FILHO(A) <span class="fm-v" style="display:inline-block; min-width:70mm;">{nome}</span>,
+          NAS ATIVIDADES DIVULGADAS PELA ESCOLA, considerando os direitos assegurados nos incisos X do art. 5º da Constituição Federal e o art. 20
+          do Código Civil Brasileiro e demais leis aplicadas à espécie.
+          <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-top:22px; font-weight:400;">
+            <div>Data: ____/____/______</div>
+            <div style="text-align:center;"><div style="border-top:1px solid #000; width:75mm; padding-top:2px; font-size:9px;">Assinatura do Responsável</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="fm-box"><div class="fm-box-t">OBSERVAÇÕES:</div>{linhas(4)}</div>
+    </div>"""
 
 
 def _pm_ficha_html(r, cfg: dict, anexo: bool = True) -> str:
@@ -32100,6 +32163,7 @@ def _pm_ficha_html(r, cfg: dict, anexo: bool = True) -> str:
       </div>
       <div style="font-size:8px; color:#555; text-align:right; margin-top:3px;">Pré-matrícula online · protocolo {g("protocolo")}</div>
     </div>"""
+    frente += _pm_verso_html(r)
     if not anexo:
         return frente
     orig = PM_ORIGENS.get(r["origem_escola"] or "", "")
@@ -32128,14 +32192,26 @@ def _pm_ficha_html(r, cfg: dict, anexo: bool = True) -> str:
       <table>{chk}</table>
       <h3>Observações da secretaria</h3>
       <div style="min-height:30mm; border:1px solid #999; padding:6px; font-size:11px; white-space:pre-wrap;">{g("obs_secretaria")}</div>
-    </div>"""
+    </div>
+    <div class="fm-pag fm-branca"><div style="text-align:center; color:#999; font-size:10px; margin-top:120mm;">(página deixada em branco para impressão frente e verso)</div></div>"""
 
 
 def _pm_pagina_fichas(fichas_html: str, titulo: str) -> HTMLResponse:
+    """Página de impressão: frente + verso do modelo da SME (+ folha de conferência, na equipe)."""
+    if "fm-anexo" in fichas_html:
+        opcoes = ('<div style="font-size:12px; margin-top:8px; color:#333;">'
+                  '<label style="margin-right:14px;"><input type="checkbox" checked onchange="pmOpc(\'sem-anexo\', !this.checked)"> Incluir folha de conferência da secretaria</label>'
+                  '<label><input type="checkbox" checked onchange="pmOpc(\'sem-branca\', !this.checked)"> Impressão frente e verso (cada ficha começa em folha nova)</label>'
+                  '<div style="color:#666; margin-top:4px;">Ficha = frente + verso do modelo da SME. Na impressora, escolha <strong>frente e verso</strong>.</div></div>')
+    else:
+        opcoes = '<div style="font-size:12px; margin-top:8px; color:#666;">Ficha = frente + verso. Na impressora, escolha <strong>frente e verso</strong>.</div>'
     return HTMLResponse(f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>{html.escape(titulo)}</title>{_PM_FICHA_CSS}</head><body>
-    <div class="fm-acoes no-print"><button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button> <a href="javascript:window.close()">Fechar</a></div>
+    <div class="fm-acoes no-print"><button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button> <a href="javascript:window.close()">Fechar</a>
+      {opcoes}
+    </div>
     {fichas_html}
-    <script>window.onload = function() {{ setTimeout(function() {{ window.print(); }}, 500); }};</script></body></html>""")
+    <script>function pmOpc(c, on) {{ document.body.classList.toggle(c, on); }}
+    window.onload = function() {{ setTimeout(function() {{ window.print(); }}, 500); }};</script></body></html>""")
 
 
 @app.get("/pre-matricula/ficha/{token}", response_class=HTMLResponse)
