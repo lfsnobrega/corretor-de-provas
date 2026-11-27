@@ -3045,8 +3045,10 @@ def get_current_professor(request: Request) -> Optional[dict]:
 
 
 # Rotas públicas (sem login)
-PUBLIC_PATHS = {"/login", "/auth/google", "/auth/google/callback", "/auth/dev-login", "/login/local", "/logout", "/acesso-pendente", "/acesso-bloqueado"}
-PUBLIC_PREFIXES = ("/static/", "/responder/")
+PUBLIC_PATHS = {"/login", "/auth/google", "/auth/google/callback", "/auth/dev-login", "/login/local", "/logout", "/acesso-pendente", "/acesso-bloqueado",
+                "/pre-matricula"}
+# /pre-matricula/...: formulário PÚBLICO de pré-matrícula (responsáveis, sem login) — 27/11/2026.
+PUBLIC_PREFIXES = ("/static/", "/responder/", "/pre-matricula/")
 # Rotas que continuam acessíveis mesmo pra quem ainda não completou o onboarding
 # (senão o próprio onboarding fica inacessível — causaria loop de redirecionamento).
 ONBOARDING_ISENTAS = {"/onboarding", "/logout"}
@@ -8771,6 +8773,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {('<div class="sidebar-section">Justificativas para o Ponto</div>' + nav_item("/administrativo/afastamentos/novo", "administrativo-novo", "📄", "Nova Justificativa") + nav_item("/administrativo/afastamentos", "administrativo-minhas", "📋", "Minhas Justificativas") + nav_item("/administrativo/contingencia", "administrativo-contingencia", "🛟", "Contingência do Ponto") + (nav_item("/administrativo/relatorio", "administrativo-relatorio", "📊", "Relatório") + nav_item("/administrativo/conferencia-ponto", "administrativo-conferencia", "🔎", "Conferência com o Ponto") + nav_item("/administrativo/tre", "administrativo-tre", "🗳️", "Folgas e Abonos TRE") if (professor.get("is_admin") or professor.get("is_gestor")) else "")) if professor else ""}
                 {('<div class="sidebar-section">Atestados de Alunos</div>' + nav_item("/administrativo/atestados-alunos/novo", "atestados-alunos-novo", "🩺", "Novo atestado") + nav_item("/administrativo/atestados-alunos", "atestados-alunos", "📋", "Atestados cadastrados")) if _pode_ver_atestados_alunos(professor) else ""}
                 {('<div class="sidebar-section">Ocorrências Disciplinares</div>' + nav_item("/orientacao/ocorrencias/novo", "ocorrencias-novo", "📋", "Nova ocorrência") + nav_item("/orientacao/ocorrencias", "ocorrencias", "📊", "Ocorrências registradas")) if _pode_ver_ocorrencias(professor) else ""}
+                {('<div class="sidebar-section">Matrícula</div>' + nav_item("/gestao-pre-matricula", "pre-matricula", "🎒", "Pré-matrícula")) if _pode_prematricula(professor) else ""}
                 {('<div class="sidebar-section">Patrimônio</div>' + nav_item("/patrimonio", "patrimonio", "🏷️", "Patrimônio da escola")) if _pode_patrimonio(professor) else ""}
                 {nav_item("/admin/usuarios", "admin-usuarios", "👥", "Usuários") if (professor and professor.get("is_admin")) else ""}
         """
@@ -31105,6 +31108,1498 @@ async def patrimonio_importar_confirmar(request: Request):
         pass
     return RedirectResponse("/patrimonio?msg=importado&detalhe=" + urllib.parse.quote(f"Planilha importada: {n} item(ns) incluído(s)."), status_code=303)
 
+
+
+
+
+# ============ PRÉ-MATRÍCULA ONLINE (27/11/2026) ============
+# Formulário PÚBLICO (sem login) para os responsáveis de estudantes que vêm de outra
+# unidade escolar adiantarem os dados da Ficha de Matrícula da SME. A equipe da escola
+# confere/corrige os dados, completa o bloco de registro civil (só a secretaria) e imprime
+# a ficha no modelo oficial para o responsável assinar. Pedido de Felipe em 27/11/2026.
+#   Público:  /pre-matricula  (formulário em etapas)  ·  /pre-matricula/ficha/{token}
+#   Equipe:   /gestao-pre-matricula  (lista, análises, edição, ficha, Excel, configurações)
+
+PM_CORES_IBGE = ["Branca", "Preta", "Parda", "Amarela", "Indígena"]
+PM_UFS = ["AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
+          "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"]
+PM_ORIGENS = {"lund": "E.M. Lund Fernandes Villela", "waldyr": "E.M. Waldyr Amaral Bedê", "outra": "Outra escola"}
+PM_TRANSPORTES = {"passe_livre": "Passe livre", "cartao_recarga": "Cartão de recarga",
+                  "transporte_escolar": "Transporte escolar (mora em zona rural)", "nenhum": "Não precisa"}
+PM_TURNOS = {"manha": "Manhã", "tarde": "Tarde"}
+PM_STATUS = {"recebida": "Recebida", "conferida": "Conferida", "efetivada": "Matrícula efetivada", "cancelada": "Cancelada"}
+PM_PARENTESCOS = ["Mãe", "Pai", "Avó", "Avô", "Tia", "Tio", "Irmã", "Irmão", "Madrasta", "Padrasto", "Tutor(a) / guardião(ã)", "Outro"]
+PM_PROGRAMAS = ["Bolsa Família", "BPC (Benefício de Prestação Continuada)", "Outro"]
+PM_CPF_LINK = "https://servicos.receita.fazenda.gov.br/servicos/cpf/inscricaopublica/inscricao.asp"
+PM_CPF_INFO_LINK = "https://www.gov.br/pt-br/servicos/inscrever-no-cpf"
+
+# Campos guardados (todos TEXT, exceto os marcados como inteiros no CREATE TABLE).
+PM_CAMPOS_FORM = [
+    "aluno_nome", "data_nascimento", "sexo", "cpf", "sem_cpf", "cor_raca", "naturalidade", "naturalidade_uf", "cartao_sus",
+    "cep", "logradouro", "numero", "complemento", "bairro", "municipio", "uf", "telefone",
+    "deficiencia", "deficiencia_desc", "programa_governo", "programa_qual", "nis",
+    "resp1_nome", "resp1_parentesco", "resp1_rg", "resp2_nome", "resp2_parentesco", "resp2_rg",
+    "respleg_nome", "respleg_trabalho", "respleg_tel_trabalho", "contato_celular", "contato_email",
+    "ano_solicitado", "origem_escola", "origem_outra", "transporte", "turno_pref", "horario_especifico", "horario_motivo",
+]
+PM_CAMPOS_SECRETARIA = ["registrado", "reg_termo", "reg_livro", "reg_folhas", "registrado_pai",
+                        "status", "matricula_data", "matricula_por", "obs_secretaria"]
+PM_TITULO = {"aluno_nome", "naturalidade", "logradouro", "complemento", "bairro", "municipio", "resp1_nome", "resp2_nome",
+             "respleg_nome", "respleg_trabalho", "origem_outra", "matricula_por"}
+PM_FRASE = {"deficiencia_desc", "horario_motivo", "programa_qual"}
+PM_ROTULOS = {
+    "aluno_nome": "Nome do estudante", "data_nascimento": "Data de nascimento", "sexo": "Sexo", "cpf": "CPF do estudante",
+    "sem_cpf": "Ainda não tem CPF", "cor_raca": "Cor/raça", "naturalidade": "Natural de (cidade)", "naturalidade_uf": "UF de nascimento",
+    "cartao_sus": "Cartão do SUS", "cep": "CEP", "logradouro": "Endereço", "numero": "Número", "complemento": "Complemento",
+    "bairro": "Bairro", "municipio": "Município", "uf": "UF", "telefone": "Telefone", "deficiencia": "Possui deficiência",
+    "deficiencia_desc": "Deficiência (especificação)", "programa_governo": "Programa do governo", "programa_qual": "Qual programa",
+    "nis": "NIS", "resp1_nome": "Responsável 1", "resp1_parentesco": "Parentesco (resp. 1)", "resp1_rg": "RG (resp. 1)",
+    "resp2_nome": "Responsável 2", "resp2_parentesco": "Parentesco (resp. 2)", "resp2_rg": "RG (resp. 2)",
+    "respleg_nome": "Responsável pela matrícula", "respleg_trabalho": "Empresa/local de trabalho", "respleg_tel_trabalho": "Tel. do trabalho",
+    "contato_celular": "Celular/WhatsApp", "contato_email": "E-mail", "ano_solicitado": "Ano solicitado",
+    "origem_escola": "Escola de origem", "origem_outra": "Nome da outra escola", "transporte": "Transporte", "turno_pref": "Turno de preferência",
+    "horario_especifico": "Precisa de horário específico", "horario_motivo": "Motivo do horário específico",
+    "registrado": "Registrado", "reg_termo": "Nº do termo", "reg_livro": "Livro", "reg_folhas": "Folhas",
+    "registrado_pai": "Registrado em nome do pai", "status": "Situação", "matricula_data": "Matrícula realizada em",
+    "matricula_por": "Matrícula realizada por", "obs_secretaria": "Observações da secretaria",
+}
+
+_PM_PARTICULAS = {"da", "de", "do", "das", "dos", "e", "di", "du", "del", "della", "van", "von", "y"}
+_PM_ROMANOS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv", "xv", "xx"}
+
+
+def _pm_titulo(txt) -> str:
+    """'MARIA DA SILVA' / 'maria da silva' → 'Maria da Silva' (preposições minúsculas,
+    números romanos maiúsculos, hífen e apóstrofo tratados) — igual ao que o formulário faz."""
+    palavras = " ".join(str(txt or "").split()).split(" ")
+    saida = []
+    for i, p in enumerate(palavras):
+        if not p:
+            continue
+        b = p.lower()
+        if i > 0 and b in _PM_PARTICULAS:
+            saida.append(b)
+        elif i > 0 and b in _PM_ROMANOS:
+            saida.append(b.upper())
+        else:
+            partes = []
+            for parte in b.split("-"):
+                sub = parte.split("'")
+                sub = [s[:1].upper() + s[1:] for s in sub]
+                partes.append("'".join(sub))
+            saida.append("-".join(partes))
+    return " ".join(saida)
+
+
+def _pm_frase(txt) -> str:
+    """Texto livre: só corrige quando foi digitado TODO EM MAIÚSCULAS (vira 'Primeira maiúscula')."""
+    t = " ".join(str(txt or "").split())
+    letras = [c for c in t if c.isalpha()]
+    if letras and all(c.isupper() for c in letras) and len(letras) > 3:
+        t = t.lower()
+    return t[:1].upper() + t[1:]
+
+
+def _pm_digitos(txt) -> str:
+    return re.sub(r"\D", "", str(txt or ""))
+
+
+def _pm_cpf_valido(cpf: str) -> bool:
+    d = _pm_digitos(cpf)
+    if len(d) != 11 or d == d[0] * 11:
+        return False
+    for n in (9, 10):
+        soma = sum(int(d[i]) * (n + 1 - i) for i in range(n))
+        dv = (soma * 10) % 11 % 10
+        if dv != int(d[n]):
+            return False
+    return True
+
+
+def _pm_fmt_cpf(cpf) -> str:
+    d = _pm_digitos(cpf)
+    return f"{d[:3]}.{d[3:6]}.{d[6:9]}-{d[9:]}" if len(d) == 11 else (cpf or "")
+
+
+def _pm_fmt_cep(cep) -> str:
+    d = _pm_digitos(cep)
+    return f"{d[:5]}-{d[5:]}" if len(d) == 8 else (cep or "")
+
+
+def _pm_fmt_tel(tel) -> str:
+    d = _pm_digitos(tel)
+    if len(d) == 11:
+        return f"({d[:2]}) {d[2:7]}-{d[7:]}"
+    if len(d) == 10:
+        return f"({d[:2]}) {d[2:6]}-{d[6:]}"
+    return tel or ""
+
+
+def _pm_fmt_sus(sus) -> str:
+    d = _pm_digitos(sus)
+    return f"{d[:3]} {d[3:7]} {d[7:11]} {d[11:]}" if len(d) == 15 else (sus or "")
+
+
+def _pm_config(conn) -> dict:
+    cfg = {"aberta": "1", "ano_letivo": str(date.today().year + (1 if date.today().month >= 7 else 0)),
+           "periodo": "14/12 (segunda) a 18/12 (sexta)", "horario": "8h00 às 11h00 | 13h00 às 16h30",
+           "endereco_escola": "", "mensagem_extra": ""}
+    for r in conn.execute("SELECT chave, valor FROM prematricula_config").fetchall():
+        cfg[r["chave"]] = r["valor"] or ""
+    return cfg
+
+
+def _pm_init():
+    conn = get_db()
+    cols = ",\n        ".join(f"{c} TEXT" for c in PM_CAMPOS_FORM + PM_CAMPOS_SECRETARIA if c not in ("status",))
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS prematriculas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        protocolo TEXT UNIQUE,
+        token TEXT UNIQUE,
+        ano_letivo INTEGER,
+        {cols},
+        status TEXT NOT NULL DEFAULT 'recebida',
+        consentimento INTEGER NOT NULL DEFAULT 0,
+        ip TEXT,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP,
+        atualizado_por INTEGER
+    )""")
+    existentes = {r[1] for r in conn.execute("PRAGMA table_info(prematriculas)").fetchall()}
+    for c in PM_CAMPOS_FORM + PM_CAMPOS_SECRETARIA:
+        if c not in existentes:
+            conn.execute(f"ALTER TABLE prematriculas ADD COLUMN {c} TEXT")
+    conn.execute("""CREATE TABLE IF NOT EXISTS prematricula_historico (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, prematricula_id INTEGER, acao TEXT, detalhe TEXT,
+        professor_id INTEGER, em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    conn.execute("CREATE TABLE IF NOT EXISTS prematricula_config (chave TEXT PRIMARY KEY, valor TEXT)")
+    conn.commit()
+    conn.close()
+
+
+_pm_init()
+
+
+def _pm_ler_form(form, staff: bool = False) -> dict:
+    """Lê e NORMALIZA os campos (maiúsculas/minúsculas, máscaras)."""
+    d = {}
+    for c in PM_CAMPOS_FORM + (PM_CAMPOS_SECRETARIA if staff else []):
+        v = " ".join(str(form.get(c) or "").split())[:300]
+        if c == "obs_secretaria":
+            v = str(form.get(c) or "").strip()[:1000]
+        d[c] = v
+    for c in PM_TITULO:
+        if c in d:
+            d[c] = _pm_titulo(d[c])
+    for c in PM_FRASE:
+        if c in d:
+            d[c] = _pm_frase(d[c])
+    d["cpf"] = _pm_fmt_cpf(d["cpf"]) if _pm_digitos(d["cpf"]) else ""
+    d["sem_cpf"] = "1" if form.get("sem_cpf") and not _pm_digitos(d["cpf"]) else ""
+    d["cep"] = _pm_fmt_cep(d["cep"])
+    d["cartao_sus"] = _pm_fmt_sus(d["cartao_sus"])
+    for c in ("telefone", "contato_celular", "respleg_tel_trabalho"):
+        d[c] = _pm_fmt_tel(d[c])
+    d["nis"] = _pm_digitos(d["nis"])[:11]
+    d["contato_email"] = d["contato_email"].lower()
+    d["uf"] = d["uf"].upper()[:2]
+    d["naturalidade_uf"] = d["naturalidade_uf"].upper()[:2]
+    for c in ("resp1_rg", "resp2_rg"):
+        d[c] = d[c].upper()[:20]
+    if d["deficiencia"] != "sim":
+        d["deficiencia_desc"] = ""
+    if d["programa_governo"] != "sim":
+        d["programa_qual"], d["nis"] = "", ""
+    if d["origem_escola"] != "outra":
+        d["origem_outra"] = ""
+    if d["horario_especifico"] != "sim":
+        d["horario_motivo"] = ""
+    try:
+        d["data_nascimento"] = date.fromisoformat(d["data_nascimento"]).isoformat()
+    except ValueError:
+        d["data_nascimento"] = ""
+    if staff:
+        if d["status"] not in PM_STATUS:
+            d["status"] = "recebida"
+        try:
+            d["matricula_data"] = date.fromisoformat(d["matricula_data"]).isoformat() if d["matricula_data"] else ""
+        except ValueError:
+            d["matricula_data"] = ""
+    return d
+
+
+def _pm_validar(d: dict, staff: bool = False) -> list:
+    """Lista de (campo, mensagem). A equipe pode salvar com campos faltando (só avisa)."""
+    e = []
+    obrig = [("aluno_nome", "Informe o nome completo do estudante."), ("data_nascimento", "Informe a data de nascimento."),
+             ("sexo", "Marque o sexo do estudante."), ("cor_raca", "Marque a cor/raça (classificação do IBGE)."),
+             ("naturalidade", "Informe a cidade onde o estudante nasceu."), ("cep", "Informe o CEP."),
+             ("logradouro", "Informe o endereço (rua/avenida)."), ("numero", "Informe o número da casa (ou S/N)."),
+             ("bairro", "Informe o bairro."), ("municipio", "Informe o município."),
+             ("deficiencia", "Responda se o estudante possui deficiência."), ("programa_governo", "Responda sobre programa do governo."),
+             ("resp1_nome", "Informe o nome do responsável."), ("respleg_nome", "Informe o nome do responsável pela matrícula."),
+             ("contato_celular", "Informe um celular/WhatsApp para contato."), ("ano_solicitado", "Escolha o ano solicitado (6º ao 9º)."),
+             ("origem_escola", "Indique a escola de origem."), ("transporte", "Responda sobre o transporte."),
+             ("turno_pref", "Indique o turno de preferência."), ("horario_especifico", "Responda se precisa de horário específico.")]
+    for c, msg in obrig:
+        if not d.get(c):
+            e.append((c, msg))
+    if len(d.get("aluno_nome", "").split()) < 2 and d.get("aluno_nome"):
+        e.append(("aluno_nome", "Escreva o nome completo (nome e sobrenome)."))
+    if d.get("cpf") and not _pm_cpf_valido(d["cpf"]):
+        e.append(("cpf", "CPF inválido — confira os números."))
+    if not d.get("cpf") and not d.get("sem_cpf") and not staff:
+        e.append(("cpf", "Informe o CPF do estudante ou marque que ele ainda não tem CPF."))
+    if d.get("cor_raca") and d["cor_raca"] not in PM_CORES_IBGE:
+        e.append(("cor_raca", "Cor/raça inválida."))
+    if d.get("ano_solicitado") and d["ano_solicitado"] not in ("6", "7", "8", "9"):
+        e.append(("ano_solicitado", "Ano solicitado inválido."))
+    if d.get("deficiencia") == "sim" and not d.get("deficiencia_desc"):
+        e.append(("deficiencia_desc", "Descreva a deficiência do estudante."))
+    if d.get("origem_escola") == "outra" and not d.get("origem_outra"):
+        e.append(("origem_outra", "Escreva o nome da escola de origem."))
+    if d.get("origem_escola") and d["origem_escola"] not in PM_ORIGENS:
+        e.append(("origem_escola", "Escola de origem inválida."))
+    if d.get("transporte") and d["transporte"] not in PM_TRANSPORTES:
+        e.append(("transporte", "Opção de transporte inválida."))
+    if d.get("turno_pref") and d["turno_pref"] not in PM_TURNOS:
+        e.append(("turno_pref", "Turno inválido."))
+    if d.get("cep") and len(_pm_digitos(d["cep"])) != 8:
+        e.append(("cep", "CEP deve ter 8 números."))
+    if d.get("contato_celular") and len(_pm_digitos(d["contato_celular"])) < 10:
+        e.append(("contato_celular", "Celular incompleto — use DDD + número."))
+    if d.get("cartao_sus") and len(_pm_digitos(d["cartao_sus"])) != 15:
+        e.append(("cartao_sus", "O Cartão do SUS tem 15 números."))
+    if d.get("contato_email") and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", d["contato_email"]):
+        e.append(("contato_email", "E-mail inválido."))
+    if d.get("data_nascimento"):
+        try:
+            nasc = date.fromisoformat(d["data_nascimento"])
+            if not (date.today().year - 25 <= nasc.year <= date.today().year - 5):
+                e.append(("data_nascimento", "Confira a data de nascimento."))
+        except ValueError:
+            pass
+    if staff:
+        return e
+    return e
+
+
+def _pm_quando(ts) -> str:
+    """Horário salvo pelo banco (UTC) → 'dd/mm/aaaa hh:mm' no horário de Brasília."""
+    try:
+        dt = datetime.strptime(str(ts)[:19], "%Y-%m-%d %H:%M:%S") - timedelta(hours=3)
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except (ValueError, TypeError):
+        return str(ts or "")
+
+
+def _pm_erros_dict(lista) -> dict:
+    """[(campo, msg), ...] → {campo: primeira msg}, na ordem dos campos."""
+    d = {}
+    for c, m in lista:
+        d.setdefault(c, m)
+    return d
+
+
+def _pm_idade(data_nasc, ref: date):
+    try:
+        n = date.fromisoformat(data_nasc)
+    except (ValueError, TypeError):
+        return None
+    return ref.year - n.year - ((ref.month, ref.day) < (n.month, n.day))
+
+
+# ---------- formulário (seções compartilhadas: página pública e tela da equipe) ----------
+
+_PM_CSS = """
+<style>
+.pm * { box-sizing: border-box; }
+.pm { --pm-azul:#1d4ed8; --pm-azul2:#eff6ff; --pm-borda:#d6dbe4; --pm-txt:#1f2937; --pm-mut:#6b7280; --pm-verm:#b91c1c; color: var(--pm-txt); }
+.pm-sec { background:#fff; border:1px solid var(--pm-borda); border-radius:14px; padding:18px 18px 8px; margin-bottom:16px; }
+.pm-sec h2 { font-size:18px; margin:0 0 4px; color:var(--pm-azul); }
+.pm-sec .pm-sub { font-size:13px; color:var(--pm-mut); margin:0 0 14px; }
+.pm-linha { display:flex; flex-wrap:wrap; gap:12px; }
+.pm-campo { flex:1 1 220px; margin-bottom:14px; min-width:0; }
+.pm-campo.pm-curto { flex:0 1 150px; }
+.pm-campo > label, .pm-rot { display:block; font-size:14px; font-weight:600; margin-bottom:5px; }
+.pm-campo .pm-obr { color:var(--pm-verm); }
+.pm-campo input[type=text], .pm-campo input[type=email], .pm-campo input[type=date], .pm-campo input[type=tel], .pm-campo select, .pm-campo textarea {
+  width:100%; font-size:16px; padding:11px 12px; border:1.5px solid var(--pm-borda); border-radius:10px; background:#fff; color:var(--pm-txt); font-family:inherit; }
+.pm-campo input:focus, .pm-campo select:focus, .pm-campo textarea:focus { outline:none; border-color:var(--pm-azul); box-shadow:0 0 0 3px rgba(29,78,216,.15); }
+.pm-ajuda { font-size:12px; color:var(--pm-mut); margin-top:4px; }
+.pm-erro { font-size:13px; color:var(--pm-verm); margin-top:4px; font-weight:600; }
+.pm-campo.pm-tem-erro input, .pm-campo.pm-tem-erro select, .pm-campo.pm-tem-erro textarea { border-color:var(--pm-verm); }
+.pm-opcoes { display:flex; flex-wrap:wrap; gap:8px; }
+.pm-opcoes label { display:flex; align-items:center; gap:8px; border:1.5px solid var(--pm-borda); border-radius:10px; padding:10px 14px;
+  cursor:pointer; font-size:15px; font-weight:500; background:#fff; flex:1 1 auto; }
+.pm-opcoes label:has(input:checked) { border-color:var(--pm-azul); background:var(--pm-azul2); font-weight:700; }
+.pm-opcoes input { width:18px; height:18px; margin:0; accent-color:var(--pm-azul); }
+.pm-cartoes label { flex:1 1 150px; flex-direction:column; align-items:flex-start; padding:14px; }
+.pm-cartoes label small { font-weight:400; color:var(--pm-mut); font-size:12px; }
+.pm-anos label { flex:1 1 90px; justify-content:center; font-size:18px; }
+.pm-aviso { border-radius:10px; padding:12px 14px; font-size:14px; margin:6px 0 14px; line-height:1.5; }
+.pm-aviso.azul { background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; }
+.pm-aviso.amarelo { background:#fffbeb; border:1px solid #fcd34d; color:#78350f; }
+.pm-aviso.vermelho { background:#fef2f2; border:1px solid #fca5a5; color:#7f1d1d; }
+.pm-escondido { display:none !important; }
+.pm-btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; font-size:16px; font-weight:700; padding:12px 20px;
+  border-radius:10px; border:1.5px solid var(--pm-azul); background:#fff; color:var(--pm-azul); cursor:pointer; text-decoration:none; font-family:inherit; }
+.pm-btn.primario { background:var(--pm-azul); color:#fff; }
+.pm-btn:disabled { opacity:.5; cursor:not-allowed; }
+.pm-btn-mini { font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--pm-borda); background:#f8fafc; cursor:pointer; margin-top:6px; }
+.pm-cep-status { font-size:12px; margin-top:4px; min-height:16px; }
+</style>
+"""
+
+
+def _pm_secoes_html(d: dict, erros: dict, staff: bool = False) -> dict:
+    """Devolve {nome_da_seção: html}. d = valores atuais; erros = {campo: mensagem}."""
+    v = lambda c: html.escape(str(d.get(c) or ""), quote=True)
+
+    def err(c):
+        return f'<div class="pm-erro">{html.escape(erros[c])}</div>' if c in erros else ""
+
+    def cls(c, extra=""):
+        return f'pm-campo{extra}{" pm-tem-erro" if c in erros else ""}'
+
+    def obr(sim=True):
+        return ' <span class="pm-obr">*</span>' if sim else ""
+
+    def txt(c, rot, req=True, extra_attr="", ajuda="", curto=False, tipo="text", tc=False):
+        return (f'<div class="{cls(c, " pm-curto" if curto else "")}" data-campo="{c}"><label for="pm-{c}">{rot}{obr(req)}</label>'
+                f'<input type="{tipo}" id="pm-{c}" name="{c}" value="{v(c)}"{" required" if req else ""}{" data-tc" if tc else ""} {extra_attr}>'
+                f'{f"<div class=pm-ajuda>{ajuda}</div>" if ajuda else ""}{err(c)}</div>')
+
+    def radios(c, rot, opcoes, req=True, classe="", ajuda=""):
+        itens = ""
+        for i, (val, texto) in enumerate(opcoes):
+            itens += (f'<label><input type="radio" name="{c}" value="{html.escape(val, quote=True)}"'
+                      f'{" checked" if str(d.get(c) or "") == val else ""}{" required" if (req and i == 0) else ""}> {texto}</label>')
+        return (f'<div class="{cls(c)}" data-campo="{c}"><span class="pm-rot">{rot}{obr(req)}</span>'
+                f'<div class="pm-opcoes {classe}">{itens}</div>{f"<div class=pm-ajuda>{ajuda}</div>" if ajuda else ""}{err(c)}</div>')
+
+    def sel(c, rot, opcoes, req=True, curto=False, vazio="— escolher —"):
+        ops = f'<option value="">{vazio}</option>' + "".join(
+            f'<option value="{html.escape(o, quote=True)}"{" selected" if (d.get(c) or "") == o else ""}>{html.escape(o)}</option>' for o in opcoes)
+        return (f'<div class="{cls(c, " pm-curto" if curto else "")}" data-campo="{c}"><label for="pm-{c}">{rot}{obr(req)}</label>'
+                f'<select id="pm-{c}" name="{c}"{" required" if req else ""}>{ops}</select>{err(c)}</div>')
+
+    ano_atual = date.today().year
+    s = {}
+    s["aluno"] = f"""
+        <h2>👦 Dados do estudante</h2><p class="pm-sub">Como está na certidão de nascimento. Não se preocupe com letras maiúsculas — o sistema ajusta sozinho.</p>
+        {txt("aluno_nome", "Nome completo do estudante", tc=True, extra_attr='autocomplete="off" maxlength="120"')}
+        <div class="pm-linha">
+            {txt("data_nascimento", "Data de nascimento", tipo="date", extra_attr=f'min="{ano_atual - 25}-01-01" max="{ano_atual - 5}-12-31"', ajuda="Toque para abrir o calendário.")}
+            {radios("sexo", "Sexo", [("M", "Masculino"), ("F", "Feminino")])}
+        </div>
+        <div class="{cls("cpf")}" data-campo="cpf"><label for="pm-cpf">CPF do estudante<span class="pm-obr" id="pm-cpf-obr"> *</span></label>
+            <input type="text" id="pm-cpf" name="cpf" value="{v("cpf")}" inputmode="numeric" data-mask="cpf" placeholder="000.000.000-00" maxlength="14">
+            <div class="pm-erro" id="pm-cpf-msg">{html.escape(erros.get("cpf", ""))}</div>
+            <label style="display:flex; gap:8px; align-items:center; font-weight:500; margin-top:8px; font-size:14px;">
+                <input type="checkbox" name="sem_cpf" id="pm-sem-cpf" value="1"{" checked" if d.get("sem_cpf") else ""} style="width:18px; height:18px;"> O estudante ainda <strong>não tem CPF</strong></label>
+            <div class="pm-aviso amarelo pm-escondido" id="pm-cpf-ajuda">
+                <strong>O CPF do estudante é documento OBRIGATÓRIO para efetivar a matrícula.</strong> Tirar o CPF é <strong>gratuito</strong> e pode ser feito pela internet:
+                <ol style="margin:6px 0 0 18px; padding:0;">
+                    <li>Acesse o formulário da Receita Federal: <a href="{PM_CPF_LINK}" target="_blank" rel="noopener">Inscrição no CPF pela internet</a>.</li>
+                    <li>Preencha os dados do estudante (nome, data de nascimento, nome da mãe, título de eleitor do responsável quando pedido) e envie — anote o <strong>número de protocolo</strong>.</li>
+                    <li>Siga as orientações da Receita para concluir (pode ser pelo atendimento por e-mail ou presencial). Para menores de 16 anos, o responsável apresenta a certidão de nascimento do estudante e o próprio documento com foto.</li>
+                </ol>
+                <div style="margin-top:6px;">Também é possível fazer nos <strong>Correios, Banco do Brasil, Caixa</strong> ou cartório (nesses locais há taxa de R$ 7,00). Mais informações:
+                <a href="{PM_CPF_INFO_LINK}" target="_blank" rel="noopener">gov.br — Inscrever no CPF</a>.</div>
+            </div>
+        </div>
+        {radios("cor_raca", "Cor/raça (classificação do IBGE)", [(c, c) for c in PM_CORES_IBGE])}
+        <div class="pm-linha">
+            {txt("naturalidade", "Natural de (cidade onde nasceu)", tc=True, extra_attr='maxlength="80" placeholder="Ex.: Volta Redonda"')}
+            {sel("naturalidade_uf", "UF", PM_UFS, curto=True, vazio="—")}
+            {txt("cartao_sus", "Cartão do SUS", req=False, extra_attr='inputmode="numeric" data-mask="sus" placeholder="000 0000 0000 0000" maxlength="18"', ajuda="15 números (se tiver).")}
+        </div>"""
+    s["endereco"] = f"""
+        <h2>🏠 Endereço e contato</h2><p class="pm-sub">Digite o CEP: o endereço é preenchido automaticamente.</p>
+        <div class="pm-linha">
+            <div class="{cls("cep", " pm-curto")}" data-campo="cep"><label for="pm-cep">CEP{obr()}</label>
+                <input type="text" id="pm-cep" name="cep" value="{v("cep")}" inputmode="numeric" data-mask="cep" placeholder="00000-000" maxlength="9" required>
+                <div class="pm-cep-status" id="pm-cep-status"></div>{err("cep")}</div>
+            {txt("logradouro", "Endereço (rua, avenida…)", tc=True, extra_attr='maxlength="120"')}
+        </div>
+        <div class="pm-linha">
+            {txt("numero", "Número", curto=True, extra_attr='maxlength="10" placeholder="Ex.: 120 ou S/N"')}
+            {txt("complemento", "Complemento", req=False, tc=True, extra_attr='maxlength="60" placeholder="Apto, bloco, casa…"')}
+        </div>
+        <div class="pm-linha">
+            {txt("bairro", "Bairro", tc=True, extra_attr='maxlength="60"')}
+            {txt("municipio", "Município", tc=True, extra_attr='maxlength="60"')}
+            {sel("uf", "UF", PM_UFS, curto=True, vazio="—")}
+        </div>
+        <div class="pm-linha">
+            {txt("contato_celular", "Celular / WhatsApp do responsável", tipo="tel", extra_attr='inputmode="numeric" data-mask="tel" placeholder="(24) 99999-9999" maxlength="15"', ajuda="A escola usa este número para falar com a família.")}
+            {txt("telefone", "Outro telefone (residencial/recado)", req=False, tipo="tel", extra_attr='inputmode="numeric" data-mask="tel" placeholder="(24) 3333-3333" maxlength="15"')}
+        </div>
+        {txt("contato_email", "E-mail do responsável", req=False, tipo="email", extra_attr='maxlength="120" autocomplete="email" placeholder="nome@exemplo.com"')}"""
+    s["saude"] = f"""
+        <h2>🩺 Saúde e benefícios</h2><p class="pm-sub">Essas informações ajudam a escola a receber bem o estudante.</p>
+        {radios("deficiencia", "O estudante possui deficiência, transtorno ou necessidade especial?", [("nao", "Não"), ("sim", "Sim")])}
+        <div data-mostra="deficiencia=sim">
+            <div class="{cls("deficiencia_desc")}" data-campo="deficiencia_desc"><label for="pm-deficiencia_desc">Qual? Descreva o que o estudante tem{obr()}</label>
+                <textarea id="pm-deficiencia_desc" name="deficiencia_desc" rows="3" maxlength="300" data-frase data-req-cond placeholder="Ex.: Transtorno do Espectro Autista (TEA), nível 1">{html.escape(d.get("deficiencia_desc") or "")}</textarea>{err("deficiencia_desc")}</div>
+            <div class="pm-aviso amarelo">📄 No dia da matrícula, traga o <strong>laudo médico atualizado</strong>, especificando a condição, com <strong>CID</strong> e se existe ou não indicação de <strong>cuidador</strong>.</div>
+        </div>
+        {radios("programa_governo", "É beneficiado por programa do governo?", [("nao", "Não"), ("sim", "Sim")])}
+        <div data-mostra="programa_governo=sim" class="pm-linha">
+            {sel("programa_qual", "Qual programa", PM_PROGRAMAS, req=False)}
+            {txt("nis", "NIS", req=False, extra_attr='inputmode="numeric" data-mask="nis" maxlength="11" placeholder="Só números"', ajuda="Número que aparece no cartão do programa.")}
+        </div>"""
+    s["responsaveis"] = f"""
+        <h2>👨‍👩‍👧 Responsáveis</h2><p class="pm-sub">Pelo menos um responsável é obrigatório.</p>
+        <div class="pm-linha">
+            {txt("resp1_nome", "Responsável 1 — nome completo", tc=True, extra_attr='maxlength="120"')}
+            {sel("resp1_parentesco", "Parentesco", PM_PARENTESCOS, req=False, curto=True)}
+            {txt("resp1_rg", "RG", req=False, curto=True, extra_attr='maxlength="20"')}
+        </div>
+        <div class="pm-linha">
+            {txt("resp2_nome", "Responsável 2 — nome completo", req=False, tc=True, extra_attr='maxlength="120"')}
+            {sel("resp2_parentesco", "Parentesco", PM_PARENTESCOS, req=False, curto=True)}
+            {txt("resp2_rg", "RG", req=False, curto=True, extra_attr='maxlength="20"')}
+        </div>
+        <div class="pm-aviso azul" style="margin-top:4px;">Quem vai <strong>assinar a ficha de matrícula</strong> na escola:</div>
+        <div class="{cls("respleg_nome")}" data-campo="respleg_nome"><label for="pm-respleg_nome">Responsável pela matrícula — nome completo{obr()}</label>
+            <input type="text" id="pm-respleg_nome" name="respleg_nome" value="{v("respleg_nome")}" required data-tc maxlength="120">
+            <button type="button" class="pm-btn-mini" onclick="pmCopiaResp()">É o Responsável 1</button>{err("respleg_nome")}</div>
+        <div class="pm-linha">
+            {txt("respleg_trabalho", "Empresa ou local de trabalho", req=False, tc=True, extra_attr='maxlength="100"')}
+            {txt("respleg_tel_trabalho", "Telefone do trabalho", req=False, tipo="tel", extra_attr='inputmode="numeric" data-mask="tel" maxlength="15"')}
+        </div>"""
+    s["matricula"] = f"""
+        <h2>🎒 Solicita matrícula</h2><p class="pm-sub">Ensino Fundamental — Anos Finais.</p>
+        {radios("ano_solicitado", "Ano em que o estudante vai estudar", [("6", "6º ano"), ("7", "7º ano"), ("8", "8º ano"), ("9", "9º ano")], classe="pm-anos")}"""
+    s["pesquisa"] = f"""
+        <h2>📋 Algumas perguntas rápidas</h2><p class="pm-sub">Ajudam a escola a organizar as turmas.</p>
+        {radios("origem_escola", "De qual escola o estudante está vindo?", [(k, f"{t}") for k, t in PM_ORIGENS.items()], classe="pm-cartoes")}
+        <div data-mostra="origem_escola=outra">
+            <div class="{cls("origem_outra")}" data-campo="origem_outra"><label for="pm-origem_outra">Nome da escola de origem{obr()}</label>
+                <input type="text" id="pm-origem_outra" name="origem_outra" value="{v("origem_outra")}" data-tc data-req-cond maxlength="120">{err("origem_outra")}</div>
+        </div>
+        {radios("transporte", "O estudante vai precisar de:", [(k, t) for k, t in PM_TRANSPORTES.items()], classe="pm-cartoes")}
+        {radios("turno_pref", "Turno de preferência", [(k, t) for k, t in PM_TURNOS.items()], classe="pm-anos")}
+        <div class="pm-aviso amarelo">⚠️ O turno informado é uma <strong>PREFERÊNCIA, não uma garantia</strong>.</div>
+        <div data-mostra="turno_pref=manha"><div class="pm-aviso vermelho">🎲 Para o turno da <strong>manhã</strong> ocorrerá um <strong>sorteio</strong>.<br>
+            <strong>ATENÇÃO: A ESCOLA NÃO TEM OBRIGAÇÃO DE MATRICULAR O ESTUDANTE NO HORÁRIO DE PREFERÊNCIA DA FAMÍLIA. A MATRÍCULA OCORRERÁ DE ACORDO COM O NÚMERO DE VAGAS POR TURNO.</strong></div></div>
+        {radios("horario_especifico", "O estudante precisa de horário específico? (tratamento, transtorno/deficiência, curso ou equipe de esporte)", [("nao", "Não"), ("sim", "Sim")])}
+        <div data-mostra="horario_especifico=sim">
+            <div class="{cls("horario_motivo")}" data-campo="horario_motivo"><label for="pm-horario_motivo">Explique o motivo{obr()}</label>
+                <textarea id="pm-horario_motivo" name="horario_motivo" rows="2" maxlength="300" data-frase data-req-cond placeholder="Ex.: treina na equipe de natação da prefeitura às terças e quintas à tarde">{html.escape(d.get("horario_motivo") or "")}</textarea>{err("horario_motivo")}</div>
+            <div class="pm-aviso amarelo">📄 Caso o estudante tenha algum tipo de transtorno ou deficiência, realize algum tipo de curso ou participe de equipe de esporte
+            e necessite de horário específico, <strong>anexe no ato da matrícula a documentação que comprove o vínculo informado.</strong></div>
+        </div>"""
+    if staff:
+        reg = lambda c, rot: radios(c, rot, [("sim", "Sim"), ("nao", "Não")], req=False)
+        st_ops = "".join(f'<option value="{k}"{" selected" if (d.get("status") or "recebida") == k else ""}>{t}</option>' for k, t in PM_STATUS.items())
+        s["secretaria"] = f"""
+        <h2>🏫 Uso da secretaria</h2><p class="pm-sub">Não aparece para o responsável. Sai impresso na ficha.</p>
+        <div class="pm-linha">
+            <div class="pm-campo"><label for="pm-status">Situação</label><select id="pm-status" name="status">{st_ops}</select></div>
+            {txt("matricula_data", "Matrícula realizada em", req=False, tipo="date")}
+            {txt("matricula_por", "Por (funcionário)", req=False, tc=True, extra_attr='maxlength="80"')}
+        </div>
+        {reg("registrado", "A criança/adolescente é registrada?")}
+        <div class="pm-linha">
+            {txt("reg_termo", "Nº do termo", req=False, extra_attr='maxlength="40"')}
+            {txt("reg_livro", "Livro", req=False, curto=True, extra_attr='maxlength="20"')}
+            {txt("reg_folhas", "Folhas", req=False, curto=True, extra_attr='maxlength="20"')}
+        </div>
+        {reg("registrado_pai", "A criança/adolescente é registrada em nome do pai?")}
+        <div class="pm-campo"><label for="pm-obs_secretaria">Observações da secretaria</label>
+            <textarea id="pm-obs_secretaria" name="obs_secretaria" rows="3" maxlength="1000">{html.escape(d.get("obs_secretaria") or "")}</textarea></div>"""
+    return s
+
+
+# JavaScript dos campos (máscaras, CEP, maiúsculas/minúsculas, campos que aparecem/somem).
+_PM_JS_CAMPOS = r"""
+<script>
+(function(){
+  var PART = ['da','de','do','das','dos','e','di','du','del','della','van','von','y'];
+  var ROM = ['i','ii','iii','iv','v','vi','vii','viii','ix','x','xi','xii','xiii','xiv','xv','xx'];
+  function titulo(t){
+    var ps = (t||'').replace(/\s+/g,' ').trim().split(' '), out=[];
+    ps.forEach(function(p,i){
+      if(!p) return; var b=p.toLowerCase();
+      if(i>0 && PART.indexOf(b)>=0){ out.push(b); return; }
+      if(i>0 && ROM.indexOf(b)>=0){ out.push(b.toUpperCase()); return; }
+      out.push(b.split('-').map(function(x){ return x.split("'").map(function(s){ return s.charAt(0).toUpperCase()+s.slice(1); }).join("'"); }).join('-'));
+    });
+    return out.join(' ');
+  }
+  function frase(t){
+    t=(t||'').replace(/\s+/g,' ').trim(); var l=t.replace(/[^A-Za-zÀ-ÿ]/g,'');
+    if(l.length>3 && l===l.toUpperCase()) t=t.toLowerCase();
+    return t.charAt(0).toUpperCase()+t.slice(1);
+  }
+  window.pmTitulo = titulo;
+  document.querySelectorAll('[data-tc]').forEach(function(el){ el.addEventListener('blur', function(){ el.value = titulo(el.value); }); });
+  document.querySelectorAll('[data-frase]').forEach(function(el){ el.addEventListener('blur', function(){ el.value = frase(el.value); }); });
+
+  function mascara(tipo, v){
+    var d=(v||'').replace(/\D/g,'');
+    if(tipo==='cpf'){ d=d.slice(0,11); return d.replace(/^(\d{3})(\d)/,'$1.$2').replace(/^(\d{3})\.(\d{3})(\d)/,'$1.$2.$3').replace(/\.(\d{3})(\d{1,2})$/,'.$1-$2'); }
+    if(tipo==='cep'){ d=d.slice(0,8); return d.length>5 ? d.slice(0,5)+'-'+d.slice(5) : d; }
+    if(tipo==='sus'){ d=d.slice(0,15); return [d.slice(0,3),d.slice(3,7),d.slice(7,11),d.slice(11)].filter(Boolean).join(' '); }
+    if(tipo==='nis'){ return d.slice(0,11); }
+    if(tipo==='tel'){ d=d.slice(0,11); if(d.length<=2) return d.length? '('+d : d; if(d.length<=6) return '('+d.slice(0,2)+') '+d.slice(2);
+      if(d.length<=10) return '('+d.slice(0,2)+') '+d.slice(2,6)+'-'+d.slice(6); return '('+d.slice(0,2)+') '+d.slice(2,7)+'-'+d.slice(7); }
+    return v;
+  }
+  document.querySelectorAll('[data-mask]').forEach(function(el){
+    el.addEventListener('input', function(){ el.value = mascara(el.dataset.mask, el.value); });
+    el.value = mascara(el.dataset.mask, el.value);
+  });
+
+  function cpfValido(c){
+    c=(c||'').replace(/\D/g,''); if(c.length!==11 || /^(\d)\1{10}$/.test(c)) return false;
+    for(var n=9;n<11;n++){ var s=0; for(var i=0;i<n;i++) s+= +c[i]*(n+1-i); if(((s*10)%11)%10 !== +c[n]) return false; }
+    return true;
+  }
+  window.pmCpfValido = cpfValido;
+  var cpf=document.getElementById('pm-cpf'), semCpf=document.getElementById('pm-sem-cpf'), cpfMsg=document.getElementById('pm-cpf-msg'),
+      cpfAjuda=document.getElementById('pm-cpf-ajuda'), cpfObr=document.getElementById('pm-cpf-obr');
+  function checaCpf(){
+    if(!cpf) return true;
+    var sem = semCpf && semCpf.checked;
+    if(cpfAjuda) cpfAjuda.classList.toggle('pm-escondido', !sem);
+    if(cpfObr) cpfObr.style.visibility = sem ? 'hidden' : 'visible';
+    cpf.disabled = !!sem; if(sem) cpf.value='';
+    var dig=cpf.value.replace(/\D/g,'');
+    var msg='';
+    if(!sem && window.PM_PUBLICO && !dig) msg='Informe o CPF do estudante ou marque que ele ainda não tem CPF.';
+    else if(dig && dig.length===11 && !cpfValido(dig)) msg='CPF inválido — confira os números.';
+    else if(dig && dig.length<11) msg='CPF incompleto.';
+    cpf.setCustomValidity(msg); if(cpfMsg) cpfMsg.textContent = (dig.length===11 || msg && cpfMsg.dataset.mostrou) ? msg : (cpfMsg.textContent && msg ? msg : '');
+    return !msg;
+  }
+  window.pmChecaCpf = function(){ if(cpfMsg) cpfMsg.dataset.mostrou='1'; var ok=checaCpf(); if(cpfMsg) cpfMsg.textContent = cpf.validationMessage; return ok; };
+  if(cpf){ cpf.addEventListener('input', checaCpf); cpf.addEventListener('blur', window.pmChecaCpf); }
+  if(semCpf){ semCpf.addEventListener('change', checaCpf); }
+  checaCpf();
+
+  // Campos que aparecem conforme a resposta (data-mostra="campo=valor")
+  function atualizaCondicionais(){
+    document.querySelectorAll('[data-mostra]').forEach(function(box){
+      var p=box.dataset.mostra.split('='), marcado=document.querySelector('input[name="'+p[0]+'"]:checked');
+      var vis = !!(marcado && marcado.value===p[1]);
+      box.classList.toggle('pm-escondido', !vis);
+      box.querySelectorAll('[data-req-cond]').forEach(function(el){ el.required = vis; });
+    });
+  }
+  document.querySelectorAll('input[type=radio]').forEach(function(r){ r.addEventListener('change', atualizaCondicionais); });
+  atualizaCondicionais();
+  window.pmAtualizaCondicionais = atualizaCondicionais;
+
+  window.pmCopiaResp = function(){
+    var a=document.getElementById('pm-resp1_nome'), b=document.getElementById('pm-respleg_nome');
+    if(a && b){ b.value = titulo(a.value); b.dispatchEvent(new Event('input')); }
+  };
+
+  // CEP → endereço (ViaCEP)
+  var cep=document.getElementById('pm-cep'), st=document.getElementById('pm-cep-status'), ultimo='';
+  function preenche(id, val){ var el=document.getElementById(id); if(el && val){ el.value=val; } }
+  if(cep){ cep.addEventListener('input', function(){
+    var d=cep.value.replace(/\D/g,'');
+    if(d.length!==8 || d===ultimo) return; ultimo=d;
+    st.style.color='#6b7280'; st.textContent='Buscando endereço…';
+    fetch('https://viacep.com.br/ws/'+d+'/json/').then(function(r){ return r.json(); }).then(function(j){
+      if(j.erro){ st.style.color='#b91c1c'; st.textContent='CEP não encontrado — preencha o endereço manualmente.'; return; }
+      preenche('pm-logradouro', j.logradouro); preenche('pm-bairro', j.bairro); preenche('pm-municipio', j.localidade);
+      var uf=document.getElementById('pm-uf'); if(uf && j.uf) uf.value=j.uf;
+      st.style.color='#15803d'; st.textContent='✓ Endereço encontrado. Confira e informe o número.';
+      var n=document.getElementById('pm-numero'); if(n) n.focus();
+    }).catch(function(){ st.style.color='#b45309'; st.textContent='Não foi possível buscar o CEP agora — preencha o endereço manualmente.'; });
+  }); }
+})();
+</script>
+"""
+
+
+# ---------- página pública ----------
+
+_PM_DOCUMENTOS_HTML = """
+<div class="pm-aviso vermelho" style="font-size:15px;"><strong>ATENÇÃO: O CPF DO ESTUDANTE É DOCUMENTO OBRIGATÓRIO!</strong></div>
+<ul style="margin:0 0 8px 18px; padding:0; line-height:1.7; font-size:14px;">
+  <li>Cópia da Certidão de Nascimento do aluno;</li>
+  <li>Cópia da Identidade e CPF do aluno;</li>
+  <li>Cópia do Cartão do Auxílio Brasil ou Bolsa Família (caso possua);</li>
+  <li>Cópia do Cartão do SUS;</li>
+  <li>Cópia do Comprovante de Residência atualizado em nome do responsável (água, luz ou telefone fixo);</li>
+  <li>Cópia da Identidade e CPF do responsável;</li>
+  <li>Declaração de transferência da escola anterior (Original);</li>
+  <li>3 fotos 3x4 recentes;</li>
+  <li>Caso o estudante possua algum tipo de transtorno ou deficiência, apresentar <strong>laudo médico atualizado</strong>, especificando a condição, com <strong>CID</strong> e se existe ou não indicação de cuidador.</li>
+</ul>"""
+
+_PM_SECOES_ORDEM = ["aluno", "endereco", "saude", "responsaveis", "matricula", "pesquisa"]
+_PM_CAMPO_SECAO = {}
+for _sec, _campos in {
+    "aluno": ["aluno_nome", "data_nascimento", "sexo", "cpf", "sem_cpf", "cor_raca", "naturalidade", "naturalidade_uf", "cartao_sus"],
+    "endereco": ["cep", "logradouro", "numero", "complemento", "bairro", "municipio", "uf", "telefone", "contato_celular", "contato_email"],
+    "saude": ["deficiencia", "deficiencia_desc", "programa_governo", "programa_qual", "nis"],
+    "responsaveis": ["resp1_nome", "resp1_parentesco", "resp1_rg", "resp2_nome", "resp2_parentesco", "resp2_rg", "respleg_nome", "respleg_trabalho", "respleg_tel_trabalho"],
+    "matricula": ["ano_solicitado"],
+    "pesquisa": ["origem_escola", "origem_outra", "transporte", "turno_pref", "horario_especifico", "horario_motivo"],
+}.items():
+    for _c in _campos:
+        _PM_CAMPO_SECAO[_c] = _sec
+
+_PM_ENVIOS = {}   # ip -> [timestamps] (limite simples contra envio automático em massa)
+
+
+def _pm_pagina_publica(titulo: str, corpo: str) -> HTMLResponse:
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{titulo} · E.M. Walmir de Freitas Monteiro</title>
+<meta name="robots" content="noindex">
+{INTER_FONT}
+{_PM_CSS}
+<style>
+  body {{ margin:0; background:#f1f5f9; font-family:'Inter', -apple-system, 'Segoe UI', sans-serif; }}
+  .pm-topo {{ background:linear-gradient(135deg,#1e3a8a,#2563eb); color:#fff; padding:18px 16px 54px; }}
+  .pm-topo .pm-wrap {{ display:flex; align-items:center; gap:14px; }}
+  .pm-topo img {{ height:54px; background:#fff; border-radius:10px; padding:4px; }}
+  .pm-topo h1 {{ margin:0; font-size:20px; line-height:1.2; }}
+  .pm-topo p {{ margin:2px 0 0; font-size:13px; opacity:.9; }}
+  .pm-wrap {{ max-width:760px; margin:0 auto; }}
+  .pm-corpo {{ max-width:760px; margin:-40px auto 40px; padding:0 12px; }}
+  .pm-prog {{ background:#fff; border-radius:14px; padding:12px 16px; margin-bottom:14px; border:1px solid #d6dbe4; }}
+  .pm-prog-barra {{ height:8px; background:#e5e7eb; border-radius:6px; overflow:hidden; margin-top:6px; }}
+  .pm-prog-barra div {{ height:100%; background:#2563eb; width:0; transition:width .3s; }}
+  .pm-nav {{ display:flex; justify-content:space-between; gap:10px; margin:8px 0 18px; }}
+  .pm-resumo dt {{ font-size:12px; color:#6b7280; margin-top:6px; }}
+  .pm-resumo dd {{ margin:0; font-size:15px; font-weight:600; }}
+  .pm-rodape {{ text-align:center; font-size:12px; color:#6b7280; margin:20px 0; }}
+</style></head><body class="pm">
+<div class="pm-topo"><div class="pm-wrap">
+  <img src="/static/imagens/logo_walmir.png" alt="Logo da escola" onerror="this.style.display='none'">
+  <div><h1>E.M. Walmir de Freitas Monteiro</h1><p>Secretaria Municipal de Educação · Volta Redonda — RJ</p></div>
+</div></div>
+<div class="pm-corpo">{corpo}</div>
+<div class="pm-rodape">E.M. Walmir de Freitas Monteiro · Pré-matrícula online</div>
+</body></html>""")
+
+
+@app.get("/pre-matricula", response_class=HTMLResponse)
+def pre_matricula_form(request: Request):
+    conn = get_db()
+    cfg = _pm_config(conn)
+    conn.close()
+    return _pm_render_publico(cfg, {}, {})
+
+
+def _pm_render_publico(cfg: dict, d: dict, erros: dict) -> HTMLResponse:
+    if cfg.get("aberta") != "1":
+        return _pm_pagina_publica("Pré-matrícula", f"""
+            <div class="pm-sec"><h2>Pré-matrícula encerrada</h2>
+            <p>O formulário de pré-matrícula não está recebendo respostas neste momento. Em caso de dúvida, procure a secretaria da escola.</p>
+            <p><strong>Período de matrícula:</strong> {html.escape(cfg["periodo"])}<br><strong>Horário:</strong> {html.escape(cfg["horario"])}</p></div>""")
+    secoes = _pm_secoes_html(d, erros)
+    etapa_inicial = 0
+    if erros:
+        primeira = next((_PM_CAMPO_SECAO.get(c) for c in erros if _PM_CAMPO_SECAO.get(c)), None)
+        etapa_inicial = (_PM_SECOES_ORDEM.index(primeira) + 1) if primeira else len(_PM_SECOES_ORDEM) + 1
+    aviso_erros = ""
+    if erros:
+        aviso_erros = ('<div class="pm-aviso vermelho"><strong>Confira os campos destacados em vermelho.</strong><ul style="margin:4px 0 0 18px; padding:0;">'
+                       + "".join(f"<li>{html.escape(m)}</li>" for m in list(erros.values())[:12]) + "</ul></div>")
+    extra = f'<div class="pm-aviso azul">{html.escape(cfg["mensagem_extra"])}</div>' if cfg.get("mensagem_extra") else ""
+    boas_vindas = f"""
+        <section class="pm-sec pm-etapa" data-nome="Boas-vindas">
+            <h2>👋 Seja bem-vindo(a) à E.M. Walmir de Freitas Monteiro!</h2>
+            <p style="font-size:15px; line-height:1.6;">Este é o formulário de <strong>pré-matrícula</strong> para estudantes que estão vindo de outra unidade escolar.
+            Preenchendo os dados agora, o atendimento na escola fica <strong>muito mais rápido</strong> no dia da matrícula.</p>
+            <div class="pm-aviso azul" style="font-size:15px;">📅 <strong>Período de efetivação da matrícula:</strong> {html.escape(cfg["periodo"])}<br>
+            🕗 <strong>Horário:</strong> {html.escape(cfg["horario"])}</div>
+            <div class="pm-aviso amarelo">A pré-matrícula <strong>não garante a vaga</strong>: a matrícula só é efetivada na escola, com a entrega dos documentos e a assinatura da ficha pelo responsável.</div>
+            {extra}
+            <h3 style="font-size:16px; margin:14px 0 6px;">📁 Documentação para matrícula</h3>
+            {_PM_DOCUMENTOS_HTML}
+            <p style="font-size:13px; color:#6b7280;">O preenchimento leva cerca de 10 minutos. Os campos com <span style="color:#b91c1c;">*</span> são obrigatórios.</p>
+        </section>"""
+    etapas = "".join(f'<section class="pm-sec pm-etapa" data-nome="{t}">{secoes[n]}</section>' for n, t in
+                     zip(_PM_SECOES_ORDEM, ["Estudante", "Endereço", "Saúde", "Responsáveis", "Matrícula", "Perguntas"]))
+    revisao = """
+        <section class="pm-sec pm-etapa" data-nome="Revisão">
+            <h2>✅ Confira os dados antes de enviar</h2><p class="pm-sub">Se algo estiver errado, use o botão “Voltar”.</p>
+            <dl class="pm-resumo" id="pm-resumo"></dl>
+            <label style="display:flex; gap:10px; align-items:flex-start; margin:14px 0; font-size:14px; line-height:1.5;">
+                <input type="checkbox" name="consentimento" value="1" required style="width:20px; height:20px; margin-top:2px; flex:none;">
+                <span>Declaro que as informações são verdadeiras e autorizo a E.M. Walmir de Freitas Monteiro a usar estes dados
+                <strong>somente para a matrícula</strong> do estudante (Lei Geral de Proteção de Dados — LGPD).</span></label>
+        </section>"""
+    rotulos = {**PM_ROTULOS, "consentimento": "Consentimento"}
+    corpo = f"""
+        <div class="pm-prog"><div style="display:flex; justify-content:space-between; font-size:13px;"><strong id="pm-prog-nome">Boas-vindas</strong><span id="pm-prog-n"></span></div>
+            <div class="pm-prog-barra"><div id="pm-prog-barra"></div></div></div>
+        {aviso_erros}
+        <form method="post" action="/pre-matricula" id="pm-form" novalidate>
+            <input type="text" name="website" value="" tabindex="-1" autocomplete="off" style="position:absolute; left:-9999px;" aria-hidden="true">
+            {boas_vindas}{etapas}{revisao}
+            <div class="pm-nav">
+                <button type="button" class="pm-btn" id="pm-voltar">← Voltar</button>
+                <button type="button" class="pm-btn primario" id="pm-proximo">Começar →</button>
+                <button type="submit" class="pm-btn primario pm-escondido" id="pm-enviar">📨 Enviar pré-matrícula</button>
+            </div>
+        </form>
+        {_PM_JS_CAMPOS}
+        <script>
+        window.PM_PUBLICO = true;
+        (function(){{
+          var etapas = Array.prototype.slice.call(document.querySelectorAll('.pm-etapa')), atual = {etapa_inicial};
+          var bV = document.getElementById('pm-voltar'), bP = document.getElementById('pm-proximo'), bE = document.getElementById('pm-enviar');
+          var ROT = {json.dumps(rotulos, ensure_ascii=False)};
+          function mostra(i){{
+            etapas.forEach(function(s,k){{ s.classList.toggle('pm-escondido', k!==i); }});
+            atual = i;
+            bV.style.visibility = i===0 ? 'hidden' : 'visible';
+            bP.classList.toggle('pm-escondido', i===etapas.length-1); bE.classList.toggle('pm-escondido', i!==etapas.length-1);
+            bP.textContent = i===0 ? 'Começar →' : 'Próximo →';
+            document.getElementById('pm-prog-nome').textContent = etapas[i].dataset.nome;
+            document.getElementById('pm-prog-n').textContent = 'Etapa ' + (i+1) + ' de ' + etapas.length;
+            document.getElementById('pm-prog-barra').style.width = (100*(i+1)/etapas.length) + '%';
+            if(i===etapas.length-1) resumo();
+            window.scrollTo({{top:0, behavior:'smooth'}});
+          }}
+          function valida(sec){{
+            if(sec.querySelector('#pm-cpf') && window.pmChecaCpf) window.pmChecaCpf();
+            var campos = sec.querySelectorAll('input, select, textarea');
+            for(var k=0;k<campos.length;k++){{
+              var c = campos[k]; if(c.disabled || c.closest('.pm-escondido')) continue;
+              if(c.hasAttribute('data-tc')) c.value = window.pmTitulo(c.value);
+              if(!c.checkValidity()){{ c.reportValidity(); c.focus(); return false; }}
+            }}
+            return true;
+          }}
+          function valorDe(nome){{
+            var els = document.querySelectorAll('[name="'+nome+'"]'); if(!els.length) return '';
+            var e = els[0];
+            if(e.type==='radio'){{ var m = document.querySelector('[name="'+nome+'"]:checked'); return m ? m.parentNode.textContent.trim() : ''; }}
+            if(e.type==='checkbox') return e.checked ? 'Sim' : '';
+            if(e.tagName==='SELECT') return e.value ? e.options[e.selectedIndex].text : '';
+            if(e.type==='date' && e.value){{ var p=e.value.split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }}
+            return e.value;
+          }}
+          function resumo(){{
+            var dl = document.getElementById('pm-resumo'), h='';
+            Object.keys(ROT).forEach(function(n){{
+              var el = document.querySelector('[name="'+n+'"]'); if(!el || el.closest('[data-mostra].pm-escondido')) return;
+              if(n==='consentimento') return;
+              var v = valorDe(n); if(!v) return;
+              h += '<dt>'+ROT[n]+'</dt><dd>'+v.replace(/</g,'&lt;')+'</dd>';
+            }});
+            dl.innerHTML = h;
+          }}
+          bP.addEventListener('click', function(){{ if(atual===0 || valida(etapas[atual])) mostra(atual+1); }});
+          bV.addEventListener('click', function(){{ if(atual>0) mostra(atual-1); }});
+          document.getElementById('pm-form').addEventListener('submit', function(ev){{
+            for(var k=1;k<etapas.length;k++){{ if(!valida(etapas[k])){{ ev.preventDefault(); mostra(k); valida(etapas[k]); return; }} }}
+            bE.disabled = true; bE.textContent = 'Enviando…';
+          }});
+          mostra(atual);
+        }})();
+        </script>"""
+    return _pm_pagina_publica("Pré-matrícula", corpo)
+
+
+@app.post("/pre-matricula", response_class=HTMLResponse)
+async def pre_matricula_enviar(request: Request):
+    form = await request.form()
+    conn = get_db()
+    cfg = _pm_config(conn)
+    if cfg.get("aberta") != "1":
+        conn.close()
+        return _pm_render_publico(cfg, {}, {})
+    if form.get("website"):          # campo-isca invisível: só robô preenche
+        conn.close()
+        return RedirectResponse("/pre-matricula", status_code=303)
+    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "") or "").split(",")[0].strip()
+    agora = time.time()
+    lista = [t for t in _PM_ENVIOS.get(ip, []) if agora - t < 3600]
+    if len(lista) >= 40:
+        conn.close()
+        return _pm_pagina_publica("Pré-matrícula", '<div class="pm-sec"><h2>Muitos envios</h2><p>Foram feitos muitos envios a partir desta conexão. Tente novamente mais tarde ou procure a secretaria.</p></div>')
+    d = _pm_ler_form(form)
+    erros = _pm_erros_dict(_pm_validar(d))
+    if not form.get("consentimento"):
+        erros["consentimento"] = "Marque a declaração/autorização no final do formulário."
+    if erros:
+        conn.close()
+        return _pm_render_publico(cfg, d, erros)
+    token = secrets.token_urlsafe(18)
+    cols = PM_CAMPOS_FORM
+    cur = conn.execute(f"""INSERT INTO prematriculas (token, ano_letivo, {", ".join(cols)}, status, consentimento, ip)
+                           VALUES (?, ?, {", ".join("?" * len(cols))}, 'recebida', 1, ?)""",
+                       [token, int(cfg["ano_letivo"]) if str(cfg["ano_letivo"]).isdigit() else date.today().year + 1]
+                       + [d.get(c) or None for c in cols] + [ip[:60]])
+    pid = cur.lastrowid
+    protocolo = f"PM{str(cfg['ano_letivo'])[-2:]}-{pid:04d}"
+    conn.execute("UPDATE prematriculas SET protocolo = ? WHERE id = ?", (protocolo, pid))
+    conn.execute("INSERT INTO prematricula_historico (prematricula_id, acao, detalhe) VALUES (?, 'envio', 'pré-matrícula enviada pelo responsável')", (pid,))
+    conn.commit()
+    conn.close()
+    lista.append(agora)
+    _PM_ENVIOS[ip] = lista
+    return RedirectResponse(f"/pre-matricula/enviada/{token}", status_code=303)
+
+
+def _pm_por_token(conn, token):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", token or ""):
+        return None
+    return conn.execute("SELECT * FROM prematriculas WHERE token = ?", (token,)).fetchone()
+
+
+@app.get("/pre-matricula/enviada/{token}", response_class=HTMLResponse)
+def pre_matricula_enviada(token: str):
+    conn = get_db()
+    r = _pm_por_token(conn, token)
+    cfg = _pm_config(conn)
+    conn.close()
+    if not r:
+        return RedirectResponse("/pre-matricula", status_code=303)
+    aviso_cpf = ""
+    if r["sem_cpf"]:
+        aviso_cpf = (f'<div class="pm-aviso vermelho">Você informou que o estudante <strong>ainda não tem CPF</strong>. O CPF é obrigatório para efetivar a matrícula: '
+                     f'faça a inscrição gratuita pela internet em <a href="{PM_CPF_LINK}" target="_blank" rel="noopener">Inscrição no CPF (Receita Federal)</a> antes de vir à escola.</div>')
+    corpo = f"""
+        <div class="pm-sec" style="text-align:center;">
+            <div style="font-size:46px;">✅</div>
+            <h2 style="font-size:22px;">Pré-matrícula enviada!</h2>
+            <p style="font-size:15px;">Estudante: <strong>{html.escape(r["aluno_nome"] or "")}</strong> · {html.escape(r["ano_solicitado"] or "")}º ano</p>
+            <p style="font-size:15px;">Protocolo: <strong style="font-size:20px; letter-spacing:1px;">{html.escape(r["protocolo"] or "")}</strong><br>
+            <span style="font-size:13px; color:#6b7280;">Anote ou tire um print desta tela.</span></p>
+        </div>
+        <div class="pm-sec">
+            <h2>📅 Próximo passo: ir à escola</h2>
+            <div class="pm-aviso azul" style="font-size:15px;"><strong>Período de matrícula:</strong> {html.escape(cfg["periodo"])}<br><strong>Horário:</strong> {html.escape(cfg["horario"])}</div>
+            <p style="font-size:14px;">Na escola, a equipe confere os dados, recebe os documentos e o responsável <strong>assina a ficha de matrícula</strong>.
+            A pré-matrícula não garante a vaga nem o turno de preferência.</p>
+            {aviso_cpf}
+            <h3 style="font-size:16px; margin:14px 0 6px;">📁 Leve a documentação</h3>
+            {_PM_DOCUMENTOS_HTML}
+            <div style="display:flex; flex-wrap:wrap; gap:10px; margin:12px 0;">
+                <a class="pm-btn" href="/pre-matricula/ficha/{html.escape(token)}" target="_blank">🖨️ Ver/imprimir a ficha preenchida</a>
+                <a class="pm-btn primario" href="/pre-matricula">➕ Fazer outra pré-matrícula (outro filho)</a>
+            </div>
+        </div>"""
+    return _pm_pagina_publica("Pré-matrícula enviada", corpo)
+
+
+# ---------- ficha de matrícula (modelo da SME) ----------
+
+_PM_FICHA_CSS = """
+<style>
+  @media print { @page { size: A4; margin: 10mm 12mm; } .no-print { display:none !important; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  body { margin:0; background:#fff; font-family: Arial, Helvetica, sans-serif; color:#000; }
+  .fm-pag { width: 186mm; margin: 0 auto; padding: 4mm 0; font-size: 10.5px; page-break-after: always; break-after: page; }
+  .fm-pag:last-child { page-break-after: auto; break-after: auto; }
+  .fm-cab { display:flex; gap:10px; align-items:center; }
+  .fm-cab img { width: 42px; }
+  .fm-cab .t { font-size: 10px; line-height: 1.35; }
+  .fm-ue { margin: 8px 0 2px; font-weight: 700; font-size: 10.5px; }
+  .fm-ue span, .fm-v { font-weight: 400; border-bottom: 1px solid #000; display:inline-block; padding: 0 4px 1px; min-height: 13px; }
+  .fm-tit { text-align:center; font-weight:700; letter-spacing: 4px; font-size: 13px; margin-top: 6px; }
+  .fm-sub { text-align:center; font-weight:700; font-size: 10px; margin-bottom: 6px; }
+  .fm-box { border: 1px solid #000; margin-bottom: 8px; }
+  .fm-box-t { text-align:center; font-weight:700; border-bottom:1px solid #000; padding:2px; font-size: 11px; }
+  .fm-lin { display:flex; align-items:flex-end; gap:6px; padding: 5px 6px 0; }
+  .fm-lin > div { display:flex; align-items:flex-end; gap:4px; }
+  .fm-r { white-space: nowrap; }
+  .fm-v { flex:1; font-family: Arial, sans-serif; font-size: 11px; font-weight: 600; }
+  .fm-chk { display:inline-block; width: 13px; height: 12px; border: 1px solid #000; text-align:center; line-height: 12px; font-size: 10px; font-weight:700; vertical-align: middle; margin: 0 3px; }
+  .fm-sol { display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; text-align:center; }
+  .fm-sol > div { border-right:1px solid #000; padding: 6px 4px; min-height: 58px; }
+  .fm-sol > div:last-child { border-right: none; }
+  .fm-sol .h { font-weight:700; }
+  .fm-decl { border:1px solid #000; padding: 10px 14px; font-size: 11px; line-height: 1.7; margin-top: 6px; }
+  .fm-ass { text-align:center; margin-top: 26px; }
+  .fm-ass div { border-top: 1px solid #000; width: 75mm; margin: 0 auto; padding-top: 2px; }
+  .fm-anexo h3 { font-size: 13px; margin: 10px 0 6px; border-bottom: 1px solid #000; }
+  .fm-anexo table { width:100%; border-collapse: collapse; font-size: 11px; }
+  .fm-anexo td { border: 1px solid #999; padding: 4px 6px; vertical-align: top; }
+  .fm-anexo td.k { width: 42mm; background:#f2f2f2; font-weight: 700; }
+  .fm-acoes { text-align:center; margin: 10px 0; }
+  .fm-acoes button, .fm-acoes a { font-size: 14px; padding: 8px 16px; margin: 0 4px; cursor: pointer; }
+</style>"""
+
+
+def _pm_ficha_html(r, cfg: dict, anexo: bool = True) -> str:
+    g = lambda c: html.escape(str(r[c] or "")) if c in r.keys() and r[c] else ""
+    x = lambda cond: "X" if cond else "&nbsp;"
+    nasc = _fmt_data_br(r["data_nascimento"]) if r["data_nascimento"] else ""
+    endereco = ", ".join(p for p in [r["logradouro"], r["numero"], r["complemento"]] if p)
+    nat = (r["naturalidade"] or "") + (f' — {r["naturalidade_uf"]}' if r["naturalidade_uf"] else "")
+    muni = (r["municipio"] or "") + (f' — {r["uf"]}' if r["uf"] else "")
+    tel = " / ".join(t for t in [r["contato_celular"], r["telefone"]] if t)
+    resp = lambda n: html.escape(" ".join(p for p in [r[f"resp{n}_nome"], f'({r[f"resp{n}_parentesco"]})' if r[f"resp{n}_parentesco"] else ""] if p))
+    reg = r["registrado"] if "registrado" in r.keys() else None
+    regp = r["registrado_pai"] if "registrado_pai" in r.keys() else None
+    mdata = r["matricula_data"] if "matricula_data" in r.keys() and r["matricula_data"] else ""
+    md = mdata.split("-") if mdata else ["", "", ""]
+    ano = r["ano_solicitado"] or ""
+    def lin(*partes):
+        return '<div class="fm-lin">' + "".join(partes) + "</div>"
+    def campo(rot, val, flex="1"):
+        return f'<div style="flex:{flex};"><span class="fm-r">{rot}</span><span class="fm-v">{val or "&nbsp;"}</span></div>'
+    frente = f"""
+    <div class="fm-pag">
+      <div class="fm-cab"><img src="/static/imagens/brasao_vr.png" alt="" onerror="this.style.visibility='hidden'">
+        <div class="t">Estado do Rio de Janeiro<br>Prefeitura Municipal de Volta Redonda<br>Secretaria Municipal de Educação</div></div>
+      <div class="fm-ue" style="display:flex; gap:4px;"><span style="border:none; padding:0; font-weight:700;">UNIDADE EDUCACIONAL :</span><span style="flex:1;">E.M. WALMIR DE FREITAS MONTEIRO</span></div>
+      <div class="fm-ue" style="display:flex; gap:4px;"><span style="border:none; padding:0; font-weight:700;">ENDEREÇO:</span><span style="flex:1;">{html.escape(cfg.get("endereco_escola") or "")}&nbsp;</span></div>
+      <div class="fm-tit">FICHA DE MATRÍCULA</div>
+      <div class="fm-sub">EDUCAÇÃO INFANTIL E ENSINO FUNDAMENTAL</div>
+      <div class="fm-box"><div class="fm-box-t">DADOS SOBRE O ALUNO</div>
+        {lin(campo("NOME :", g("aluno_nome")))}
+        {lin(campo("DATA DE NASCIMENTO:", nasc, "1.3"), f'<div style="flex:1; justify-content:flex-end;">SEXO : <span class="fm-chk">{x(r["sexo"] == "M")}</span>MASC. <span class="fm-chk">{x(r["sexo"] == "F")}</span>FEM.</div>')}
+        {lin(campo("CPF:", html.escape(r["cpf"] or ("NÃO POSSUI (providenciar)" if r["sem_cpf"] else "")), "1.2"), campo("COR/RAÇA:", g("cor_raca")))}
+        {lin(campo("NATURAL DE :", html.escape(nat), "1.2"), campo("CARTÃO DO SUS:", g("cartao_sus")))}
+        {lin(campo("ENDEREÇO:", html.escape(endereco), "3"), campo("CEP :", g("cep"), "1"))}
+        {lin(campo("BAIRRO:", g("bairro")), campo("MUNICÍPIO:", html.escape(muni)), campo("TEL:", html.escape(tel), "1.3"))}
+        {lin(f'<div style="flex:none;">POSSUI DEFICIÊNCIA: <span class="fm-chk">{x(r["deficiencia"] == "sim")}</span>SIM <span class="fm-chk">{x(r["deficiencia"] == "nao")}</span>NÃO</div>', campo("Especifique:", g("deficiencia_desc")))}
+        {lin(f'<div style="flex:none;">BENEFICIADO POR PROGRAMA DO GOVERNO: <span class="fm-chk">{x(r["programa_governo"] == "sim")}</span>SIM</div>', campo("Qual?:", g("programa_qual")), campo("NIS:", g("nis"), "0.8"))}
+        <div style="height:5px;"></div>
+      </div>
+      <div class="fm-box">
+        {lin(campo("RESPONSÁVEL :", resp(1), "3"), campo("R.G. :", g("resp1_rg")))}
+        {lin(campo("RESPONSÁVEL:", resp(2), "3"), campo("R.G.:", g("resp2_rg")))}
+        <div style="height:5px;"></div>
+      </div>
+      <div class="fm-box">
+        {lin(f'<div>A CRIANÇA/ADOLESCENTE É REGISTRADA? &nbsp; SIM ( {x(reg == "sim")} ) &nbsp; NÃO ( {x(reg == "nao")} )</div>')}
+        {lin('<div>EM CASO POSITIVO, REGISTRAR:</div>')}
+        {lin(campo("Nº DO TERMO:", g("reg_termo"), "2"), campo("LIVRO:", g("reg_livro")), campo("FOLHAS:", g("reg_folhas")))}
+        {lin(f'<div>A CRIANÇA/ADOLESCENTE É REGISTRADA EM NOME DO PAI? &nbsp; SIM ( {x(regp == "sim")} ) &nbsp; NÃO ( {x(regp == "nao")} )</div>')}
+        <div style="height:5px;"></div>
+      </div>
+      <div class="fm-box">
+        {lin(campo("NOME DO RESPONSÁVEL :", g("respleg_nome")))}
+        {lin(campo("EMPRESA OU LOCAL DE TRABALHO:", g("respleg_trabalho"), "2"), campo("TEL:", g("respleg_tel_trabalho")))}
+        <div style="height:5px;"></div>
+      </div>
+      <div class="fm-box"><div class="fm-box-t">SOLICITA MATRÍCULA:</div>
+        <div class="fm-sol" style="border-bottom:1px solid #000; font-weight:700;"><div style="grid-column: span 2; min-height:0; padding:2px;">EDUCAÇÃO INFANTIL</div><div style="grid-column: span 2; min-height:0; padding:2px;">ENSINO FUNDAMENTAL</div></div>
+        <div class="fm-sol">
+          <div><div class="h">Creche</div><div style="text-align:left; margin-top:6px;"><span class="fm-chk"></span> Berçário<br><br><span class="fm-chk"></span> Maternal</div></div>
+          <div><div class="h">Pré-Escolar</div><div style="margin-top:6px;"><span class="fm-chk"></span> Período</div></div>
+          <div><div class="h">Anos Iniciais</div><div style="margin-top:10px;"><span class="fm-chk"></span> Ano</div></div>
+          <div><div class="h">Anos Finais</div><div style="margin-top:10px;"><span class="fm-chk" style="width:auto; padding:0 4px;">{html.escape(ano + "º") if ano else "&nbsp;"}</span> Ano</div></div>
+        </div>
+      </div>
+      <div style="font-size:10px; margin-top:-4px; display:flex; align-items:flex-end; gap:3px;">MATRÍCULA REALIZADA EM <span class="fm-v" style="flex:none; min-width:7mm; text-align:center;">{md[2]}</span>/<span class="fm-v" style="flex:none; min-width:7mm; text-align:center;">{md[1]}</span>/<span class="fm-v" style="flex:none; min-width:11mm; text-align:center;">{md[0]}</span>
+        &nbsp; POR: <span class="fm-v" style="flex:1;">{g("matricula_por")}</span></div>
+      <div style="text-align:center; font-size:8px; margin-left:70mm;">Assinatura do Funcionário</div>
+      <div class="fm-decl">
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Comprometo-me cumprir fielmente o Regimento Escolar Único da Rede Municipal de Ensino .<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Declaro estar ciente de que o não comparecimento às aulas até 31 de março, sem justificativa por escrito, implicará no cancelamento da matrícula.
+        <div class="fm-ass"><div>Assinatura do Responsável</div></div>
+      </div>
+      <div style="font-size:8px; color:#555; text-align:right; margin-top:3px;">Pré-matrícula online · protocolo {g("protocolo")}</div>
+    </div>"""
+    if not anexo:
+        return frente
+    orig = PM_ORIGENS.get(r["origem_escola"] or "", "")
+    if r["origem_escola"] == "outra" and r["origem_outra"]:
+        orig += f' — {r["origem_outra"]}'
+    idade = _pm_idade(r["data_nascimento"], date(int(r["ano_letivo"] or date.today().year), 3, 31)) if r["data_nascimento"] else None
+    linhas = [("Protocolo", r["protocolo"]), ("Enviada em", _pm_quando(r["criado_em"])),
+              ("Estudante", r["aluno_nome"]), ("Idade em 31/03", f"{idade} anos" if idade is not None else ""),
+              ("Ano solicitado", f'{ano}º ano' if ano else ""), ("Escola de origem", orig),
+              ("Transporte", PM_TRANSPORTES.get(r["transporte"] or "", "")), ("Turno de preferência", PM_TURNOS.get(r["turno_pref"] or "", "") + " (preferência, não garantia)"),
+              ("Horário específico", ("Sim — " + (r["horario_motivo"] or "")) if r["horario_especifico"] == "sim" else "Não"),
+              ("Deficiência", ("Sim — " + (r["deficiencia_desc"] or "")) if r["deficiencia"] == "sim" else "Não"),
+              ("Contato", " · ".join(t for t in [r["contato_celular"], r["telefone"], r["contato_email"]] if t))]
+    tab = "".join(f'<tr><td class="k">{html.escape(k)}</td><td>{html.escape(str(v or ""))}</td></tr>' for k, v in linhas)
+    docs = ["Certidão de Nascimento do aluno (cópia)", "Identidade e CPF do aluno (cópia)", "Cartão Auxílio Brasil / Bolsa Família (se possuir)",
+            "Cartão do SUS (cópia)", "Comprovante de residência atualizado em nome do responsável", "Identidade e CPF do responsável (cópia)",
+            "Declaração de transferência da escola anterior (original)", "3 fotos 3x4 recentes", "Laudo médico atualizado com CID e indicação de cuidador (se for o caso)"]
+    chk = "".join(f'<tr><td style="width:10mm; text-align:center;">( &nbsp; )</td><td>{d}</td></tr>' for d in docs)
+    return frente + f"""
+    <div class="fm-pag fm-anexo">
+      <div class="fm-cab"><img src="/static/imagens/brasao_vr.png" alt="" onerror="this.style.visibility='hidden'">
+        <div class="t">Estado do Rio de Janeiro<br>Prefeitura Municipal de Volta Redonda<br>Secretaria Municipal de Educação<br><strong>E.M. WALMIR DE FREITAS MONTEIRO</strong></div></div>
+      <h3>Informações da pré-matrícula online</h3>
+      <table>{tab}</table>
+      <h3>Conferência de documentos (secretaria)</h3>
+      <table>{chk}</table>
+      <h3>Observações da secretaria</h3>
+      <div style="min-height:30mm; border:1px solid #999; padding:6px; font-size:11px; white-space:pre-wrap;">{g("obs_secretaria")}</div>
+    </div>"""
+
+
+def _pm_pagina_fichas(fichas_html: str, titulo: str) -> HTMLResponse:
+    return HTMLResponse(f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>{html.escape(titulo)}</title>{_PM_FICHA_CSS}</head><body>
+    <div class="fm-acoes no-print"><button onclick="window.print()">🖨️ Imprimir / Salvar PDF</button> <a href="javascript:window.close()">Fechar</a></div>
+    {fichas_html}
+    <script>window.onload = function() {{ setTimeout(function() {{ window.print(); }}, 500); }};</script></body></html>""")
+
+
+@app.get("/pre-matricula/ficha/{token}", response_class=HTMLResponse)
+def pre_matricula_ficha_publica(token: str):
+    conn = get_db()
+    r = _pm_por_token(conn, token)
+    cfg = _pm_config(conn)
+    conn.close()
+    if not r:
+        return RedirectResponse("/pre-matricula", status_code=303)
+    return _pm_pagina_fichas(_pm_ficha_html(r, cfg, anexo=False), f"Ficha de matrícula — {r['aluno_nome']}")
+
+
+# ---------- telas da equipe ----------
+
+def _pode_prematricula(prof) -> bool:
+    return bool(prof and (prof.get("is_admin") or prof.get("is_gestor") or prof.get("papel") == "gestao"))
+
+
+def _pm_filtros(params) -> dict:
+    g = lambda k: (params.get(k) or "").strip()[:100]
+    return {k: g(k) for k in ("q", "ano", "origem", "turno", "transporte", "status", "deficiencia", "ano_letivo")}
+
+
+def _pm_buscar(conn, f: dict) -> list:
+    cond, params = [], []
+    mapa = {"ano": "ano_solicitado", "origem": "origem_escola", "turno": "turno_pref", "transporte": "transporte",
+            "status": "status", "deficiencia": "deficiencia"}
+    for k, col in mapa.items():
+        if f.get(k):
+            cond.append(f"{col} = ?"); params.append(f[k])
+    if f.get("ano_letivo", "").isdigit():
+        cond.append("ano_letivo = ?"); params.append(int(f["ano_letivo"]))
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    linhas = [dict(r) for r in conn.execute(f"SELECT * FROM prematriculas{where} ORDER BY id DESC", params).fetchall()]
+    # possíveis duplicadas: mesmo CPF, ou mesmo nome + data de nascimento
+    todas = conn.execute("SELECT id, cpf, aluno_nome, data_nascimento FROM prematriculas WHERE status != 'cancelada'").fetchall()
+    cont = {}
+    for t in todas:
+        for chave in ([("cpf", _pm_digitos(t["cpf"]))] if _pm_digitos(t["cpf"]) else []) + [("nn", _nome_comparavel(t["aluno_nome"]) + "|" + (t["data_nascimento"] or ""))]:
+            cont.setdefault(chave, set()).add(t["id"])
+    dup = set()
+    for ids in cont.values():
+        if len(ids) > 1:
+            dup |= ids
+    busca = _nome_comparavel(f.get("q"))
+    busca_dig = _pm_digitos(f.get("q"))
+    saida = []
+    for r in linhas:
+        r["_dup"] = r["id"] in dup
+        if busca:
+            alvo = _nome_comparavel(" ".join(str(r.get(c) or "") for c in ("aluno_nome", "protocolo", "resp1_nome", "resp2_nome", "respleg_nome", "bairro", "origem_outra")))
+            if busca not in alvo and not (len(busca_dig) >= 4 and busca_dig in _pm_digitos(r.get("cpf"))):
+                continue
+        saida.append(r)
+    return saida
+
+
+def _pm_cabecalho_equipe(aba: str, qs: str = "") -> str:
+    abas = [("lista", "📋 Pré-matrículas"), ("analises", "📊 Análises"), ("config", "⚙️ Configurações")]
+    botoes = "".join(f'<a href="/gestao-pre-matricula?aba={k}{("&" + qs) if qs and k != "config" else ""}" class="btn{" btn-primary" if k == aba else ""}">{t}</a>' for k, t in abas)
+    return f"""<div class="page-header"><h1>🎒 Pré-matrícula</h1>
+        <p class="subtitle">Formulário público para os responsáveis: <a href="/pre-matricula" target="_blank">{html.escape(BASE_URL.rstrip("/"))}/pre-matricula</a>
+        <button type="button" class="btn" style="padding:2px 8px; font-size:11px;" onclick="navigator.clipboard.writeText('{html.escape(BASE_URL.rstrip("/"))}/pre-matricula'); this.textContent='✓ copiado';">📋 copiar link</button></p></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">{botoes}</div>"""
+
+
+def _pm_barras(titulo: str, contagem: dict, total: int, rotulos: Optional[dict] = None, ordem: Optional[list] = None) -> str:
+    chaves = ordem if ordem is not None else sorted(contagem, key=lambda k: -contagem[k])
+    linhas = ""
+    for k in chaves:
+        n = contagem.get(k, 0)
+        if not n and ordem is None:
+            continue
+        pct = (100 * n / total) if total else 0
+        linhas += (f'<div style="display:flex; align-items:center; gap:8px; margin:4px 0; font-size:13px;">'
+                   f'<div style="flex:0 0 42%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="{html.escape(str((rotulos or {}).get(k, k)))}">{html.escape(str((rotulos or {}).get(k, k) or "(não informado)"))}</div>'
+                   f'<div style="flex:1; background:var(--bg-subtle); border-radius:4px; height:14px; overflow:hidden;"><div style="width:{pct:.0f}%; height:100%; background:#3b82f6;"></div></div>'
+                   f'<div style="flex:0 0 70px; text-align:right;"><strong>{n}</strong> <span style="color:var(--text-muted); font-size:11px;">{pct:.0f}%</span></div></div>')
+    return f'<div class="card" style="padding:12px 16px; margin:0;"><h3 style="margin:0 0 8px; font-size:14px;">{titulo}</h3>{linhas or "<p style=color:var(--text-muted)>Sem dados.</p>"}</div>'
+
+
+@app.get("/gestao-pre-matricula", response_class=HTMLResponse)
+def gestao_pre_matricula(request: Request, aba: str = "lista", msg: str = ""):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    f = _pm_filtros(request.query_params)
+    qs = urllib.parse.urlencode({k: v for k, v in f.items() if v})
+    conn = get_db()
+    cfg = _pm_config(conn)
+    msg_html = f'<div style="background:#ecfdf5; color:#047857; border:1px solid #10b981; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:13px;">{html.escape(msg)}</div>' if msg else ""
+
+    if aba == "config":
+        conn.close()
+        content = _pm_cabecalho_equipe("config") + msg_html + f"""
+        <form method="post" action="/gestao-pre-matricula/config" class="card" style="padding:16px; max-width:760px;">
+            <label style="display:flex; gap:8px; align-items:center; font-weight:600;"><input type="checkbox" name="aberta" value="1" style="width:auto; margin:0;"{" checked" if cfg["aberta"] == "1" else ""}>
+                Formulário público ABERTO (recebendo pré-matrículas)</label>
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px;">
+                <label style="flex:0 1 160px; margin:0;">Ano letivo da matrícula<input type="number" name="ano_letivo" value="{html.escape(cfg["ano_letivo"])}" min="2025" max="2100"></label>
+                <label style="flex:1 1 240px; margin:0;">Período de efetivação<input type="text" name="periodo" value="{html.escape(cfg["periodo"], quote=True)}" maxlength="120"></label>
+                <label style="flex:1 1 240px; margin:0;">Horário de atendimento<input type="text" name="horario" value="{html.escape(cfg["horario"], quote=True)}" maxlength="120"></label>
+            </div>
+            <label style="margin-top:10px;">Endereço da escola (sai no cabeçalho da ficha de matrícula)<input type="text" name="endereco_escola" value="{html.escape(cfg["endereco_escola"], quote=True)}" maxlength="200" placeholder="Rua …, nº … — Bairro … — Volta Redonda/RJ — CEP …"></label>
+            <label style="margin-top:10px;">Aviso extra na página de boas-vindas (opcional)<textarea name="mensagem_extra" rows="2" maxlength="500">{html.escape(cfg["mensagem_extra"])}</textarea></label>
+            <div class="page-actions"><button type="submit" class="btn btn-primary">Salvar</button></div>
+        </form>"""
+        return HTMLResponse(render_page("Pré-matrícula", content, active="pre-matricula"))
+
+    itens = _pm_buscar(conn, f)
+    anos_letivos = [r[0] for r in conn.execute("SELECT DISTINCT ano_letivo FROM prematriculas WHERE ano_letivo IS NOT NULL ORDER BY 1 DESC").fetchall()]
+    conn.close()
+
+    def opts(dic, atual, vazio):
+        return f'<option value="">{vazio}</option>' + "".join(f'<option value="{k}"{" selected" if atual == k else ""}>{html.escape(t)}</option>' for k, t in dic.items())
+    filtros = f"""
+        <form method="get" class="card" style="padding:12px 14px; margin-bottom:12px;">
+            <input type="hidden" name="aba" value="{html.escape(aba)}">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+                <label style="margin:0; flex:2 1 240px;">🔎 Pesquisar (estudante, responsável, CPF, protocolo, bairro)<input type="search" name="q" value="{html.escape(f["q"], quote=True)}"></label>
+                <label style="margin:0; flex:1 1 110px;">Ano<select name="ano">{opts({str(a): f"{a}º ano" for a in range(6, 10)}, f["ano"], "— todos —")}</select></label>
+                <label style="margin:0; flex:1 1 170px;">Origem<select name="origem">{opts(PM_ORIGENS, f["origem"], "— todas —")}</select></label>
+                <label style="margin:0; flex:1 1 110px;">Turno<select name="turno">{opts(PM_TURNOS, f["turno"], "— todos —")}</select></label>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-top:8px;">
+                <label style="margin:0; flex:1 1 170px;">Transporte<select name="transporte">{opts(PM_TRANSPORTES, f["transporte"], "— todos —")}</select></label>
+                <label style="margin:0; flex:1 1 150px;">Situação<select name="status">{opts(PM_STATUS, f["status"], "— todas —")}</select></label>
+                <label style="margin:0; flex:1 1 130px;">Deficiência<select name="deficiencia">{opts({"sim": "Sim", "nao": "Não"}, f["deficiencia"], "— todos —")}</select></label>
+                <label style="margin:0; flex:1 1 120px;">Ano letivo<select name="ano_letivo">{opts({str(a): str(a) for a in anos_letivos}, f["ano_letivo"], "— todos —")}</select></label>
+                <button type="submit" class="btn btn-primary">Filtrar</button>
+                {f'<a href="/gestao-pre-matricula?aba={aba}" class="btn">Limpar</a>' if qs else ""}
+            </div>
+        </form>"""
+
+    if aba == "analises":
+        total = len(itens)
+        def conta(campo, fn=None):
+            c = {}
+            for r in itens:
+                k = fn(r) if fn else (r.get(campo) or "")
+                if k is None:
+                    continue
+                c[k] = c.get(k, 0) + 1
+            return c
+        idades = {}
+        matriz = {}
+        distorcao = 0
+        for r in itens:
+            ref = date(int(r["ano_letivo"] or date.today().year), 3, 31)
+            i = _pm_idade(r["data_nascimento"], ref)
+            k = f"{i} anos" if i is not None else ""
+            idades[k] = idades.get(k, 0) + 1
+            if i is not None and r["ano_solicitado"]:
+                matriz.setdefault(r["ano_solicitado"], {})
+                matriz[r["ano_solicitado"]][i] = matriz[r["ano_solicitado"]].get(i, 0) + 1
+                if i >= int(r["ano_solicitado"]) + 5 + 2:
+                    distorcao += 1
+        ordem_idades = sorted([k for k in idades if k], key=lambda s: int(s.split()[0])) + ([""] if "" in idades else [])
+        todas_idades = sorted({i for m in matriz.values() for i in m})
+        cab_m = "".join(f'<th style="padding:4px 8px;">{i}</th>' for i in todas_idades)
+        lin_m = ""
+        for a in ("6", "7", "8", "9"):
+            if a not in matriz:
+                continue
+            esperado = int(a) + 5
+            cel = ""
+            for i in todas_idades:
+                n = matriz[a].get(i, 0)
+                cor = "#fee2e2" if (n and i >= esperado + 2) else ("#dcfce7" if n and i <= esperado else ("#fef3c7" if n else "transparent"))
+                cel += f'<td style="padding:4px 8px; text-align:center; background:{cor};">{n or ""}</td>'
+            lin_m += f'<tr><td style="padding:4px 8px; font-weight:600;">{a}º ano <span style="color:var(--text-muted); font-weight:400; font-size:11px;">(esperado {esperado})</span></td>{cel}</tr>'
+        bairros = conta("bairro")
+        top_b = dict(sorted(bairros.items(), key=lambda kv: -kv[1])[:10])
+        turno_ano = {}
+        for r in itens:
+            k = f'{r["ano_solicitado"] or "?"}º ano — {PM_TURNOS.get(r["turno_pref"] or "", "?")}'
+            turno_ano[k] = turno_ano.get(k, 0) + 1
+        cards = lambda t, v, s="": (f'<div class="card" style="padding:10px 14px; flex:1 1 150px; margin:0;"><div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">{t}</div>'
+                                    f'<div style="font-size:24px; font-weight:800;">{v}</div><div style="font-size:11px; color:var(--text-muted);">{s}</div></div>')
+        n_def = sum(1 for r in itens if r["deficiencia"] == "sim")
+        n_sem_cpf = sum(1 for r in itens if r["sem_cpf"])
+        n_manha = sum(1 for r in itens if r["turno_pref"] == "manha")
+        content = _pm_cabecalho_equipe("analises", qs) + filtros + f"""
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+            {cards("Pré-matrículas", total, "com os filtros acima")}
+            {cards("Preferem manhã", n_manha, f"{(100 * n_manha / total if total else 0):.0f}% — haverá sorteio")}
+            {cards("Com deficiência", n_def, "trazer laudo")}
+            {cards("Sem CPF", n_sem_cpf, "precisam providenciar")}
+            {cards("Distorção idade-ano", distorcao, "2+ anos acima do esperado")}
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(330px, 1fr)); gap:12px; margin-bottom:12px;">
+            {_pm_barras("🏫 Origem do estudante", conta("origem_escola"), total, PM_ORIGENS, list(PM_ORIGENS))}
+            {_pm_barras("🎒 Ano solicitado", conta("ano_solicitado"), total, {str(a): f"{a}º ano" for a in range(6, 10)}, ["6", "7", "8", "9"])}
+            {_pm_barras("🎂 Idade em 31/03 do ano letivo", idades, total, None, ordem_idades)}
+            {_pm_barras("🕗 Turno de preferência", conta("turno_pref"), total, PM_TURNOS, list(PM_TURNOS))}
+            {_pm_barras("🕗 Turno × ano", turno_ano, total)}
+            {_pm_barras("🚌 Transporte", conta("transporte"), total, PM_TRANSPORTES, list(PM_TRANSPORTES))}
+            {_pm_barras("🏫 Outras escolas de origem", conta("origem_outra", lambda r: r["origem_outra"] if r["origem_escola"] == "outra" else None) if total else {}, total)}
+            {_pm_barras("📍 Bairros (10 mais)", top_b, total)}
+            {_pm_barras("🎨 Cor/raça (IBGE)", conta("cor_raca"), total, None, PM_CORES_IBGE)}
+            {_pm_barras("👤 Sexo", conta("sexo"), total, {"M": "Masculino", "F": "Feminino"}, ["M", "F"])}
+            {_pm_barras("📌 Situação", conta("status"), total, PM_STATUS, list(PM_STATUS))}
+        </div>
+        <div class="card" style="padding:12px 16px;"><h3 style="margin:0 0 4px; font-size:14px;">📐 Idade (em 31/03) × ano solicitado</h3>
+            <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px;">Verde = idade esperada ou menor · amarelo = 1 ano acima · vermelho = 2 ou mais anos acima (distorção idade-ano).</p>
+            <div style="overflow-x:auto;"><table style="border-collapse:collapse; font-size:13px;"><thead><tr style="background:var(--bg-subtle);"><th style="padding:4px 8px; text-align:left;">Ano \\ idade</th>{cab_m}</tr></thead><tbody>{lin_m}</tbody></table></div></div>"""
+        return HTMLResponse(render_page("Pré-matrícula — análises", content, active="pre-matricula"))
+
+    # lista
+    linhas = ""
+    for r in itens:
+        ref = date(int(r["ano_letivo"] or date.today().year), 3, 31)
+        idade = _pm_idade(r["data_nascimento"], ref)
+        orig = PM_ORIGENS.get(r["origem_escola"] or "", "—") if r["origem_escola"] != "outra" else f'Outra: {r["origem_outra"] or ""}'
+        selos = ""
+        if r["_dup"]:
+            selos += ' <span title="Mesmo CPF ou mesmo nome e data de nascimento em outra pré-matrícula" style="background:#fef3c7; color:#92400e; font-size:10px; padding:1px 6px; border-radius:8px;">possível duplicada</span>'
+        if r["sem_cpf"]:
+            selos += ' <span style="background:#fee2e2; color:#991b1b; font-size:10px; padding:1px 6px; border-radius:8px;">sem CPF</span>'
+        if r["deficiencia"] == "sim":
+            selos += ' <span style="background:#ede9fe; color:#5b21b6; font-size:10px; padding:1px 6px; border-radius:8px;">deficiência</span>'
+        cor_st = {"recebida": "#e0e7ff;#3730a3", "conferida": "#fef3c7;#92400e", "efetivada": "#dcfce7;#166534", "cancelada": "#e5e7eb;#374151"}.get(r["status"], "#e5e7eb;#374151").split(";")
+        linhas += f"""<tr style="border-top:1px solid var(--border);">
+            <td style="padding:6px 8px; white-space:nowrap; font-size:12px;">{html.escape(r["protocolo"] or "")}<div style="color:var(--text-muted);">{_pm_quando(r["criado_em"])[:10]}</div></td>
+            <td style="padding:6px 8px;"><strong>{html.escape(r["aluno_nome"] or "")}</strong>{selos}<div style="font-size:12px; color:var(--text-muted);">Resp.: {html.escape(r["respleg_nome"] or r["resp1_nome"] or "")} · {html.escape(r["contato_celular"] or "")}</div></td>
+            <td style="padding:6px 8px; text-align:center;">{html.escape(r["ano_solicitado"] or "")}º</td>
+            <td style="padding:6px 8px; text-align:center;">{idade if idade is not None else "—"}</td>
+            <td style="padding:6px 8px; font-size:12px;">{html.escape(orig)}</td>
+            <td style="padding:6px 8px; font-size:12px;">{PM_TURNOS.get(r["turno_pref"] or "", "—")}</td>
+            <td style="padding:6px 8px; font-size:12px;">{PM_TRANSPORTES.get(r["transporte"] or "", "—")}</td>
+            <td style="padding:6px 8px;"><span style="background:{cor_st[0]}; color:{cor_st[1]}; font-size:11px; padding:1px 8px; border-radius:10px; white-space:nowrap;">{PM_STATUS.get(r["status"], r["status"])}</span></td>
+            <td style="padding:6px 8px; white-space:nowrap;"><a href="/gestao-pre-matricula/{r["id"]}?{qs}" class="btn" style="padding:2px 8px; font-size:11px;">✏️ Abrir</a>
+                <a href="/gestao-pre-matricula/{r["id"]}/ficha" target="_blank" class="btn" style="padding:2px 8px; font-size:11px;">🖨️ Ficha</a></td>
+        </tr>"""
+    if not linhas:
+        linhas = '<tr><td colspan="9" style="padding:18px; text-align:center; color:var(--text-muted);">Nenhuma pré-matrícula encontrada.</td></tr>'
+    situacao_form = "🟢 aberto" if cfg["aberta"] == "1" else "🔴 fechado"
+    content = _pm_cabecalho_equipe("lista", qs) + msg_html + filtros + f"""
+        <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; margin-bottom:10px;">
+            <div style="font-size:14px;"><strong>{len(itens)}</strong> pré-matrícula(s) · formulário {situacao_form}</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <a href="/gestao-pre-matricula/exportar?{qs}" class="btn">📥 Planilha Excel</a>
+                <a href="/gestao-pre-matricula/fichas?{qs}" target="_blank" class="btn">🖨️ Imprimir fichas (todas as filtradas)</a>
+            </div>
+        </div>
+        <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-subtle);"><th style="padding:8px; text-align:left;">Protocolo</th><th style="padding:8px; text-align:left; min-width:240px;">Estudante</th>
+            <th style="padding:8px;">Ano</th><th style="padding:8px;" title="Idade em 31/03 do ano letivo">Idade</th><th style="padding:8px; text-align:left;">Origem</th>
+            <th style="padding:8px; text-align:left;">Turno</th><th style="padding:8px; text-align:left;">Transporte</th><th style="padding:8px; text-align:left;">Situação</th><th></th></tr></thead>
+            <tbody>{linhas}</tbody></table></div>"""
+    return HTMLResponse(render_page("Pré-matrícula", content, active="pre-matricula"))
+
+
+@app.post("/gestao-pre-matricula/config")
+async def gestao_pre_matricula_config(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    form = await request.form()
+    valores = {"aberta": "1" if form.get("aberta") else "0",
+               "ano_letivo": str(form.get("ano_letivo") or "").strip() if str(form.get("ano_letivo") or "").strip().isdigit() else str(date.today().year + 1),
+               "periodo": " ".join(str(form.get("periodo") or "").split())[:120],
+               "horario": " ".join(str(form.get("horario") or "").split())[:120],
+               "endereco_escola": " ".join(str(form.get("endereco_escola") or "").split())[:200],
+               "mensagem_extra": " ".join(str(form.get("mensagem_extra") or "").split())[:500]}
+    conn = get_db()
+    for k, v in valores.items():
+        conn.execute("INSERT OR REPLACE INTO prematricula_config (chave, valor) VALUES (?, ?)", (k, v))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/gestao-pre-matricula?aba=config&msg=" + urllib.parse.quote("Configurações salvas."), status_code=303)
+
+
+def _pm_tela_edicao(request, r: dict, erros: dict, aviso: str = "") -> HTMLResponse:
+    secoes = _pm_secoes_html(r, erros, staff=True)
+    conn = get_db()
+    hist = conn.execute("""SELECT h.*, p.nome AS quem FROM prematricula_historico h LEFT JOIN professores p ON p.id = h.professor_id
+                           WHERE h.prematricula_id = ? ORDER BY h.id DESC""", (r["id"],)).fetchall()
+    conn.close()
+    hist_html = "".join(f'<tr><td style="padding:4px 8px; white-space:nowrap;">{html.escape(str(h["em"])[:16])}</td><td style="padding:4px 8px;">{html.escape(h["acao"] or "")}</td>'
+                        f'<td style="padding:4px 8px; font-size:12px;">{html.escape(h["detalhe"] or "")}</td><td style="padding:4px 8px;">{html.escape(h["quem"] or "responsável")}</td></tr>' for h in hist)
+    voltar = "/gestao-pre-matricula?" + urllib.parse.urlencode({k: v for k, v in _pm_filtros(request.query_params).items() if v})
+    erro_html = ""
+    if erros:
+        erro_html = ('<div style="background:#fff7ed; color:#9a3412; border:1px solid #fdba74; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:13px;">'
+                     '⚠️ Dados que ainda faltam ou precisam de conferência (dá para salvar assim mesmo):<ul style="margin:4px 0 0 18px;">'
+                     + "".join(f"<li>{html.escape(m)}</li>" for m in erros.values()) + "</ul></div>")
+    content = f"""
+        {_PM_CSS}
+        <div class="page-header"><h1>✏️ {html.escape(r.get("aluno_nome") or "Pré-matrícula")}</h1>
+            <p class="subtitle">Protocolo <strong>{html.escape(r.get("protocolo") or "")}</strong> · enviada em {_pm_quando(r.get("criado_em"))} ·
+            <a href="{voltar}">← voltar à lista</a></p></div>
+        {aviso}{erro_html}
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+            <a href="/gestao-pre-matricula/{r["id"]}/ficha" target="_blank" class="btn btn-primary">🖨️ Imprimir ficha</a>
+            <form method="post" action="/gestao-pre-matricula/{r["id"]}/excluir" onsubmit="return confirm('Excluir esta pré-matrícula? Não dá para desfazer. (Para desistência, prefira mudar a Situação para Cancelada.)');" style="display:inline;">
+                <button type="submit" class="btn" style="color:var(--red);">🗑️ Excluir</button></form>
+        </div>
+        <form method="post" action="/gestao-pre-matricula/{r["id"]}?{request.url.query}" class="pm" style="max-width:900px;">
+            <section class="pm-sec" style="border-color:#f59e0b;">{secoes["secretaria"]}</section>
+            <section class="pm-sec">{secoes["aluno"]}</section>
+            <section class="pm-sec">{secoes["endereco"]}</section>
+            <section class="pm-sec">{secoes["saude"]}</section>
+            <section class="pm-sec">{secoes["responsaveis"]}</section>
+            <section class="pm-sec">{secoes["matricula"]}</section>
+            <section class="pm-sec">{secoes["pesquisa"]}</section>
+            <div style="position:sticky; bottom:0; background:var(--bg); padding:10px 0; border-top:1px solid var(--border);">
+                <button type="submit" class="btn btn-primary">💾 Salvar alterações</button> <a href="{voltar}" class="btn">Cancelar</a></div>
+        </form>
+        {_PM_JS_CAMPOS}
+        <div class="card" style="padding:12px 16px; margin-top:14px; max-width:900px;"><h3 style="margin:0 0 8px; font-size:14px;">🕓 Histórico</h3>
+            <table style="width:100%; border-collapse:collapse; font-size:12px;"><tbody>{hist_html}</tbody></table></div>"""
+    return HTMLResponse(render_page("Pré-matrícula", content, active="pre-matricula"))
+
+
+@app.get("/gestao-pre-matricula/exportar")
+def gestao_pre_matricula_exportar(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    from openpyxl.styles import Font, PatternFill, Alignment
+    conn = get_db()
+    itens = _pm_buscar(conn, _pm_filtros(request.query_params))
+    conn.close()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Pré-matrículas"
+    ws["A1"] = "E.M. WALMIR DE FREITAS MONTEIRO — PRÉ-MATRÍCULAS"
+    ws["A1"].font = Font(bold=True, size=13)
+    ws["A2"] = f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')} · {len(itens)} registro(s)"
+    ws["A2"].font = Font(italic=True, size=9, color="555555")
+    cols = (["protocolo", "criado_em", "status", "ano_letivo"] + PM_CAMPOS_FORM
+            + ["registrado", "reg_termo", "reg_livro", "reg_folhas", "registrado_pai", "matricula_data", "matricula_por", "obs_secretaria"])
+    rot = {**PM_ROTULOS, "protocolo": "Protocolo", "criado_em": "Enviada em", "ano_letivo": "Ano letivo"}
+    cab = [rot.get(c, c) for c in cols] + ["Idade em 31/03"]
+    ws.append([])
+    ws.append(cab)
+    for c in ws[4]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F4E78")
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    conv = {"origem_escola": PM_ORIGENS, "transporte": PM_TRANSPORTES, "turno_pref": PM_TURNOS, "status": PM_STATUS,
+            "sexo": {"M": "Masculino", "F": "Feminino"}, "deficiencia": {"sim": "Sim", "nao": "Não"}, "programa_governo": {"sim": "Sim", "nao": "Não"},
+            "horario_especifico": {"sim": "Sim", "nao": "Não"}, "registrado": {"sim": "Sim", "nao": "Não"}, "registrado_pai": {"sim": "Sim", "nao": "Não"},
+            "sem_cpf": {"1": "Sim"}}
+    for r in itens:
+        linha = []
+        for c in cols:
+            v = r.get(c)
+            if c in conv:
+                v = conv[c].get(str(v or ""), v or "")
+            elif c == "criado_em" and v:
+                v = _pm_quando(v)
+            elif c in ("data_nascimento", "matricula_data") and v:
+                v = _fmt_data_br(v)
+            elif c == "ano_solicitado" and v:
+                v = f"{v}º ano"
+            linha.append(v if v is not None else "")
+        linha.append(_pm_idade(r["data_nascimento"], date(int(r["ano_letivo"] or date.today().year), 3, 31)) or "")
+        ws.append(linha)
+    for i in range(1, len(cab) + 1):
+        ws.column_dimensions[ws.cell(4, i).column_letter].width = 18
+    ws.column_dimensions["E"].width = 36
+    ws.freeze_panes = "F5"
+    ws.auto_filter.ref = f"A4:{ws.cell(4, len(cab)).column_letter}{4 + max(1, len(itens))}"
+    saida = BytesIO()
+    wb.save(saida)
+    saida.seek(0)
+    return StreamingResponse(saida, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="pre_matriculas_{date.today().isoformat()}.xlsx"'})
+
+
+@app.get("/gestao-pre-matricula/fichas", response_class=HTMLResponse)
+def gestao_pre_matricula_fichas(request: Request):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    itens = _pm_buscar(conn, _pm_filtros(request.query_params))
+    cfg = _pm_config(conn)
+    rows = {r["id"]: r for r in conn.execute("SELECT * FROM prematriculas").fetchall()}
+    conn.close()
+    anexo = request.query_params.get("anexo", "1") != "0"
+    fichas = "".join(_pm_ficha_html(rows[i["id"]], cfg, anexo) for i in sorted(itens, key=lambda x: _nome_comparavel(x["aluno_nome"])))
+    if not fichas:
+        fichas = '<p style="text-align:center; margin:40px;">Nenhuma pré-matrícula com esses filtros.</p>'
+    return _pm_pagina_fichas(fichas, f"Fichas de matrícula ({len(itens)})")
+
+
+@app.get("/gestao-pre-matricula/{pid}/ficha", response_class=HTMLResponse)
+def gestao_pre_matricula_ficha(request: Request, pid: int):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT * FROM prematriculas WHERE id = ?", (pid,)).fetchone()
+    cfg = _pm_config(conn)
+    conn.close()
+    if not r:
+        return RedirectResponse("/gestao-pre-matricula", status_code=303)
+    anexo = request.query_params.get("anexo", "1") != "0"
+    return _pm_pagina_fichas(_pm_ficha_html(r, cfg, anexo), f"Ficha de matrícula — {r['aluno_nome']}")
+
+
+@app.get("/gestao-pre-matricula/{pid}", response_class=HTMLResponse)
+def gestao_pre_matricula_abrir(request: Request, pid: int):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT * FROM prematriculas WHERE id = ?", (pid,)).fetchone()
+    conn.close()
+    if not r:
+        return RedirectResponse("/gestao-pre-matricula", status_code=303)
+    r = dict(r)
+    return _pm_tela_edicao(request, r, _pm_erros_dict(_pm_validar(r, staff=True)))
+
+
+@app.post("/gestao-pre-matricula/{pid}", response_class=HTMLResponse)
+async def gestao_pre_matricula_salvar(request: Request, pid: int):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    form = await request.form()
+    conn = get_db()
+    atual = conn.execute("SELECT * FROM prematriculas WHERE id = ?", (pid,)).fetchone()
+    if not atual:
+        conn.close()
+        return RedirectResponse("/gestao-pre-matricula", status_code=303)
+    novo = _pm_ler_form(form, staff=True)
+    mudancas = []
+    for c in PM_CAMPOS_FORM + PM_CAMPOS_SECRETARIA:
+        a, b = (atual[c] or ""), (novo.get(c) or "")
+        if str(a) != str(b):
+            mudancas.append(f"{PM_ROTULOS.get(c, c)}: “{a or '—'}” → “{b or '—'}”")
+    cols = PM_CAMPOS_FORM + PM_CAMPOS_SECRETARIA
+    conn.execute(f"UPDATE prematriculas SET {', '.join(f'{c} = ?' for c in cols)}, atualizado_em = CURRENT_TIMESTAMP, atualizado_por = ? WHERE id = ?",
+                 [novo.get(c) or None for c in cols] + [prof["id"], pid])
+    if mudancas:
+        conn.execute("INSERT INTO prematricula_historico (prematricula_id, acao, detalhe, professor_id) VALUES (?, 'alteração', ?, ?)",
+                     (pid, "; ".join(mudancas)[:2000], prof["id"]))
+    conn.commit()
+    r = dict(conn.execute("SELECT * FROM prematriculas WHERE id = ?", (pid,)).fetchone())
+    conn.close()
+    aviso = (f'<div style="background:#ecfdf5; color:#047857; border:1px solid #10b981; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:13px;">'
+             f'✅ Salvo{f" — {len(mudancas)} alteração(ões)" if mudancas else " (nada mudou)"}.</div>')
+    return _pm_tela_edicao(request, r, _pm_erros_dict(_pm_validar(r, staff=True)), aviso)
+
+
+@app.post("/gestao-pre-matricula/{pid}/excluir")
+def gestao_pre_matricula_excluir(request: Request, pid: int):
+    prof = get_current_professor(request)
+    if not _pode_prematricula(prof):
+        return RedirectResponse("/", status_code=303)
+    conn = get_db()
+    r = conn.execute("SELECT protocolo, aluno_nome FROM prematriculas WHERE id = ?", (pid,)).fetchone()
+    if r:
+        conn.execute("DELETE FROM prematriculas WHERE id = ?", (pid,))
+        conn.execute("INSERT INTO prematricula_historico (prematricula_id, acao, detalhe, professor_id) VALUES (?, 'exclusão', ?, ?)",
+                     (pid, f'{r["protocolo"]} — {r["aluno_nome"]}', prof["id"]))
+        conn.commit()
+    conn.close()
+    return RedirectResponse("/gestao-pre-matricula?msg=" + urllib.parse.quote("Pré-matrícula excluída."), status_code=303)
 
 
 # ==========================================
