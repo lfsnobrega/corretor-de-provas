@@ -8754,6 +8754,7 @@ def render_page(title: str, content: str, active: str = "", head_extra: str = ""
                 {nav_item("/aplicacoes", "aplicacoes", "📤", "Aplicar atividade")}
                 {nav_item("/minhas-aplicacoes", "minhas-aplicacoes", "📋", "Minhas aplicações")}
                 {nav_item("/painel-gestao", "painel-gestao", "🏛️", "Gestão de tarefas") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
+                {nav_item("/cartoes-turma-errada", "cartoes-turma-errada", "🔧", "Cartões em turma errada") if (professor and (professor.get("is_admin") or professor.get("is_gestor"))) else ""}
                 {nav_item("/escanear", "escanear", "📷", "Digitalizar")}
                 {nav_item("/simulados", "simulados", "📊", "Simulados")}
                 <div class="sidebar-section">Documento Norteador</div>
@@ -22118,6 +22119,179 @@ async def corrigir_turma_salvar(aplicacao_id: int, request: Request):
             <a href="/escanear" class="btn">📷 Digitalizar</a>
         </div>"""
     return HTMLResponse(render_page("Corrigido", content, active="aplicacoes"))
+
+
+# ============ CARTÕES EM TURMA ERRADA — VISÃO GERAL (27/11/2026) ============
+# Uma tela só com TODAS as aplicações (provas e simulados) que têm cartão de aluno de
+# outra turma, com o destino sugerido de cada um e o link para a tela de correção.
+# Também corrige automaticamente os casos "seguros" (destino único sugerido e o aluno
+# ainda sem cartão lá). Rota fora de /aplicacoes/... para não colidir com /aplicacoes/{id}.
+
+def _te_aplicacoes_com_cartao_errado(conn, tipo: str = "", ano: str = "") -> list:
+    cond, params = [], []
+    if tipo == "simulados":
+        cond.append("ap.titulo LIKE '%[SIM-%'")
+    elif tipo == "provas":
+        cond.append("COALESCE(ap.titulo, '') NOT LIKE '%[SIM-%'")
+    if ano.isdigit():
+        cond.append("t.ano_letivo = ?"); params.append(int(ano))
+    where = (" AND " + " AND ".join(cond)) if cond else ""
+    return conn.execute(f"""
+        SELECT ap.id, ap.titulo, ap.turma_id, ap.criada_em, t.nome AS turma_nome, t.ano_letivo, p.titulo AS prova_titulo,
+               COUNT(DISTINCT al.id) AS n
+        FROM aplicacoes ap
+        JOIN turmas t ON t.id = ap.turma_id
+        JOIN provas p ON p.id = ap.prova_id
+        JOIN (SELECT aplicacao_id, aluno_id FROM entregas
+              UNION SELECT DISTINCT aplicacao_id, aluno_id FROM respostas) x ON x.aplicacao_id = ap.id
+        JOIN alunos al ON al.id = x.aluno_id AND al.turma_id != ap.turma_id
+        WHERE 1=1 {where}
+        GROUP BY ap.id
+        ORDER BY t.ano_letivo DESC, ap.id DESC""", params).fetchall()
+
+
+def _te_mover_cartao(conn, origem_id: int, aluno_id: int, destino_id: int):
+    """Move entrega + respostas do aluno da aplicação de origem para a de destino (destino sem cartão)."""
+    conn.execute("DELETE FROM respostas WHERE aplicacao_id = ? AND aluno_id = ?", (destino_id, aluno_id))
+    conn.execute("UPDATE respostas SET aplicacao_id = ? WHERE aplicacao_id = ? AND aluno_id = ?", (destino_id, origem_id, aluno_id))
+    conn.execute("UPDATE entregas SET aplicacao_id = ? WHERE aplicacao_id = ? AND aluno_id = ?", (destino_id, origem_id, aluno_id))
+
+
+def _te_seguro(it) -> bool:
+    if not it["sugerida"]:
+        return False
+    alvo = next((c for c in it["cands"] if c["id"] == it["sugerida"]), None)
+    return bool(alvo) and not alvo.get("ja_tem")
+
+
+@app.get("/cartoes-turma-errada", response_class=HTMLResponse)
+def cartoes_turma_errada(request: Request, tipo: str = "", ano: str = "", msg: str = ""):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    tipo = tipo if tipo in ("simulados", "provas") else ""
+    ano = ano if str(ano).isdigit() else ""
+    conn = get_db()
+    try:
+        apls = _te_aplicacoes_com_cartao_errado(conn, tipo, ano)
+        anos = [r["ano_letivo"] for r in conn.execute("SELECT DISTINCT ano_letivo FROM turmas ORDER BY ano_letivo DESC").fetchall()]
+        titulos = {r["id"]: r["titulo"] for r in conn.execute("SELECT id, titulo FROM aplicacoes").fetchall()}
+        turma_de_apl = {r["id"]: r["turma_nome"] for r in conn.execute(
+            "SELECT a.id, t.nome AS turma_nome FROM aplicacoes a JOIN turmas t ON t.id = a.turma_id").fetchall()}
+        blocos, total, total_seguros = "", 0, 0
+        for ap in apls:
+            _apl, itens = _corrigir_turma_calcular(conn, ap["id"])
+            if not itens:
+                continue
+            total += len(itens)
+            seguros = sum(1 for it in itens if _te_seguro(it))
+            total_seguros += seguros
+            linhas = ""
+            for it in itens:
+                a = it["aluno"]
+                if it["sugerida"]:
+                    alvo = next((c for c in it["cands"] if c["id"] == it["sugerida"]), {})
+                    dest = (f'#{it["sugerida"]} · {html.escape(titulos.get(it["sugerida"]) or "")} '
+                            f'<span style="color:var(--text-muted);">({html.escape(turma_de_apl.get(it["sugerida"], ""))})</span>')
+                    if alvo.get("ja_tem"):
+                        dest += ' <span style="color:#b45309; font-weight:600;">· já tem cartão lá — decidir na correção</span>'
+                    else:
+                        dest += ' <span style="color:#16a34a; font-weight:600;">· pode corrigir automático</span>'
+                elif it["cands"]:
+                    dest = f'<span style="color:#b45309;">{len(it["cands"])} aplicações possíveis da turma dele — escolher na correção</span>'
+                else:
+                    dest = '<span style="color:var(--red);">a turma dele não tem aplicação correspondente — criar primeiro</span>'
+                linhas += (f'<tr style="border-top:1px solid var(--border);"><td style="padding:5px 8px;">{html.escape(a["nome"])}</td>'
+                           f'<td style="padding:5px 8px;">{html.escape(a["turma_nome"])}</td>'
+                           f'<td style="padding:5px 8px; text-align:center;">{it["n_resp"]}</td><td style="padding:5px 8px; font-size:12px;">{dest}</td></tr>')
+            eh_sim = "[SIM-" in (ap["titulo"] or "")
+            auto_btn = ""
+            if seguros:
+                auto_btn = (f'<form method="post" action="/cartoes-turma-errada/automatico?tipo={tipo}&ano={ano}" style="display:inline;" '
+                            f'onsubmit="return confirm(\'Mover automaticamente {seguros} cartão(ões) desta aplicação para a aplicação da turma certa?\');">'
+                            f'<input type="hidden" name="aplicacao_id" value="{ap["id"]}">'
+                            f'<button type="submit" class="btn" style="padding:4px 10px; font-size:12px;">⚡ Corrigir automático ({seguros})</button></form>')
+            blocos += f"""
+            <div class="card" style="padding:12px 16px; margin-bottom:12px;">
+                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; align-items:center;">
+                    <div><strong>{"📊 " if eh_sim else "📝 "}#{ap["id"]} · {html.escape(ap["titulo"] or ap["prova_titulo"] or "")}</strong>
+                        <div style="font-size:12px; color:var(--text-muted);">Aplicação da turma <strong>{html.escape(ap["turma_nome"])}</strong> ({ap["ano_letivo"]})
+                        · <span style="color:var(--orange); font-weight:600;">{len(itens)} cartão(ões) de aluno(s) de outra turma</span></div></div>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                        <a href="/aplicacoes/{ap["id"]}" class="btn" style="padding:4px 10px; font-size:12px;" target="_blank">Ver aplicação</a>
+                        {auto_btn}
+                        <a href="/aplicacoes/{ap["id"]}/corrigir-turma" class="btn btn-primary" style="padding:4px 10px; font-size:12px;">🔧 Corrigir</a>
+                    </div>
+                </div>
+                <div style="overflow-x:auto; margin-top:8px;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
+                    <thead><tr style="background:var(--bg-subtle);"><th style="padding:5px 8px; text-align:left;">Aluno</th>
+                    <th style="padding:5px 8px; text-align:left;">Turma do aluno</th><th style="padding:5px 8px;">Respostas</th>
+                    <th style="padding:5px 8px; text-align:left;">Destino sugerido</th></tr></thead><tbody>{linhas}</tbody></table></div>
+            </div>"""
+    finally:
+        conn.close()
+
+    opts_tipo = "".join(f'<option value="{v}"{" selected" if tipo == v else ""}>{r}</option>'
+                        for v, r in (("", "Provas e simulados"), ("simulados", "Só simulados"), ("provas", "Só provas/atividades")))
+    opts_ano = '<option value="">Todos os anos</option>' + "".join(f'<option value="{a}"{" selected" if ano == str(a) else ""}>{a}</option>' for a in anos)
+    msg_html = ""
+    if msg:
+        msg_html = (f'<div style="background:#ecfdf5; color:#047857; border:1px solid #10b981; padding:10px 14px; border-radius:6px; '
+                    f'margin-bottom:12px; font-size:13px;">{html.escape(msg)}</div>')
+    auto_geral = ""
+    if total_seguros:
+        auto_geral = (f'<form method="post" action="/cartoes-turma-errada/automatico?tipo={tipo}&ano={ano}" style="display:inline;" '
+                      f'onsubmit="return confirm(\'Mover automaticamente os {total_seguros} cartão(ões) seguros de TODAS as aplicações listadas?\');">'
+                      f'<button type="submit" class="btn btn-primary">⚡ Corrigir automaticamente os casos seguros ({total_seguros})</button></form>')
+    if not blocos:
+        blocos = ('<div class="card" style="padding:24px; text-align:center; color:var(--text-muted);">✅ Nenhum cartão em turma errada'
+                  + (" com esses filtros" if (tipo or ano) else "") + '.</div>')
+    content = f"""
+        <div class="page-header"><h1>🔧 Cartões em turma errada</h1>
+            <p class="subtitle">Todas as aplicações (provas e simulados) que têm cartão digitalizado de aluno de <strong>outra turma</strong>.</p></div>
+        {msg_html}
+        <form method="get" class="card" style="padding:12px 14px; margin-bottom:12px; display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+            <label style="margin:0; flex:1 1 200px;">Tipo<select name="tipo">{opts_tipo}</select></label>
+            <label style="margin:0; flex:1 1 160px;">Ano letivo<select name="ano">{opts_ano}</select></label>
+            <button type="submit" class="btn">Filtrar</button>
+        </form>
+        <div class="card" style="padding:12px 16px; margin-bottom:12px; display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
+            <div style="font-size:14px;"><strong>{total}</strong> cartão(ões) em <strong>{len([1 for a in apls])}</strong> aplicação(ões) ·
+                <span style="color:#16a34a; font-weight:600;">{total_seguros} podem ser corrigidos automaticamente</span></div>
+            {auto_geral}
+        </div>
+        <div class="tip" style="font-size:12px; margin-bottom:12px;">“Pode corrigir automático” = o sistema encontrou <strong>uma única</strong> aplicação da turma
+        do aluno que corresponde a esta (mesma prova, ou mesmo Dia/Trimestre do simulado) e o aluno <strong>ainda não tem cartão</strong> lá.
+        Os outros casos (já tem cartão no destino, várias opções ou nenhuma) ficam para você decidir em <strong>🔧 Corrigir</strong>.</div>
+        {blocos}"""
+    return HTMLResponse(render_page("Cartões em turma errada", content, active="cartoes-turma-errada"))
+
+
+@app.post("/cartoes-turma-errada/automatico", response_class=HTMLResponse)
+async def cartoes_turma_errada_automatico(request: Request, tipo: str = "", ano: str = ""):
+    prof = get_current_professor(request)
+    if not prof or not (prof.get("is_admin") or prof.get("is_gestor")):
+        return RedirectResponse("/", status_code=303)
+    form = await request.form()
+    so_uma = str(form.get("aplicacao_id") or "").strip()
+    tipo = tipo if tipo in ("simulados", "provas") else ""
+    ano = ano if str(ano).isdigit() else ""
+    conn = get_db()
+    movidos = 0
+    try:
+        ids = [int(so_uma)] if so_uma.isdigit() else [r["id"] for r in _te_aplicacoes_com_cartao_errado(conn, tipo, ano)]
+        for apl_id in ids:
+            _apl, itens = _corrigir_turma_calcular(conn, apl_id)
+            for it in itens or []:
+                if _te_seguro(it):
+                    _te_mover_cartao(conn, apl_id, it["aluno"]["id"], it["sugerida"])
+                    movidos += 1
+        conn.commit()
+    finally:
+        conn.close()
+    msg = f"{movidos} cartão(ões) movido(s) para a aplicação da turma certa."
+    return RedirectResponse("/cartoes-turma-errada?" + urllib.parse.urlencode({"tipo": tipo, "ano": ano, "msg": msg}), status_code=303)
+
 
 
 # ==========================================
